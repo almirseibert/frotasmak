@@ -22,6 +22,10 @@ const port = process.env.PORT || 3001;
 
 app.use(express.json());
 app.use(cors());
+// Rota de teste para o caminho raiz
+app.get('/', (req, res) => {
+  res.status(200).send('API está funcionando!');
+});
 
 // Conexão com o banco de dados
 const db = require('./database');
