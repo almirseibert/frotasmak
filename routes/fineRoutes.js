@@ -6,6 +6,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 router.use(authMiddleware);
 
+// Rotas CRUD padrão
 router.get('/', fineController.getAllFines);
 router.get('/:id', fineController.getFineById);
 router.post('/', fineController.createFine);

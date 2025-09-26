@@ -4,22 +4,21 @@ const router = express.Router();
 const vehicleController = require('../controllers/vehicleController');
 const authMiddleware = require('../middlewares/authMiddleware');
 
-// Proteger todas as rotas com o middleware de autenticação
 router.use(authMiddleware);
 
-// Rota para listar todos os veículos
+// Rotas CRUD padrão
 router.get('/', vehicleController.getAllVehicles);
-
-// Rota para obter um único veículo por ID
 router.get('/:id', vehicleController.getVehicleById);
-
-// Rota para criar um novo veículo
 router.post('/', vehicleController.createVehicle);
-
-// Rota para atualizar um veículo existente
 router.put('/:id', vehicleController.updateVehicle);
-
-// Rota para deletar um veículo
 router.delete('/:id', vehicleController.deleteVehicle);
+
+// Novas rotas para alocação e manutenção
+router.post('/:id/obra/allocate', vehicleController.allocateToObra);
+router.put('/:id/obra/deallocate', vehicleController.deallocateFromObra);
+router.post('/:id/operational/assign', vehicleController.assignToOperational);
+router.put('/:id/operational/unassign', vehicleController.unassignFromOperational);
+router.post('/:id/maintenance/start', vehicleController.startMaintenance);
+router.put('/:id/maintenance/end', vehicleController.endMaintenance);
 
 module.exports = router;

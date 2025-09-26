@@ -39,6 +39,7 @@ const getPartnerById = async (req, res) => {
 const createPartner = async (req, res) => {
     const data = req.body;
     
+    // Converte campos complexos para strings JSON antes de inserir
     if (data.fuel_prices) data.fuel_prices = JSON.stringify(data.fuel_prices);
     if (data.ultima_alteracao) data.ultima_alteracao = JSON.stringify(data.ultima_alteracao);
 
@@ -61,6 +62,7 @@ const updatePartner = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
     
+    // Converte campos complexos para strings JSON antes de atualizar
     if (data.fuel_prices) data.fuel_prices = JSON.stringify(data.fuel_prices);
     if (data.ultima_alteracao) data.ultima_alteracao = JSON.stringify(data.ultima_alteracao);
 
@@ -75,6 +77,19 @@ const updatePartner = async (req, res) => {
     } catch (error) {
         console.error('Erro ao atualizar parceiro:', error);
         res.status(500).json({ error: 'Erro ao atualizar parceiro' });
+    }
+};
+
+// --- UPDATE: Atualizar apenas os preços dos combustíveis ---
+const updateFuelPrices = async (req, res) => {
+    const { id } = req.params;
+    const prices = req.body;
+    try {
+        await db.execute('UPDATE partners SET fuel_prices = ? WHERE id = ?', [JSON.stringify(prices), id]);
+        res.json({ message: 'Preços de combustível atualizados com sucesso.' });
+    } catch (error) {
+        console.error('Erro ao atualizar preços:', error);
+        res.status(500).json({ error: 'Erro ao atualizar os preços.' });
     }
 };
 
@@ -94,5 +109,6 @@ module.exports = {
     getPartnerById,
     createPartner,
     updatePartner,
+    updateFuelPrices,
     deletePartner,
 };

@@ -1,82 +1,173 @@
 // controllers/orderController.js
 const db = require('../database');
 
-const parseJsonFields = (item) => {
-    if (!item) return null;
-    const newItem = { ...item };
-    if (newItem.items) newItem.items = JSON.parse(newItem.items);
-    if (newItem.payment) newItem.payment = JSON.parse(newItem.payment);
-    if (newItem.createdBy) newItem.createdBy = JSON.parse(newItem.createdBy);
-    if (newItem.editedBy) newItem.editedBy = JSON.parse(newItem.editedBy);
-    return newItem;
+// --- Função Auxiliar para Conversão de JSON ---
+const parseOrderJsonFields = (order) => {
+    if (!order) return null;
+    const newOrder = { ...order };
+    if (newOrder.items) newOrder.items = JSON.parse(newOrder.items);
+    if (newOrder.payment) newOrder.payment = JSON.parse(newOrder.payment);
+    if (newOrder.createdBy) newOrder.createdBy = JSON.parse(newOrder.createdBy);
+    if (newOrder.editedBy) newOrder.editedBy = JSON.parse(newOrder.editedBy);
+    return newOrder;
 };
 
+// --- READ: Obter todas as ordens ---
 const getAllOrders = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM orders');
-        res.json(rows.map(parseJsonFields));
+        const [rows] = await db.execute('SELECT * FROM orders ORDER BY orderNumber DESC');
+        res.json(rows.map(parseOrderJsonFields));
     } catch (error) {
         console.error('Erro ao buscar ordens:', error);
         res.status(500).json({ error: 'Erro ao buscar ordens' });
     }
 };
 
+// --- READ: Obter uma única ordem por ID ---
 const getOrderById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM orders WHERE id = ?', [req.params.id]);
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Ordem não encontrada' });
         }
-        res.json(parseJsonFields(rows[0]));
+        res.json(parseOrderJsonFields(rows[0]));
     } catch (error) {
         console.error('Erro ao buscar ordem:', error);
         res.status(500).json({ error: 'Erro ao buscar ordem' });
     }
 };
 
+// --- CREATE: Criar uma nova ordem ---
 const createOrder = async (req, res) => {
     const data = req.body;
-    if (data.items) data.items = JSON.stringify(data.items);
-    if (data.payment) data.payment = JSON.stringify(data.payment);
-    if (data.createdBy) data.createdBy = JSON.stringify(data.createdBy);
-    if (data.editedBy) data.editedBy = JSON.stringify(data.editedBy);
-
-    const fields = Object.keys(data);
-    const values = Object.values(data);
-    const placeholders = fields.map(() => '?').join(', ');
-    const query = `INSERT INTO orders (${fields.join(', ')}) VALUES (${placeholders})`;
-
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
     try {
-        const [result] = await db.execute(query, values);
-        res.status(201).json({ id: result.insertId, ...req.body });
+        const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "purchaseOrderCounter" FOR UPDATE');
+        const newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
+
+        const orderData = {
+            ...data,
+            orderNumber: newOrderNumber,
+            date: new Date(data.date),
+            totalValue: data.totalValue || 0,
+            status: data.status,
+            items: JSON.stringify(data.items),
+            payment: JSON.stringify(data.payment),
+            createdBy: JSON.stringify(data.createdBy),
+            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
+        };
+        const [result] = await connection.execute('INSERT INTO orders SET ?', [orderData]);
+        const orderId = result.insertId;
+
+        await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "purchaseOrderCounter"', [newOrderNumber]);
+
+        if (orderData.status !== 'Pendente de Valor') {
+            const expenseData = {
+                orderId: orderId,
+                description: `Ordem Compra/Serviço #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier}`,
+                amount: orderData.totalValue,
+                obraId: data.obraId,
+                category: 'Ordem de Compra/Serviço',
+                createdAt: new Date(),
+                createdBy: orderData.createdBy,
+            };
+            await connection.execute('INSERT INTO expenses SET ?', [expenseData]);
+        }
+        
+        await connection.commit();
+        res.status(201).json({ id: orderId, orderNumber: newOrderNumber });
     } catch (error) {
+        await connection.rollback();
         console.error('Erro ao criar ordem:', error);
-        res.status(500).json({ error: 'Erro ao criar ordem' });
+        res.status(500).json({ error: 'Falha ao salvar a ordem.' });
+    } finally {
+        connection.release();
     }
 };
 
+
+// --- UPDATE: Atualizar uma ordem existente ---
 const updateOrder = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
-    if (data.items) data.items = JSON.stringify(data.items);
-    if (data.payment) data.payment = JSON.stringify(data.payment);
-    if (data.createdBy) data.createdBy = JSON.stringify(data.createdBy);
-    if (data.editedBy) data.editedBy = JSON.stringify(data.editedBy);
-
-    const fields = Object.keys(data).filter(key => key !== 'id');
-    const values = Object.values(data);
-    const setClause = fields.map(field => `${field} = ?`).join(', ');
-    const query = `UPDATE orders SET ${setClause} WHERE id = ?`;
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
 
     try {
-        await db.execute(query, [...values, id]);
-        res.json({ message: 'Ordem atualizada com sucesso' });
+        const [orderRows] = await connection.execute('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id]);
+        const originalOrder = parseOrderJsonFields(orderRows[0]);
+        const newStatus = data.status;
+
+        const orderUpdateData = {
+            ...data,
+            totalValue: data.totalValue || 0,
+            date: new Date(data.date),
+            items: JSON.stringify(data.items),
+            payment: JSON.stringify(data.payment),
+            editedBy: JSON.stringify(data.editedBy),
+        };
+        await connection.execute('UPDATE orders SET ? WHERE id = ?', [orderUpdateData, id]);
+
+        if (originalOrder.status === 'Pendente de Valor' && newStatus !== 'Pendente de Valor') {
+            const expenseData = {
+                orderId: id,
+                description: `Ordem Compra/Serviço #${String(originalOrder.orderNumber).padStart(6, '0')} - ${data.supplier}`,
+                amount: orderUpdateData.totalValue,
+                obraId: data.obraId,
+                category: 'Ordem de Compra/Serviço',
+                createdAt: new Date(),
+                createdBy: orderUpdateData.createdBy,
+            };
+            await connection.execute('INSERT INTO expenses SET ?', [expenseData]);
+        } else if (originalOrder.status !== 'Pendente de Valor' && newStatus !== 'Pendente de Valor') {
+            await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ? WHERE orderId = ?', [
+                orderUpdateData.totalValue,
+                `Ordem Compra/Serviço #${String(originalOrder.orderNumber).padStart(6, '0')} - ${data.supplier}`,
+                data.obraId,
+                id,
+            ]);
+        }
+
+        await connection.commit();
+        res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
     } catch (error) {
+        await connection.rollback();
         console.error('Erro ao atualizar ordem:', error);
-        res.status(500).json({ error: 'Erro ao atualizar ordem' });
+        res.status(500).json({ error: 'Falha ao atualizar a ordem.' });
+    } finally {
+        connection.release();
     }
 };
 
+// --- ROTA: Cancelar uma ordem ---
+const cancelOrder = async (req, res) => {
+    const { id } = req.params;
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        const [orderRows] = await connection.execute('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id]);
+        const originalOrder = parseOrderJsonFields(orderRows[0]);
+        
+        await connection.execute('UPDATE orders SET status = "Cancelada" WHERE id = ?', [id]);
+
+        if (originalOrder.status !== 'Pendente de Valor') {
+            await connection.execute('DELETE FROM expenses WHERE orderId = ?', [id]);
+        }
+
+        await connection.commit();
+        res.status(200).json({ message: 'Ordem cancelada com sucesso.' });
+    } catch (error) {
+        await connection.rollback();
+        console.error('Erro ao cancelar ordem:', error);
+        res.status(500).json({ error: 'Falha ao cancelar a ordem.' });
+    } finally {
+        connection.release();
+    }
+};
+
+// --- DELETE: Deletar uma ordem ---
 const deleteOrder = async (req, res) => {
     try {
         await db.execute('DELETE FROM orders WHERE id = ?', [req.params.id]);
@@ -93,4 +184,5 @@ module.exports = {
     createOrder,
     updateOrder,
     deleteOrder,
+    cancelOrder,
 };

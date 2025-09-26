@@ -16,6 +16,7 @@ const orderRoutes = require('./routes/orderRoutes');
 const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
+const adminRoutes = require('./routes/adminRoutes'); // NOVO: Rotas de admin
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -53,6 +54,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/counters', counterRoutes);
 app.use('/api/inactivityAlerts', inactivityAlertRoutes);
 app.use('/api/registrationRequests', registrationRequestRoutes);
+app.use('/api/admin', adminRoutes); // NOVO: Rota de admin
 
 app.listen(port, () => {
     console.log(`Servidor rodando em http://localhost:${port}`);

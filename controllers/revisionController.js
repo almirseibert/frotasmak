@@ -1,39 +1,46 @@
 // controllers/revisionController.js
 const db = require('../database');
 
-const parseJsonFields = (item) => {
-    if (!item) return null;
-    const newItem = { ...item };
-    if (newItem.ultimaAlteracao) newItem.ultimaAlteracao = JSON.parse(newItem.ultimaAlteracao);
-    return newItem;
+// --- Função Auxiliar para Conversão de JSON ---
+const parseRevisionJsonFields = (revision) => {
+    if (!revision) return null;
+    const newRevision = { ...revision };
+    if (newRevision.historico) newRevision.historico = JSON.parse(newRevision.historico);
+    if (newRevision.ultimaAlteracao) newRevision.ultimaAlteracao = JSON.parse(newRevision.ultimaAlteracao);
+    return newRevision;
 };
 
+// --- READ: Obter todas as revisões ---
 const getAllRevisions = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM revisions');
-        res.json(rows.map(parseJsonFields));
+        res.json(rows.map(parseRevisionJsonFields));
     } catch (error) {
         console.error('Erro ao buscar revisões:', error);
         res.status(500).json({ error: 'Erro ao buscar revisões' });
     }
 };
 
+// --- READ: Obter uma única revisão por ID ---
 const getRevisionById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM revisions WHERE id = ?', [req.params.id]);
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Revisão não encontrada' });
         }
-        res.json(parseJsonFields(rows[0]));
+        res.json(parseRevisionJsonFields(rows[0]));
     } catch (error) {
         console.error('Erro ao buscar revisão:', error);
         res.status(500).json({ error: 'Erro ao buscar revisão' });
     }
 };
 
+// --- CREATE: Criar uma nova revisão ---
 const createRevision = async (req, res) => {
     const data = req.body;
+    if (data.historico) data.historico = JSON.stringify(data.historico);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
+
     const fields = Object.keys(data);
     const values = Object.values(data);
     const placeholders = fields.map(() => '?').join(', ');
@@ -48,10 +55,13 @@ const createRevision = async (req, res) => {
     }
 };
 
+// --- UPDATE: Atualizar uma revisão existente ---
 const updateRevision = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
+    if (data.historico) data.historico = JSON.stringify(data.historico);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
+
     const fields = Object.keys(data).filter(key => key !== 'id');
     const values = Object.values(data);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
@@ -66,6 +76,43 @@ const updateRevision = async (req, res) => {
     }
 };
 
+// --- ROTA: Concluir uma revisão ---
+const completeRevision = async (req, res) => {
+    const { id } = req.params;
+    const { historyEntry } = req.body;
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        const [revisionRows] = await connection.execute('SELECT historico FROM revisions WHERE id = ? FOR UPDATE', [id]);
+        const revision = parseRevisionJsonFields(revisionRows[0]);
+
+        const updatedHistorico = revision.historico || [];
+        updatedHistorico.push(historyEntry);
+
+        const revisionUpdateData = {
+            proximaRevisaoData: null,
+            proximaRevisaoOdometro: 0,
+            avisoAntecedenciaDias: 0,
+            avisoAntecedenciaKmHr: 0,
+            descricao: '',
+            historico: JSON.stringify(updatedHistorico)
+        };
+
+        await connection.execute('UPDATE revisions SET ? WHERE id = ?', [revisionUpdateData, id]);
+        
+        await connection.commit();
+        res.status(200).json({ message: 'Revisão concluída com sucesso!' });
+    } catch (error) {
+        await connection.rollback();
+        console.error("Erro ao concluir revisão:", error);
+        res.status(500).json({ error: 'Falha ao concluir a revisão.' });
+    } finally {
+        connection.release();
+    }
+};
+
+// --- DELETE: Deletar uma revisão ---
 const deleteRevision = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
@@ -81,5 +128,6 @@ module.exports = {
     getRevisionById,
     createRevision,
     updateRevision,
+    completeRevision,
     deleteRevision,
 };

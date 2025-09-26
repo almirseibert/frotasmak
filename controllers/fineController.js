@@ -1,40 +1,45 @@
 // controllers/fineController.js
 const db = require('../database');
 
-const parseJsonFields = (item) => {
-    if (!item) return null;
-    const newItem = { ...item };
-    if (newItem.vehicleInfo) newItem.vehicleInfo = JSON.parse(newItem.vehicleInfo);
-    if (newItem.employeeInfo) newItem.employeeInfo = JSON.parse(newItem.employeeInfo);
-    if (newItem.ultimaAlteracao) newItem.ultimaAlteracao = JSON.parse(newItem.ultimaAlteracao);
-    return newItem;
+// --- Função Auxiliar para Conversão de JSON ---
+const parseFineJsonFields = (fine) => {
+    if (!fine) return null;
+    const newFine = { ...fine };
+    if (newFine.vehicleInfo) newFine.vehicleInfo = JSON.parse(newFine.vehicleInfo);
+    if (newFine.employeeInfo) newFine.employeeInfo = JSON.parse(newFine.employeeInfo);
+    if (newFine.ultimaAlteracao) newFine.ultimaAlteracao = JSON.parse(newFine.ultimaAlteracao);
+    return newFine;
 };
 
+// --- READ: Obter todas as multas ---
 const getAllFines = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM fines');
-        res.json(rows.map(parseJsonFields));
+        res.json(rows.map(parseFineJsonFields));
     } catch (error) {
         console.error('Erro ao buscar multas:', error);
         res.status(500).json({ error: 'Erro ao buscar multas' });
     }
 };
 
+// --- READ: Obter uma única multa por ID ---
 const getFineById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM fines WHERE id = ?', [req.params.id]);
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Multa não encontrada' });
         }
-        res.json(parseJsonFields(rows[0]));
+        res.json(parseFineJsonFields(rows[0]));
     } catch (error) {
         console.error('Erro ao buscar multa:', error);
         res.status(500).json({ error: 'Erro ao buscar multa' });
     }
 };
 
+// --- CREATE: Criar uma nova multa ---
 const createFine = async (req, res) => {
     const data = req.body;
+    
     if (data.vehicleInfo) data.vehicleInfo = JSON.stringify(data.vehicleInfo);
     if (data.employeeInfo) data.employeeInfo = JSON.stringify(data.employeeInfo);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
@@ -53,6 +58,7 @@ const createFine = async (req, res) => {
     }
 };
 
+// --- UPDATE: Atualizar uma multa existente ---
 const updateFine = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -74,6 +80,7 @@ const updateFine = async (req, res) => {
     }
 };
 
+// --- DELETE: Deletar uma multa ---
 const deleteFine = async (req, res) => {
     try {
         await db.execute('DELETE FROM fines WHERE id = ?', [req.params.id]);

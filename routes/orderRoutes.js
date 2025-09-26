@@ -6,10 +6,14 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 router.use(authMiddleware);
 
+// Rotas CRUD padrão
 router.get('/', orderController.getAllOrders);
 router.get('/:id', orderController.getOrderById);
 router.post('/', orderController.createOrder);
 router.put('/:id', orderController.updateOrder);
 router.delete('/:id', orderController.deleteOrder);
+
+// Rota de cancelamento
+router.put('/:id/cancel', orderController.cancelOrder);
 
 module.exports = router;
