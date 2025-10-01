@@ -49,6 +49,20 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
     }
 };
 
+// --- Função para Listar Todas as Despesas (Novo endpoint que faltava) ---
+const listExpenses = async (req, res) => {
+    try {
+        // Para evitar o erro 500, certifique-se de que a tabela 'expenses' existe
+        const [rows] = await db.execute('SELECT * FROM expenses ORDER BY createdAt DESC'); 
+        res.json(rows);
+    } catch (error) {
+        // Se o erro for "Tabela não encontrada", o 500 aqui ajudará no debug
+        console.error("Erro ao listar despesas:", error);
+        res.status(500).json({ error: 'Erro interno ao listar despesas' });
+    }
+};
+
 module.exports = {
     createOrUpdateWeeklyFuelExpense,
+    listExpenses, // Exporta a nova função de listagem
 };
