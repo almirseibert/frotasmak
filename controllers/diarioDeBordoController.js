@@ -3,28 +3,57 @@ const db = require('../database');
 const parseVehicleJsonFields = require('./vehicleController').parseVehicleJsonFields;
 const parseEmployeeJsonFields = require('./employeeController').parseEmployeeJsonFields;
 
-// --- Função Auxiliar para Conversão de JSON ---
+// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro ---
+const parseJsonSafe = (field, key) => {
+    if (!field) return null;
+    try {
+        return JSON.parse(field);
+    } catch (e) {
+        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor:`, field);
+        // Retorna null ou objeto vazio em caso de erro, evitando quebrar a aplicação
+        return null; 
+    }
+};
+
 const parseDiarioDeBordoJsonFields = (log) => {
     if (!log) return null;
     const newLog = { ...log };
-    if (newLog.startReadings) newLog.startReadings = JSON.parse(newLog.startReadings);
-    if (newLog.endReadings) newLog.endReadings = JSON.parse(newLog.endReadings);
-    if (newLog.breaks) newLog.breaks = JSON.parse(newLog.breaks);
-    if (newLog.createdBy) newLog.createdBy = JSON.parse(newLog.createdBy);
+    
+    newLog.startReadings = parseJsonSafe(newLog.startReadings, 'startReadings');
+    newLog.endReadings = parseJsonSafe(newLog.endReadings, 'endReadings');
+    newLog.breaks = parseJsonSafe(newLog.breaks, 'breaks');
+    newLog.createdBy = parseJsonSafe(newLog.createdBy, 'createdBy');
+    
     return newLog;
 };
 
-// --- READ: Obter todos os logs com filtros de data ---
+// --- READ: Obter todos os logs com filtros de data (Correção de Undefined) ---
 const getAllDiarioDeBordo = async (req, res) => {
+    // Definindo datas padrão defensivas para evitar 'undefined' no DB.execute.
+    // Se startDate/endDate não forem fornecidas, a query deve funcionar.
+    // Assumindo que o frontend enviará ou que o uso de IS NOT NULL é melhor se não houver filtro.
     const { startDate, endDate } = req.query;
+    
     try {
-        const [rows] = await db.execute('SELECT * FROM diario_de_bordo WHERE logDate BETWEEN ? AND ? ORDER BY logDate DESC', [startDate, endDate]);
+        let query = 'SELECT * FROM diario_de_bordo';
+        let params = [];
+        
+        // Se ambos os filtros de data existirem, aplica a cláusula WHERE
+        if (startDate && endDate) {
+            query += ' WHERE logDate BETWEEN ? AND ?';
+            params.push(startDate, endDate);
+        }
+        
+        query += ' ORDER BY logDate DESC';
+
+        const [rows] = await db.execute(query, params);
         res.json(rows.map(parseDiarioDeBordoJsonFields));
     } catch (error) {
         console.error('Erro ao buscar diário de bordo:', error);
         res.status(500).json({ error: 'Erro ao buscar diário de bordo' });
     }
 };
+
 
 // --- READ: Obter um único log por ID ---
 const getDiarioDeBordoById = async (req, res) => {
@@ -43,6 +72,7 @@ const getDiarioDeBordoById = async (req, res) => {
 // --- CREATE: Criar um novo log (offline sync) ---
 const createDiarioDeBordo = async (req, res) => {
     const data = req.body;
+    // O backend NÃO deve quebrar por dados corrompidos
     if (data.startReadings) data.startReadings = JSON.stringify(data.startReadings);
     if (data.endReadings) data.endReadings = JSON.stringify(data.endReadings);
     if (data.breaks) data.breaks = JSON.stringify(data.breaks);
@@ -156,7 +186,7 @@ const endJourney = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        const [activeLogRows] = await connection.execute('SELECT startTime FROM diario_de_bordo WHERE id = ?', [id]);
+        const [activeLogRows] = await connection.execute('SELECT startTime, vehicleId FROM diario_de_bordo WHERE id = ?', [id]);
         const activeLog = parseDiarioDeBordoJsonFields(activeLogRows[0]);
         if (!activeLog) {
             await connection.rollback();
