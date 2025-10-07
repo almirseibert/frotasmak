@@ -1,15 +1,44 @@
 // controllers/obraController.js
 const db = require('../database');
 
+// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
+const parseJsonSafe = (field, key) => {
+    if (field === null || typeof field === 'undefined') return null;
+    
+    // Se já for um objeto/array (por exemplo, se o driver do MySQL já parseou a coluna JSON)
+    if (typeof field === 'object') return field; 
+    
+    // Garante que é uma string antes de tentar o parse
+    if (typeof field !== 'string') return field;
+
+    try {
+        // Tenta fazer o parse da string
+        const parsed = JSON.parse(field);
+        
+        // Verifica se o resultado do parse é um objeto/array válido
+        if (typeof parsed === 'object' && parsed !== null) {
+            return parsed;
+        }
+        return null; 
+    } catch (e) {
+        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
+        // Retorna null em caso de erro, impedindo a quebra da aplicação.
+        return null; 
+    }
+};
+
 // --- Função Auxiliar para Conversão de JSON ---
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
-    if (newObra.historicoVeiculos) newObra.historicoVeiculos = JSON.parse(newObra.historicoVeiculos);
-    if (newObra.horasContratadasPorTipo) newObra.horasContratadasPorTipo = JSON.parse(newObra.horasContratadasPorTipo);
-    if (newObra.sectors) newObra.sectors = JSON.parse(newObra.sectors);
-    if (newObra.alocadoEm) newObra.alocadoEm = JSON.parse(newObra.alocadoEm);
-    if (newObra.ultimasAlteracoes) newObra.ultimasAlteracoes = JSON.parse(newObra.ultimasAlteracoes);
+    
+    // Aplicação da função segura:
+    newObra.historicoVeiculos = parseJsonSafe(newObra.historicoVeiculos, 'historicoVeiculos');
+    newObra.horasContratadasPorTipo = parseJsonSafe(newObra.horasContratadasPorTipo, 'horasContratadasPorTipo');
+    newObra.sectors = parseJsonSafe(newObra.sectors, 'sectors');
+    newObra.alocadoEm = parseJsonSafe(newObra.alocadoEm, 'alocadoEm');
+    newObra.ultimasAlteracoes = parseJsonSafe(newObra.ultimasAlteracoes, 'ultimasAlteracoes');
+    
     return newObra;
 };
 
@@ -104,4 +133,5 @@ module.exports = {
     createObra,
     updateObra,
     deleteObra,
+    parseObraJsonFields // Exportar para uso potencial em outros controllers
 };

@@ -1,14 +1,44 @@
 // controllers/orderController.js
 const db = require('../database');
 
+// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
+const parseJsonSafe = (field, key) => {
+    if (field === null || typeof field === 'undefined') return null;
+    
+    // Se já for um objeto/array (por exemplo, se o driver do MySQL já parseou a coluna JSON)
+    if (typeof field === 'object') return field; 
+    
+    // Garante que é uma string antes de tentar o parse
+    if (typeof field !== 'string') return field;
+
+    try {
+        // Tenta fazer o parse da string
+        const parsed = JSON.parse(field);
+        
+        // Verifica se o resultado do parse é um objeto/array válido
+        if (typeof parsed === 'object' && parsed !== null) {
+            return parsed;
+        }
+        return null; 
+    } catch (e) {
+        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
+        // Retorna null em caso de erro, impedindo a quebra da aplicação.
+        return null; 
+    }
+};
+
+
 // --- Função Auxiliar para Conversão de JSON ---
 const parseOrderJsonFields = (order) => {
     if (!order) return null;
     const newOrder = { ...order };
-    if (newOrder.items) newOrder.items = JSON.parse(newOrder.items);
-    if (newOrder.payment) newOrder.payment = JSON.parse(newOrder.payment);
-    if (newOrder.createdBy) newOrder.createdBy = JSON.parse(newOrder.createdBy);
-    if (newOrder.editedBy) newOrder.editedBy = JSON.parse(newOrder.editedBy);
+    
+    // Aplicação da função segura:
+    newOrder.items = parseJsonSafe(newOrder.items, 'items');
+    newOrder.payment = parseJsonSafe(newOrder.payment, 'payment');
+    newOrder.createdBy = parseJsonSafe(newOrder.createdBy, 'createdBy');
+    newOrder.editedBy = parseJsonSafe(newOrder.editedBy, 'editedBy');
+
     return newOrder;
 };
 
@@ -52,6 +82,7 @@ const createOrder = async (req, res) => {
             date: new Date(data.date),
             totalValue: data.totalValue || 0,
             status: data.status,
+            // JSON.stringify é mantido para garantir que os dados sejam salvos corretamente no MySQL
             items: JSON.stringify(data.items),
             payment: JSON.stringify(data.payment),
             createdBy: JSON.stringify(data.createdBy),
@@ -96,6 +127,7 @@ const updateOrder = async (req, res) => {
 
     try {
         const [orderRows] = await connection.execute('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id]);
+        // Garante que originalOrder seja parseado com segurança
         const originalOrder = parseOrderJsonFields(orderRows[0]);
         const newStatus = data.status;
 

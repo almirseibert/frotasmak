@@ -1,13 +1,52 @@
 // controllers/vehicleController.js
 const db = require('../database');
 
+// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
+const parseJsonSafe = (field, key) => {
+    if (field === null || typeof field === 'undefined') return null;
+    
+    // Se já for um objeto/array (por exemplo, se o driver do MySQL já parseou a coluna JSON)
+    if (typeof field === 'object') return field; 
+    
+    // Garante que é uma string antes de tentar o parse
+    if (typeof field !== 'string') return field;
+
+    try {
+        // Tenta fazer o parse da string
+        const parsed = JSON.parse(field);
+        
+        // Verifica se o resultado do parse é um objeto/array válido
+        if (typeof parsed === 'object' && parsed !== null) {
+            return parsed;
+        }
+        return null; 
+    } catch (e) {
+        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
+        // Retorna null em caso de erro, impedindo a quebra da aplicação.
+        return null; 
+    }
+};
+
 // --- Funções Auxiliares para JSON ---
 const parseVehicleJsonFields = (vehicle) => {
     if (!vehicle) return null;
     const newVehicle = { ...vehicle };
-    if (newVehicle.fuelLevels) newVehicle.fuelLevels = JSON.parse(newVehicle.fuelLevels);
-    if (newVehicle.alocadoEm) newVehicle.alocadoEm = JSON.parse(newVehicle.alocadoEm);
-    if (newVehicle.history) newVehicle.history = JSON.parse(newVehicle.history);
+    
+    // Aplicação da função segura:
+    newVehicle.fuelLevels = parseJsonSafe(newVehicle.fuelLevels, 'fuelLevels');
+    newVehicle.alocadoEm = parseJsonSafe(newVehicle.alocadoEm, 'alocadoEm');
+    newVehicle.history = parseJsonSafe(newVehicle.history, 'history');
+    
+    // O campo maintenanceLocation não está sendo parseado aqui, mas é usado abaixo na rota
+    if (newVehicle.maintenanceLocation && typeof newVehicle.maintenanceLocation === 'string') {
+        newVehicle.maintenanceLocation = parseJsonSafe(newVehicle.maintenanceLocation, 'maintenanceLocation');
+    }
+    
+    // O campo operationalAssignment não está sendo parseado aqui, mas é usado abaixo na rota
+    if (newVehicle.operationalAssignment && typeof newVehicle.operationalAssignment === 'string') {
+        newVehicle.operationalAssignment = parseJsonSafe(newVehicle.operationalAssignment, 'operationalAssignment');
+    }
+    
     return newVehicle;
 };
 
@@ -17,6 +56,7 @@ const getAllVehicles = async (req, res) => {
         const [rows] = await db.execute('SELECT * FROM vehicles');
         res.json(rows.map(parseVehicleJsonFields));
     } catch (error) {
+        console.error('Erro ao buscar veículos:', error); // Adicionado log para debug
         res.status(500).json({ error: 'Erro ao buscar veículos' });
     }
 };
@@ -28,12 +68,10 @@ const getVehicleById = async (req, res) => {
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Veículo não encontrado' });
         }
-        const vehicle = rows[0];
-        if (vehicle.fuelLevels) vehicle.fuelLevels = JSON.parse(vehicle.fuelLevels);
-        if (vehicle.alocadoEm) vehicle.alocadoEm = JSON.parse(vehicle.alocadoEm);
-        if (vehicle.history) vehicle.history = JSON.parse(vehicle.history);
-        res.json(vehicle);
+        // Aplica o parser seguro ao resultado da busca
+        res.json(parseVehicleJsonFields(rows[0]));
     } catch (error) {
+        console.error('Erro ao buscar veículo:', error); // Adicionado log para debug
         res.status(500).json({ error: 'Erro ao buscar veículo' });
     }
 };
@@ -41,6 +79,7 @@ const getVehicleById = async (req, res) => {
 // --- CREATE: Criar um novo veículo ---
 const createVehicle = async (req, res) => {
     const data = req.body;
+    // JSON.stringify é mantido
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.history) data.history = JSON.stringify(data.history);
@@ -54,6 +93,7 @@ const createVehicle = async (req, res) => {
         const [result] = await db.execute(query, values);
         res.status(201).json({ id: result.insertId, ...req.body });
     } catch (error) {
+        console.error('Erro ao criar veículo:', error); // Adicionado log para debug
         res.status(500).json({ error: 'Erro ao criar veículo' });
     }
 };
@@ -62,6 +102,7 @@ const createVehicle = async (req, res) => {
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
+    // JSON.stringify é mantido
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.history) data.history = JSON.stringify(data.history);
@@ -75,6 +116,7 @@ const updateVehicle = async (req, res) => {
         await db.execute(query, [...values, id]);
         res.json({ message: 'Veículo atualizado com sucesso' });
     } catch (error) {
+        console.error('Erro ao atualizar veículo:', error); // Adicionado log para debug
         res.status(500).json({ error: 'Erro ao atualizar veículo' });
     }
 };
@@ -93,6 +135,7 @@ const deleteVehicle = async (req, res) => {
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
+        console.error('Erro ao deletar veículo:', error); // Adicionado log para debug
         res.status(500).json({ error: 'Erro ao deletar veículo' });
     } finally {
         connection.release();
@@ -111,24 +154,40 @@ const allocateToObra = async (req, res) => {
     await connection.beginTransaction();
 
     try {
+        // Usamos parseVehicleJsonFields (que é seguro)
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
         const vehicle = parseVehicleJsonFields(vehicleRows[0]);
+        
         const obraRows = await connection.execute('SELECT * FROM obras WHERE id = ?', [obraId]);
-        const obra = JSON.parse(JSON.stringify(obraRows[0][0]));
+        // Garante que o objeto obra seja extraído corretamente
+        const obra = obraRows[0].length > 0 ? obraRows[0][0] : null; 
+        
         const employeeRows = await connection.execute('SELECT * FROM employees WHERE id = ?', [employeeId]);
-        const employee = JSON.parse(JSON.stringify(employeeRows[0][0]));
+        // Garante que o objeto employee seja extraído corretamente
+        const employee = employeeRows[0].length > 0 ? employeeRows[0][0] : null; 
 
         if (!vehicle || !obra || !employee) {
             throw new Error("Dados de veículo, obra ou funcionário inválidos.");
         }
+        
+        // CORREÇÃO CRÍTICA: Se a obra ou funcionário tem campos JSON, eles precisam ser parseados
+        // Aqui assumimos que os controllers de Obra e Employee farão isso, mas para esta rota,
+        // vamos garantir que o historicoVeiculos da Obra seja um objeto, pois ele será atualizado.
+        // Se a Obra tem campos JSON quebando a aplicação, o getAllObras já teria falhado.
+        // A Obra em si pode ter campos JSON que precisam ser parseados (ex: historicoVeiculos)
+        const updatedObraData = { ...obra };
+        if (updatedObraData.historicoVeiculos && typeof updatedObraData.historicoVeiculos === 'string') {
+            updatedObraData.historicoVeiculos = parseJsonSafe(updatedObraData.historicoVeiculos, 'obra.historicoVeiculos');
+        }
+
 
         const newHistoryEntry = {
             type: 'obra',
             startDate: new Date(),
             endDate: null,
             details: {
-                obraId: obra.id,
-                obraNome: obra.nome,
+                obraId: updatedObraData.id,
+                obraNome: updatedObraData.nome,
                 employeeId: employee.id,
                 employeeName: employee.nome,
                 [`${readingType}Entrada`]: readingValue,
@@ -145,7 +204,7 @@ const allocateToObra = async (req, res) => {
         const vehicleUpdateData = {
             obraAtualId: obraId,
             status: 'Em Obra',
-            localizacaoAtual: obra.nome,
+            localizacaoAtual: updatedObraData.nome,
             operationalAssignment: null,
             maintenanceLocation: null,
             history: JSON.stringify(updatedHistory),
@@ -153,6 +212,8 @@ const allocateToObra = async (req, res) => {
         vehicleUpdateData[readingType] = readingValue;
         
         await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, id]);
+        
+        // O campo alocadoEm do employee precisa ser stringificado se for um objeto
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
 
         const legacyHistoryEntry = { 
@@ -168,7 +229,8 @@ const allocateToObra = async (req, res) => {
             employeeId,
             employeeName: employee.nome,
         };
-        const updatedObraHistory = obra.historicoVeiculos || [];
+        // Usa o histórico parseado (seguro)
+        const updatedObraHistory = updatedObraData.historicoVeiculos || [];
         updatedObraHistory.push(legacyHistoryEntry);
         await connection.execute('UPDATE obras SET historicoVeiculos = ? WHERE id = ?', [JSON.stringify(updatedObraHistory), obraId]);
 
@@ -191,7 +253,7 @@ const deallocateFromObra = async (req, res) => {
 
     try {
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
-        const vehicle = parseVehicleJsonFields(vehicleRows[0]);
+        const vehicle = parseVehicleJsonFields(vehicleRows[0]); // Usa parse seguro
 
         const exitTimestamp = new Date(dataSaida);
 
@@ -212,15 +274,23 @@ const deallocateFromObra = async (req, res) => {
         
         await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, id]);
 
-        const activeAssignment = (vehicle.history || []).find(h => h.type === 'obra' && !h.endDate);
-        if (activeAssignment?.details?.employeeId) {
-            await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [activeAssignment.details.employeeId]);
+        // Se operationalAssignment foi parseado, ele é um objeto. Se não, é null.
+        if (vehicle.operationalAssignment && typeof vehicle.operationalAssignment === 'object' && vehicle.operationalAssignment.employeeId) {
+            await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [vehicle.operationalAssignment.employeeId]);
         }
         
+        // Busca os dados da obra
         const [obraRows] = await connection.execute('SELECT * FROM obras WHERE id = ?', [obraId]);
-        const obraData = JSON.parse(JSON.stringify(obraRows[0]));
+        // Garante que o objeto obra seja extraído corretamente
+        const obraData = obraRows[0].length > 0 ? obraRows[0][0] : null; 
         
-        const legacyHistorico = obraData.historicoVeiculos || [];
+        // Parse seguro do historicoVeiculos da Obra
+        const updatedObraData = { ...obraData };
+        if (updatedObraData.historicoVeiculos && typeof updatedObraData.historicoVeiculos === 'string') {
+            updatedObraData.historicoVeiculos = parseJsonSafe(updatedObraData.historicoVeiculos, 'obra.historicoVeiculos');
+        }
+        
+        const legacyHistorico = updatedObraData.historicoVeiculos || [];
         const updatedLegacyHistorico = legacyHistorico.map(h => {
             if (h.veiculoId === vehicle.id && !h.dataSaida) {
                 return { ...h, dataSaida: exitTimestamp, [`${readingType}Saida`]: readingValue };
@@ -254,19 +324,25 @@ const assignToOperational = async (req, res) => {
 
     try {
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
-        const vehicle = parseVehicleJsonFields(vehicleRows[0]);
+        const vehicle = parseVehicleJsonFields(vehicleRows[0]); // Usa parse seguro
 
         const now = new Date();
         const history = vehicle.history || [];
         const updatedHistory = history.map(h => {
+            // Finaliza qualquer atribuição ativa
             if (!h.endDate) { 
                 return { ...h, endDate: now };
             }
             return h;
         });
 
-        const selectedEmployee = await connection.execute('SELECT * FROM employees WHERE id = ?', [employeeId]);
-        const employeeName = selectedEmployee[0][0].nome;
+        const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+        const employeeName = selectedEmployeeRows[0]?.nome;
+        
+        if (!employeeName) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Funcionário selecionado não encontrado.' });
+        }
         
         const newHistoryEntry = {
             type: 'operacional',
@@ -315,7 +391,7 @@ const unassignFromOperational = async (req, res) => {
 
     try {
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
-        const vehicle = parseVehicleJsonFields(vehicleRows[0]);
+        const vehicle = parseVehicleJsonFields(vehicleRows[0]); // Usa parse seguro
         const now = new Date();
         
         const updatedHistory = (vehicle.history || []).map(h => {
@@ -325,14 +401,17 @@ const unassignFromOperational = async (req, res) => {
             return h;
         });
 
-        await connection.execute('UPDATE vehicles SET operationalAssignment = NULL, status = ?, localizacaoAtual = ?, history = ? WHERE id = ?', [
-            'Disponível',
-            location,
-            JSON.stringify(updatedHistory),
-            id
-        ]);
+        const vehicleUpdateData = { 
+            operationalAssignment: null, 
+            status: 'Disponível', 
+            localizacaoAtual: location, 
+            history: JSON.stringify(updatedHistory)
+        };
+        
+        await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, id]);
 
-        if (vehicle.operationalAssignment?.employeeId) {
+        // Se operationalAssignment foi parseado, ele é um objeto. Se não, é null.
+        if (vehicle.operationalAssignment && typeof vehicle.operationalAssignment === 'object' && vehicle.operationalAssignment.employeeId) {
             await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [vehicle.operationalAssignment.employeeId]);
         }
         
@@ -355,11 +434,12 @@ const startMaintenance = async (req, res) => {
 
     try {
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
-        const vehicle = parseVehicleJsonFields(vehicleRows[0]);
+        const vehicle = parseVehicleJsonFields(vehicleRows[0]); // Usa parse seguro
         const now = new Date();
         
         const history = vehicle.history || [];
         const updatedHistory = history.map(h => {
+            // Finaliza qualquer atribuição ativa
             if (!h.endDate) { 
                 return { ...h, endDate: now };
             }
@@ -405,7 +485,7 @@ const endMaintenance = async (req, res) => {
 
     try {
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
-        const vehicle = parseVehicleJsonFields(vehicleRows[0]);
+        const vehicle = parseVehicleJsonFields(vehicleRows[0]); // Usa parse seguro
         const now = new Date();
         
         const history = vehicle.history || [];

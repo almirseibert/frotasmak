@@ -1,13 +1,42 @@
 // controllers/fineController.js
 const db = require('../database');
 
+// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
+const parseJsonSafe = (field, key) => {
+    if (field === null || typeof field === 'undefined') return null;
+    
+    // Se já for um objeto/array (por exemplo, se o driver do MySQL já parseou a coluna JSON)
+    if (typeof field === 'object') return field; 
+    
+    // Garante que é uma string antes de tentar o parse
+    if (typeof field !== 'string') return field;
+
+    try {
+        // Tenta fazer o parse da string
+        const parsed = JSON.parse(field);
+        
+        // Verifica se o resultado do parse é um objeto/array válido
+        if (typeof parsed === 'object' && parsed !== null) {
+            return parsed;
+        }
+        return null; 
+    } catch (e) {
+        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
+        // Retorna null em caso de erro, impedindo a quebra da aplicação.
+        return null; 
+    }
+};
+
 // --- Função Auxiliar para Conversão de JSON ---
 const parseFineJsonFields = (fine) => {
     if (!fine) return null;
     const newFine = { ...fine };
-    if (newFine.vehicleInfo) newFine.vehicleInfo = JSON.parse(newFine.vehicleInfo);
-    if (newFine.employeeInfo) newFine.employeeInfo = JSON.parse(newFine.employeeInfo);
-    if (newFine.ultimaAlteracao) newFine.ultimaAlteracao = JSON.parse(newFine.ultimaAlteracao);
+    
+    // Aplicação da função segura:
+    newFine.vehicleInfo = parseJsonSafe(newFine.vehicleInfo, 'vehicleInfo');
+    newFine.employeeInfo = parseJsonSafe(newFine.employeeInfo, 'employeeInfo');
+    newFine.ultimaAlteracao = parseJsonSafe(newFine.ultimaAlteracao, 'ultimaAlteracao');
+
     return newFine;
 };
 

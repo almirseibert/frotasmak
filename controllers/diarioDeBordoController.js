@@ -3,22 +3,40 @@ const db = require('../database');
 const parseVehicleJsonFields = require('./vehicleController').parseVehicleJsonFields;
 const parseEmployeeJsonFields = require('./employeeController').parseEmployeeJsonFields;
 
-// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro ---
+// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
 const parseJsonSafe = (field, key) => {
-    if (!field) return null;
+    if (field === null || typeof field === 'undefined') return null;
+    
+    // Se já for um objeto/array (por exemplo, se o driver do MySQL já parseou a coluna JSON)
+    if (typeof field === 'object') return field; 
+    
+    // Garante que é uma string antes de tentar o parse
+    if (typeof field !== 'string') return field;
+
     try {
-        return JSON.parse(field);
+        // Tenta fazer o parse da string
+        const parsed = JSON.parse(field);
+        
+        // Verifica se o resultado do parse é um objeto/array válido (impede parse de string simples)
+        if (typeof parsed === 'object' && parsed !== null) {
+            return parsed;
+        }
+        // Se o parse retornou um valor primitivo, pode ter sido um erro, ou a string era "null". 
+        // Neste caso, retorna null para dados esperados como objeto.
+        return null; 
     } catch (e) {
-        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor:`, field);
-        // Retorna null ou objeto vazio em caso de erro, evitando quebrar a aplicação
+        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
+        // Retorna null ou objeto vazio em caso de erro.
         return null; 
     }
 };
 
+// --- Função Auxiliar para Conversão de JSON no Log ---
 const parseDiarioDeBordoJsonFields = (log) => {
     if (!log) return null;
     const newLog = { ...log };
     
+    // Aplicação da função segura:
     newLog.startReadings = parseJsonSafe(newLog.startReadings, 'startReadings');
     newLog.endReadings = parseJsonSafe(newLog.endReadings, 'endReadings');
     newLog.breaks = parseJsonSafe(newLog.breaks, 'breaks');
@@ -27,11 +45,10 @@ const parseDiarioDeBordoJsonFields = (log) => {
     return newLog;
 };
 
-// --- READ: Obter todos os logs com filtros de data (Correção de Undefined) ---
+// --- READ: Obter todos os logs com filtros de data (Correção de Undefined em BIND) ---
 const getAllDiarioDeBordo = async (req, res) => {
-    // Definindo datas padrão defensivas para evitar 'undefined' no DB.execute.
-    // Se startDate/endDate não forem fornecidas, a query deve funcionar.
-    // Assumindo que o frontend enviará ou que o uso de IS NOT NULL é melhor se não houver filtro.
+    // Não usamos WHERE logDate BETWEEN ? AND ? diretamente se os parâmetros forem opcionais,
+    // pois passar undefined em um array de binds gera o erro 'Bind parameters must not contain undefined'.
     const { startDate, endDate } = req.query;
     
     try {
@@ -50,10 +67,13 @@ const getAllDiarioDeBordo = async (req, res) => {
         res.json(rows.map(parseDiarioDeBordoJsonFields));
     } catch (error) {
         console.error('Erro ao buscar diário de bordo:', error);
+        // Garante que a mensagem de erro seja clara no console do backend
+        if (error.code === undefined && error.message.includes('Bind parameters')) {
+             console.error('AVISO CRÍTICO: Erro de BIND (undefined) - Verifique se os parâmetros de data estão sendo passados corretamente.');
+        }
         res.status(500).json({ error: 'Erro ao buscar diário de bordo' });
     }
 };
-
 
 // --- READ: Obter um único log por ID ---
 const getDiarioDeBordoById = async (req, res) => {
@@ -138,8 +158,11 @@ const startJourney = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        const [lastLogRows] = await connection.execute('SELECT endTime FROM diario_de_bordo WHERE employeeId = ? AND status = "Fechado" ORDER BY endTime DESC LIMIT 1', [employeeId]);
+        // Correção: Adicionado `vehicleId` à query do último log para que o parseDiarioDeBordoJsonFields funcione corretamente
+        const [lastLogRows] = await connection.execute('SELECT endTime, vehicleId FROM diario_de_bordo WHERE employeeId = ? AND status = "Fechado" ORDER BY endTime DESC LIMIT 1', [employeeId]);
         const lastLog = parseDiarioDeBordoJsonFields(lastLogRows[0]);
+        
+        // Lógica de descanso
         if (lastLog) {
             const lastEndTime = new Date(lastLog.endTime);
             const now = new Date(startTime);
@@ -186,6 +209,7 @@ const endJourney = async (req, res) => {
     await connection.beginTransaction();
 
     try {
+        // Correção: Adicionado 'vehicleId' à query para o UPDATE
         const [activeLogRows] = await connection.execute('SELECT startTime, vehicleId FROM diario_de_bordo WHERE id = ?', [id]);
         const activeLog = parseDiarioDeBordoJsonFields(activeLogRows[0]);
         if (!activeLog) {
