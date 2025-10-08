@@ -1,46 +1,54 @@
 const express = require('express');
 const router = express.Router();
-const db = require('../database'); // Conexão com o banco de dados
+const db = require('../database');
+const authMiddleware = require('../middlewares/authMiddleware');
 
-// ====================================================================
-// ROTA: GET /api/users/profile
-// OBJETIVO: Buscar os detalhes do usuário logado usando o token JWT.
-// PROTEGIDA: Sim (requer token válido)
-// ====================================================================
-router.get('/profile', async (req, res) => {
-    // O middleware de autenticação (authMiddleware) já validou o token
-    // e adicionou os dados do usuário (como o ID) no objeto 'req.user'.
+/**
+ * Rota GET /api/users/profile
+ * Rota protegida para obter os dados do perfil do utilizador.
+ */
+router.get('/profile', authMiddleware, async (req, res) => {
+    // CORREÇÃO: O token JWT contém `id` (o ID inteiro do banco de dados), não `uid`.
     const userId = req.user.id; 
-
+    
     if (!userId) {
-        return res.status(400).json({ message: 'ID do usuário não encontrado no token.' });
+        return res.status(401).json({ message: 'Token de autenticação inválido ou faltando dados.' });
     }
 
     try {
-        // Busca o usuário no banco de dados pelo ID extraído do token
-        const [rows] = await db.query('SELECT id, name, email, role FROM users WHERE id = ?', [userId]);
-        
-        const user = rows[0];
+        // CORREÇÃO: A consulta agora utiliza `u.id` para corresponder ao que está no token.
+        const [rows] = await db.query(
+            `SELECT 
+                u.id, 
+                u.uid,
+                u.email, 
+                u.role, 
+                u.name, 
+                u.phone,
+                e.canAccessRefueling
+            FROM users u
+            LEFT JOIN employees e ON u.employeeId = e.id
+            WHERE u.id = ?`, 
+            [userId]
+        );
 
-        if (!user) {
-            return res.status(404).json({ message: 'Usuário não encontrado.' });
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Perfil do utilizador não encontrado.' });
         }
 
-        // O frontend (AuthContext) espera um campo 'uid'.
-        // Renomeamos 'id' para 'uid' na resposta para manter a compatibilidade.
-        const userProfile = {
-            uid: user.id,
-            name: user.name,
-            email: user.email,
-            role: user.role
-        };
+        const userProfile = rows[0];
 
-        res.json(userProfile);
+        // Converte o valor do DB (0 ou 1) para o booleano esperado pelo frontend
+        res.json({
+            ...userProfile,
+            canAccessRefueling: userProfile.canAccessRefueling === 1,
+        });
 
     } catch (error) {
-        console.error('Erro ao buscar perfil do usuário:', error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
+        console.error('Erro ao buscar perfil do utilizador:', error);
+        res.status(500).json({ message: 'Erro interno do servidor ao buscar o perfil.' });
     }
 });
 
 module.exports = router;
+
