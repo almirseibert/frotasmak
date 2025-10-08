@@ -5,8 +5,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 router.use(authMiddleware);
 
-// Rota para buscar o plano de revisões consolidado (usado pelo Dashboard/RevisionsPage)
-// Espera-se que esta rota retorne Veículos com seus Planos e status 'isDue' agregados.
+// Rota para buscar o plano de revisões consolidado
 router.get('/plan', revisionController.getConsolidatedRevisionPlan);
 
 // Rota para buscar o histórico de revisões de um veículo específico
