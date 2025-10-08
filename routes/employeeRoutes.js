@@ -14,8 +14,8 @@ router.delete('/:id', employeeController.deleteEmployee);
 
 // Rotas especializadas
 // Busca histórico de alocações (obra, operacional)
-router.get('/:id/history', employeeController.getEmployeeHistory); 
+router.get('/:id/history', employeeController.getEmployeeHistory);
 // Alternativa para mudança de status, se não estiver no PUT principal
-router.put('/:id/status', employeeController.updateEmployeeStatus); 
+router.put('/:id/status', employeeController.updateEmployeeStatus);
 
 module.exports = router;

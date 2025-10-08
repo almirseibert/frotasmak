@@ -1,74 +1,62 @@
-// controllers/employeeController.js
 const db = require('../database');
 
-// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
+// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro ---
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
-    
-    // Se já for um objeto/array (por exemplo, se o driver do MySQL já parseou a coluna JSON)
-    if (typeof field === 'object') return field; 
-    
-    // Garante que é uma string antes de tentar o parse
+    if (typeof field === 'object') return field;
     if (typeof field !== 'string') return field;
 
     try {
-        // Tenta fazer o parse da string
         const parsed = JSON.parse(field);
-        
-        // Verifica se o resultado do parse é um objeto/array válido
         if (typeof parsed === 'object' && parsed !== null) {
             return parsed;
         }
-        return null; 
+        return null;
     } catch (e) {
-        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
-        // Retorna null em caso de erro, impedindo a quebra da aplicação.
-        return null; 
+        console.warn(`[JSON Parse Error] Falha ao analisar o campo '${key}'. Valor problemático:`, field);
+        return null;
     }
 };
 
-
-// --- Função Auxiliar para Conversão de JSON ---
+// --- Função Auxiliar para processar campos JSON de um funcionário ---
 const parseEmployeeJsonFields = (employee) => {
     if (!employee) return null;
     const newEmployee = { ...employee };
-    
-    // Aplicação da função segura:
-    newEmployee.alocadoEm = parseJsonSafe(newEmployee.alocadoEm, 'alocadoEm');
-    newEmployee.ultimaAlteracao = parseJsonSafe(newEmployee.ultimaAlteracao, 'ultimaAlteracao');
-    
+    newEmployee.alocadoEm = parseJsonSafe(employee.alocadoEm, 'alocadoEm');
+    newEmployee.ultimaAlteracao = parseJsonSafe(employee.ultimaAlteracao, 'ultimaAlteracao');
     return newEmployee;
 };
 
-// --- READ: Obter todos os funcionários ---
+// --- GET: Todos os funcionários ---
 const getAllEmployees = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM employees');
-        res.json(rows.map(parseEmployeeJsonFields));
+        const [rows] = await db.query('SELECT * FROM employees');
+        const employees = rows.map(parseEmployeeJsonFields);
+        res.json(employees);
     } catch (error) {
         console.error('Erro ao buscar funcionários:', error);
         res.status(500).json({ error: 'Erro ao buscar funcionários' });
     }
 };
 
-// --- READ: Obter um único funcionário por ID ---
+// --- GET: Um funcionário por ID ---
 const getEmployeeById = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM employees WHERE id = ?', [req.params.id]);
+        const [rows] = await db.query('SELECT * FROM employees WHERE id = ?', [req.params.id]);
         if (rows.length === 0) {
-            return res.status(404).json({ error: 'Funcionário não encontrado' });
+            return res.status(404).json({ message: 'Funcionário não encontrado' });
         }
-        res.json(parseEmployeeJsonFields(rows[0]));
+        const employee = parseEmployeeJsonFields(rows[0]);
+        res.json(employee);
     } catch (error) {
-        console.error('Erro ao buscar funcionário:', error);
+        console.error('Erro ao buscar funcionário por ID:', error);
         res.status(500).json({ error: 'Erro ao buscar funcionário' });
     }
 };
 
-// --- CREATE: Criar um novo funcionário ---
+// --- POST: Criar um novo funcionário ---
 const createEmployee = async (req, res) => {
-    const data = req.body;
-    
+    const data = { ...req.body };
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
 
@@ -78,8 +66,8 @@ const createEmployee = async (req, res) => {
     const query = `INSERT INTO employees (${fields.join(', ')}) VALUES (${placeholders})`;
 
     try {
-        const [result] = await db.execute(query, values);
-        res.status(201).json({ id: result.insertId, ...req.body });
+        await db.execute(query, values);
+        res.status(201).json({ message: 'Funcionário criado com sucesso' });
     } catch (error) {
         console.error('Erro ao criar funcionário:', error);
         res.status(500).json({ error: 'Erro ao criar funcionário' });
@@ -89,12 +77,11 @@ const createEmployee = async (req, res) => {
 // --- UPDATE: Atualizar um funcionário existente ---
 const updateEmployee = async (req, res) => {
     const { id } = req.params;
-    const data = req.body;
-    
+    const data = { ...req.body };
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
 
-    const fields = Object.keys(data).filter(key => key !== 'id');
+    const fields = Object.keys(data);
     const values = Object.values(data);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
     const query = `UPDATE employees SET ${setClause} WHERE id = ?`;
@@ -119,11 +106,49 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
+// --- FUNÇÕES QUE ESTAVAM EM FALTA ---
+
+// --- GET: Obter histórico de um funcionário ---
+const getEmployeeHistory = async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Implementação de exemplo: esta lógica precisa ser adaptada às suas tabelas de histórico
+        res.json({ message: `Histórico para o funcionário ${id} ainda não implementado.`, history: [] });
+    } catch (error) {
+        console.error(`Erro ao buscar histórico para o funcionário ${id}:`, error);
+        res.status(500).json({ error: 'Erro ao buscar histórico do funcionário' });
+    }
+};
+
+// --- PUT: Atualizar o status de um funcionário ---
+const updateEmployeeStatus = async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status) {
+        return res.status(400).json({ message: 'O novo status é obrigatório.' });
+    }
+
+    try {
+        const [result] = await db.execute('UPDATE employees SET status = ? WHERE id = ?', [status, id]);
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ message: 'Funcionário não encontrado.' });
+        }
+        res.json({ message: 'Status do funcionário atualizado com sucesso.' });
+    } catch (error) {
+        console.error('Erro ao atualizar status do funcionário:', error);
+        res.status(500).json({ error: 'Erro ao atualizar o status do funcionário' });
+    }
+};
+
+
+// --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllEmployees,
     getEmployeeById,
     createEmployee,
     updateEmployee,
     deleteEmployee,
-    parseEmployeeJsonFields // Exportado para uso em outros controllers
+    getEmployeeHistory,     // Agora exportada
+    updateEmployeeStatus    // Agora exportada
 };
