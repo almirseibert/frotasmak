@@ -16,11 +16,10 @@ router.get('/profile', authMiddleware, async (req, res) => {
     }
 
     try {
-        // CORREÇÃO: A consulta agora utiliza `u.id` para corresponder ao que está no token.
+        // CORREÇÃO: A consulta agora utiliza `u.id` e não tenta mais buscar a coluna `u.uid` que não existe.
         const [rows] = await db.query(
             `SELECT 
                 u.id, 
-                u.uid,
                 u.email, 
                 u.role, 
                 u.name, 
