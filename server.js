@@ -2,9 +2,12 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-// Middleware de autenticação JWT - Você precisa criar e configurar este arquivo
-const authMiddleware = require('./middlewares/authMiddleware'); // ASSUMIR QUE EXISTE
+const db = require('./database');
 
+// Middlewares
+const authMiddleware = require('./middlewares/authMiddleware');
+
+// Rotas
 const authRoutes = require('./routes/authRoutes');
 const vehicleRoutes = require('./routes/vehicleRoutes');
 const obraRoutes = require('./routes/obraRoutes');
@@ -19,9 +22,11 @@ const orderRoutes = require('./routes/orderRoutes');
 const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
-const adminRoutes = require('./routes/adminRoutes'); 
-// NOVO: Importar a nova rota de despesas (Você deve criar o expenseRoutes.js)
-const expensesRoutes = require('./routes/expenseRoutes'); 
+const adminRoutes = require('./routes/adminRoutes');
+const expensesRoutes = require('./routes/expenseRoutes');
+
+// NOVA LINHA: Importa as rotas de usuário
+const userRoutes = require('./routes/userRoutes');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -29,15 +34,12 @@ const port = process.env.PORT || 3001;
 app.use(express.json());
 app.use(cors());
 
-// Rota de teste para o caminho raiz
-app.get('/', (req, res) => {
-  res.status(200).send('API está funcionando!');
+// Rota de teste
+app.get('/api', (req, res) => {
+    res.send('API Frotas MAK está no ar!');
 });
 
-// Conexão com o banco de dados
-const db = require('./database');
-
-// Testar a conexão com o banco de dados
+// Verifica a conexão com o banco de dados ao iniciar
 db.getConnection()
     .then(connection => {
         console.log('Conexão com o banco de dados estabelecida com sucesso!');
@@ -48,15 +50,13 @@ db.getConnection()
     });
 
 // --- ROTAS PÚBLICAS (NÃO EXIGEM TOKEN JWT) ---
-// Login, Logout e Solicitação de Cadastro
 app.use('/api/auth', authRoutes); 
 app.use('/api/registrationRequests', registrationRequestRoutes); 
 
 // --- APLICA O MIDDLEWARE JWT A PARTIR DAQUI ---
-// Todas as rotas abaixo desta linha exigirão um token válido no cabeçalho
 app.use(authMiddleware); 
 
-// --- ROTAS DE DADOS (PROTEGIDAS) ---
+// --- ROTAS PROTEGIDAS ---
 app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/obras', obraRoutes);
 app.use('/api/employees', employeeRoutes);
@@ -69,10 +69,14 @@ app.use('/api/diarioDeBordo', diarioDeBordoRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/counters', counterRoutes);
 app.use('/api/inactivityAlerts', inactivityAlertRoutes);
-app.use('/api/admin', adminRoutes); 
-// NOVO: Adiciona a rota de despesas que estava faltando (resolve 404/expenses)
-app.use('/api/expenses', expensesRoutes); 
+app.use('/api/admin', adminRoutes);
+app.use('/api/expenses', expensesRoutes);
 
+// NOVA LINHA: Usa as rotas de usuário (protegidas pelo middleware acima)
+app.use('/api/users', userRoutes);
+
+// Inicia o servidor
 app.listen(port, () => {
-    console.log(`Servidor rodando em http://localhost:${port}`);
+    console.log(`Servidor rodando na porta ${port}`);
 });
+
