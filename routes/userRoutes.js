@@ -8,7 +8,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
  * Rota protegida para obter os dados do perfil do utilizador.
  */
 router.get('/profile', authMiddleware, async (req, res) => {
-    // CORREÇÃO: O token JWT contém `id` (o ID inteiro do banco de dados), não `uid`.
+    // O token JWT contém `id` (o ID do utilizador no banco de dados).
     const userId = req.user.id; 
     
     if (!userId) {
@@ -16,7 +16,9 @@ router.get('/profile', authMiddleware, async (req, res) => {
     }
 
     try {
-        // CORREÇÃO: A consulta agora utiliza `u.id` e não tenta mais buscar a coluna `u.uid` que não existe.
+        // --- CÓDIGO CORRIGIDO ---
+        // A consulta foi alterada para buscar 'canAccessRefueling' da tabela 'users' (u)
+        // e o LEFT JOIN com a tabela 'employees' foi removido por ser desnecessário aqui.
         const [rows] = await db.query(
             `SELECT 
                 u.id, 
@@ -24,9 +26,8 @@ router.get('/profile', authMiddleware, async (req, res) => {
                 u.role, 
                 u.name, 
                 u.phone,
-                e.canAccessRefueling
+                u.canAccessRefueling
             FROM users u
-            LEFT JOIN employees e ON u.employeeId = e.id
             WHERE u.id = ?`, 
             [userId]
         );
@@ -50,4 +51,3 @@ router.get('/profile', authMiddleware, async (req, res) => {
 });
 
 module.exports = router;
-
