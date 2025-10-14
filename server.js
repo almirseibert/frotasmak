@@ -24,9 +24,11 @@ const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const expensesRoutes = require('./routes/expenseRoutes');
-
-// NOVA LINHA: Importa as rotas de usuário
 const userRoutes = require('./routes/userRoutes');
+
+// --- NOVA ROTA IMPORTADA ---
+const updateRoutes = require('./routes/updateRoutes');
+
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -71,12 +73,13 @@ app.use('/api/counters', counterRoutes);
 app.use('/api/inactivityAlerts', inactivityAlertRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/expenses', expensesRoutes);
-
-// NOVA LINHA: Usa as rotas de usuário (protegidas pelo middleware acima)
 app.use('/api/users', userRoutes);
+
+// --- NOVA ROTA REGISTRADA ---
+app.use('/api/updates', updateRoutes);
+
 
 // Inicia o servidor
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
 });
-

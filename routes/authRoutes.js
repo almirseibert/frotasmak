@@ -1,22 +1,26 @@
-// routes/authRoutes.js
+// routes/adminRoutes.js
 const express = require('express');
 const router = express.Router();
-const authController = require('../controllers/authController');
-const authMiddleware = require('../middlewares/authMiddleware'); // Importar o middleware
+const adminController = require('../controllers/adminController');
+const authMiddleware = require('../middlewares/authMiddleware');
 
-// Rota de registro de novo usuário
-router.post('/register', authController.register);
+router.use(authMiddleware);
 
-// Rota de login
-router.post('/login', authController.login);
+// Rotas de gerenciamento de solicitações de cadastro
+router.get('/registration-requests', adminController.getRegistrationRequests);
+router.post('/registration-requests/approve', adminController.approveRegistrationRequest);
+router.delete('/registration-requests/:id', adminController.deleteRegistrationRequest);
 
-// Rota protegida para VALIDAR A SENHA do usuário logado (usado pelo PasswordConfirmationModal)
-// Exige um token válido no header e a senha no corpo (body) da requisição.
-router.post('/validatePassword', authMiddleware, authController.validatePassword);
+// Rotas de atribuição de papéis
+router.put('/assign-role', adminController.assignRole);
 
-// Exemplo de rota protegida que só pode ser acessada com um token válido
-router.get('/protected', authMiddleware, (req, res) => {
-    res.json({ message: `Bem-vindo, ${req.user.email}! Você tem acesso.`, user: req.user });
-});
+// --- NOVA ROTA ADICIONADA ---
+// Adicionamos esta rota para corresponder à chamada do frontend (POST /api/admin/setRole)
+router.post('/setRole', adminController.assignRole);
+
+
+// Rotas de mensagem de atualização
+router.get('/update-message', adminController.getUpdateMessage);
+router.put('/update-message', adminController.saveUpdateMessage);
 
 module.exports = router;
