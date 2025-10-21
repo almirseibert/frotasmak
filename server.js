@@ -2,6 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const path = require('path'); // Importa o módulo 'path'
 const db = require('./database');
 
 // Middlewares
@@ -25,8 +26,6 @@ const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
-
-// --- NOVA ROTA IMPORTADA ---
 const updateRoutes = require('./routes/updateRoutes');
 
 
@@ -36,10 +35,50 @@ const port = process.env.PORT || 3001;
 app.use(express.json());
 app.use(cors());
 
+// --- ROTAS DA API ---
+const apiRouter = express.Router();
+
 // Rota de teste
-app.get('/api', (req, res) => {
+apiRouter.get('/', (req, res) => {
     res.send('API Frotas MAK está no ar!');
 });
+
+// Rotas Públicas (não exigem token)
+apiRouter.use('/auth', authRoutes);
+apiRouter.use('/registrationRequests', registrationRequestRoutes);
+
+// Aplica o middleware de autenticação para as rotas protegidas
+apiRouter.use(authMiddleware);
+
+// Rotas Protegidas
+apiRouter.use('/vehicles', vehicleRoutes);
+apiRouter.use('/obras', obraRoutes);
+apiRouter.use('/employees', employeeRoutes);
+apiRouter.use('/partners', partnerRoutes);
+apiRouter.use('/revisions', revisionRoutes);
+apiRouter.use('/fines', fineRoutes);
+apiRouter.use('/refuelings', refuelingRoutes);
+apiRouter.use('/comboioTransactions', comboioTransactionRoutes);
+apiRouter.use('/diarioDeBordo', diarioDeBordoRoutes);
+apiRouter.use('/orders', orderRoutes);
+apiRouter.use('/counters', counterRoutes);
+apiRouter.use('/inactivityAlerts', inactivityAlertRoutes);
+apiRouter.use('/admin', adminRoutes);
+apiRouter.use('/expenses', expensesRoutes);
+apiRouter.use('/users', userRoutes);
+apiRouter.use('/updates', updateRoutes);
+
+// Usa o roteador da API com o prefixo /api
+app.use('/api', apiRouter);
+
+// --- SERVIR ARQUIVOS ESTÁTICOS DO FRONTEND (BOA PRÁTICA PARA PRODUÇÃO) ---
+// Isso permite que o backend sirva o frontend se necessário, mas o Nginx será o principal
+app.use(express.static(path.join(__dirname, '..', 'frontend', 'build')));
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'frontend', 'build', 'index.html'));
+});
+
 
 // Verifica a conexão com o banco de dados ao iniciar
 db.getConnection()
@@ -50,34 +89,6 @@ db.getConnection()
     .catch(err => {
         console.error('Erro ao conectar ao banco de dados:', err.stack);
     });
-
-// --- ROTAS PÚBLICAS (NÃO EXIGEM TOKEN JWT) ---
-app.use('/api/auth', authRoutes); 
-app.use('/api/registrationRequests', registrationRequestRoutes); 
-
-// --- APLICA O MIDDLEWARE JWT A PARTIR DAQUI ---
-app.use(authMiddleware); 
-
-// --- ROTAS PROTEGIDAS ---
-app.use('/api/vehicles', vehicleRoutes);
-app.use('/api/obras', obraRoutes);
-app.use('/api/employees', employeeRoutes);
-app.use('/api/partners', partnerRoutes);
-app.use('/api/revisions', revisionRoutes);
-app.use('/api/fines', fineRoutes);
-app.use('/api/refuelings', refuelingRoutes);
-app.use('/api/comboioTransactions', comboioTransactionRoutes);
-app.use('/api/diarioDeBordo', diarioDeBordoRoutes);
-app.use('/api/orders', orderRoutes);
-app.use('/api/counters', counterRoutes);
-app.use('/api/inactivityAlerts', inactivityAlertRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/expenses', expensesRoutes);
-app.use('/api/users', userRoutes);
-
-// --- NOVA ROTA REGISTRADA ---
-app.use('/api/updates', updateRoutes);
-
 
 // Inicia o servidor
 app.listen(port, () => {

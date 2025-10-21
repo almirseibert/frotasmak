@@ -1,20 +1,22 @@
-# Usa a imagem base do Node.js
+# Salve este arquivo dentro da sua pasta 'backend'
+
+# Etapa 1: Usar uma imagem base do Node.js
 FROM node:18-alpine
 
-# Define o diretório de trabalho no contêiner
-WORKDIR /app
+# Etapa 2: Definir o diretório de trabalho dentro do contêiner
+WORKDIR /usr/src/app
 
-# Copia o package.json e o package-lock.json para o diretório de trabalho
+# Etapa 3: Copiar o package.json e o package-lock.json
 COPY package*.json ./
 
-# Instala as dependências
+# Etapa 4: Instalar as dependências do projeto
 RUN npm install
 
-# Copia o restante dos arquivos do seu backend
+# Etapa 5: Copiar o restante do código da sua aplicação
 COPY . .
 
-# Expõe a porta que o seu servidor Node.js vai rodar
-EXPOSE 3300
+# Etapa 6: Expor a porta que sua aplicação usa
+EXPOSE 3001
 
-# Comando para iniciar o servidor
-CMD ["node", "server.js"]
+# Etapa 7: Comando para iniciar sua aplicação
+CMD [ "node", "server.js" ]
