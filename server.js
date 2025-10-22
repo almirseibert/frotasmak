@@ -24,7 +24,8 @@ const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
 const adminRoutes = require('./routes/adminRoutes');
-const expensesRoutes = require('./routes.expenseRoutes');
+// LINHA CORRIGIDA: './routes.expenseRoutes' -> './routes/expenseRoutes'
+const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
 
