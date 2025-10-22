@@ -24,7 +24,7 @@ const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
 const adminRoutes = require('./routes/adminRoutes');
-const expensesRoutes = require('./routes/expenseRoutes');
+const expensesRoutes = require('./routes.expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
 
@@ -58,7 +58,8 @@ apiRouter.use('/partners', partnerRoutes);
 apiRouter.use('/revisions', revisionRoutes);
 apiRouter.use('/fines', fineRoutes);
 apiRouter.use('/refuelings', refuelingRoutes);
-api_router.use('/comboioTransactions', comboioTransactionRoutes);
+// LINHA CORRIGIDA: api_router -> apiRouter
+apiRouter.use('/comboioTransactions', comboioTransactionRoutes);
 apiRouter.use('/diarioDeBordo', diarioDeBordoRoutes);
 apiRouter.use('/orders', orderRoutes);
 apiRouter.use('/counters', counterRoutes);
