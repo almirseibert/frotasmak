@@ -1,4 +1,4 @@
-// server.js
+// server.js (Backend)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -58,7 +58,7 @@ apiRouter.use('/partners', partnerRoutes);
 apiRouter.use('/revisions', revisionRoutes);
 apiRouter.use('/fines', fineRoutes);
 apiRouter.use('/refuelings', refuelingRoutes);
-apiRouter.use('/comboioTransactions', comboioTransactionRoutes);
+api_router.use('/comboioTransactions', comboioTransactionRoutes);
 apiRouter.use('/diarioDeBordo', diarioDeBordoRoutes);
 apiRouter.use('/orders', orderRoutes);
 apiRouter.use('/counters', counterRoutes);
@@ -71,13 +71,10 @@ apiRouter.use('/updates', updateRoutes);
 // Usa o roteador da API com o prefixo /api
 app.use('/api', apiRouter);
 
-// --- SERVIR ARQUIVOS ESTÁTICOS DO FRONTEND (BOA PRÁTICA PARA PRODUÇÃO) ---
-// Isso permite que o backend sirva o frontend se necessário, mas o Nginx será o principal
-app.use(express.static(path.join(__dirname, '..', 'frontend', 'build')));
-
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'frontend', 'build', 'index.html'));
-});
+// --- SEÇÃO REMOVIDA ---
+// As linhas app.use(express.static(...)) e app.get('*', ...) foram removidas.
+// Elas não devem existir no servidor de backend, pois causam o crash.
+// Elas pertencem apenas ao server.js do frontend.
 
 
 // Verifica a conexão com o banco de dados ao iniciar
@@ -94,3 +91,4 @@ db.getConnection()
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
 });
+
