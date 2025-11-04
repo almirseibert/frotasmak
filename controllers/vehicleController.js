@@ -52,7 +52,13 @@ const getAllVehicles = async (req, res) => {
         const vehicles = rows.map(v => {
             const vehicle = parseVehicleJsonFields(v);
             // Anexa o histórico relevante a este veículo
-            vehicle.history = historyRows.filter(h => h.vehicleId === vehicle.id);
+            // CORREÇÃO: Parse 'details' do histórico
+            vehicle.history = historyRows
+                .filter(h => h.vehicleId === vehicle.id)
+                .map(h => ({
+                    ...h,
+                    details: parseJsonSafe(h.details, 'history.details')
+                }));
             return vehicle;
         });
         
@@ -76,10 +82,14 @@ const getVehicleById = async (req, res) => {
         
         // Busca o histórico para este veículo
         const [historyRows] = await db.execute('SELECT * FROM vehicle_history WHERE vehicleId = ?', [req.params.id]);
-        vehicle.history = historyRows;
+        // CORREÇÃO: Parse 'details' do histórico
+        vehicle.history = historyRows.map(h => ({
+            ...h,
+            details: parseJsonSafe(h.details, 'history.details')
+        }));
         
         res.json(vehicle);
-    } catch (error) {   
+    } catch (error) {
         console.error('Erro ao buscar veículo:', error);
         res.status(500).json({ error: 'Erro ao buscar veículo' });
     }
@@ -115,6 +125,9 @@ const updateVehicle = async (req, res) => {
     const data = req.body;
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
+    if (data.maintenanceLocation) data.maintenanceLocation = JSON.stringify(data.maintenanceLocation);
+    if (data.operationalAssignment) data.operationalAssignment = JSON.stringify(data.operationalAssignment);
+    
     // Remove 'history' se ele for enviado acidentalmente
     delete data.history;
 
@@ -193,7 +206,16 @@ const allocateToObra = async (req, res) => {
                 [`${readingType}Entrada`]: readingValue,
             })
         };
-        await connection.execute('INSERT INTO vehicle_history SET ?', [newHistoryEntry]);
+        
+        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
+        const historyFields = Object.keys(newHistoryEntry);
+        const historyValues = Object.values(newHistoryEntry);
+        const historyPlaceholders = historyFields.map(() => '?').join(', ');
+
+        await connection.execute(
+            `INSERT INTO vehicle_history (${historyFields.join(', ')}) VALUES (${historyPlaceholders})`,
+            historyValues
+        );
         
         // 2. Prepara a atualização do veículo
         const vehicleUpdateData = {
@@ -219,7 +241,6 @@ const allocateToObra = async (req, res) => {
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
 
         // 4. (Lógica legada de 'obras_historico_veiculos' - mantida por segurança)
-        // Você deve migrar isso para usar apenas 'vehicle_history' no futuro
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
         const vehicle = vehicleRows[0];
         const [obraDataRows] = await connection.execute('SELECT historicoVeiculos FROM obras WHERE id = ?', [obraId]);
@@ -370,7 +391,16 @@ const assignToOperational = async (req, res) => {
                 observacoes,
             })
         };
-        await connection.execute('INSERT INTO vehicle_history SET ?', [newHistoryEntry]);
+        
+        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
+        const historyFields = Object.keys(newHistoryEntry);
+        const historyValues = Object.values(newHistoryEntry);
+        const historyPlaceholders = historyFields.map(() => '?').join(', ');
+        
+        await connection.execute(
+            `INSERT INTO vehicle_history (${historyFields.join(', ')}) VALUES (${historyPlaceholders})`,
+            historyValues
+        );
         
         // 3. Prepara dados da alocação para 'vehicles'
         const operationalAssignment = { 
@@ -495,7 +525,16 @@ const startMaintenance = async (req, res) => {
                 details: `Entrada em manutenção (${status}) em ${location}`
             })
         };
-        await connection.execute('INSERT INTO vehicle_history SET ?', [newHistoryEntry]);
+        
+        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
+        const historyFields = Object.keys(newHistoryEntry);
+        const historyValues = Object.values(newHistoryEntry);
+        const historyPlaceholders = historyFields.map(() => '?').join(', ');
+        
+        await connection.execute(
+            `INSERT INTO vehicle_history (${historyFields.join(', ')}) VALUES (${historyPlaceholders})`,
+            historyValues
+        );
         
         // 3. Prepara dados da manutenção para 'vehicles'
         const maintenanceLocation = {
