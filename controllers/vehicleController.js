@@ -215,6 +215,15 @@ const allocateToObra = async (req, res) => {
         
         // O campo alocadoEm do employee precisa ser stringificado se for um objeto
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
+        
+        const updateFields = Object.keys(vehicleUpdateData);
+        const updateValues = Object.values(vehicleUpdateData);
+        const setClause = updateFields.map(field => `${field} = ?`).join(', ');
+        
+        await connection.execute(
+            `UPDATE vehicles SET ${setClause} WHERE id = ?`,
+            [...updateValues, id]
+        );
 
         const legacyHistoryEntry = { 
             veiculoId: vehicle.id, 
@@ -279,6 +288,15 @@ const deallocateFromObra = async (req, res) => {
             await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [vehicle.operationalAssignment.employeeId]);
         }
         
+        const updateFields_deallocate = Object.keys(vehicleUpdateData);
+        const updateValues_deallocate = Object.values(vehicleUpdateData);
+        const setClause_deallocate = updateFields_deallocate.map(field => `${field} = ?`).join(', ');
+
+        await connection.execute(
+            `UPDATE vehicles SET ${setClause_deallocate} WHERE id = ?`,
+            [...updateValues_deallocate, id]
+        );
+
         // Busca os dados da obra
         const [obraRows] = await connection.execute('SELECT * FROM obras WHERE id = ?', [obraId]);
         // Garante que o objeto obra seja extraído corretamente
