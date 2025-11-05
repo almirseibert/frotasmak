@@ -22,10 +22,8 @@ const parseJsonSafe = (field, key) => {
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
-    // 'historicoVeiculos' foi removido daqui pois não é mais uma coluna em 'obras'
-    const fieldsToParse = ['horasContratadasPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao']; // 'ultimasAlteracoes' no seu .sql é 'ultimaAlteracao'
+    const fieldsToParse = ['horasContratadasPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
     fieldsToParse.forEach(field => {
-        // Verifica se o campo existe no objeto antes de tentar parsear
         if (obra.hasOwnProperty(field)) {
             newObra[field] = parseJsonSafe(obra[field], field);
         }
@@ -46,15 +44,14 @@ const getAllObras = async (req, res) => {
 };
 
 // --- GET: Uma obra por ID ---
-const getObrasById = async (req, res) => {
+// **CORREÇÃO: Renomeada para getObraById (singular) para corresponder à rota**
+const getObraById = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras WHERE id = ?', [req.params.id]);
         if (rows.length === 0) {
             return res.status(404).json({ message: 'Obra não encontrada' });
         }
         
-        // CORREÇÃO: Busca o histórico de veículos da tabela 'obras_historico_veiculos'
-        // **MELHORIA:** Adicionado ORDER BY para mostrar os mais recentes primeiro
         const [historyRows] = await db.query(
             'SELECT * FROM obras_historico_veiculos WHERE obraId = ? ORDER BY dataEntrada DESC', 
             [req.params.id]
@@ -75,11 +72,8 @@ const getObrasById = async (req, res) => {
 // --- POST: Criar uma nova obra ---
 const createObra = async (req, res) => {
     const data = { ...req.body };
-    
-    // Remove 'historicoVeiculos' do objeto principal se ele for enviado
     delete data.historicoVeiculos; 
 
-    // Converte campos JSON para strings antes de inserir
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
@@ -103,11 +97,8 @@ const createObra = async (req, res) => {
 const updateObra = async (req, res) => {
     const { id } = req.params;
     const data = { ...req.body };
-
-    // Remove 'historicoVeiculos' do objeto principal se ele for enviado
     delete data.historicoVeiculos;
 
-    // Converte campos JSON para strings antes de atualizar
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
@@ -128,11 +119,10 @@ const updateObra = async (req, res) => {
 };
 
 // --- DELETE: Deletar uma obra ---
-// A tabela 'obras_historico_veiculos' tem 'ON DELETE CASCADE', então está correto.
 const deleteObra = async (req, res) => {
     try {
         await db.execute('DELETE FROM obras WHERE id = ?', [req.params.id]);
-        res.status(204).end();
+        res.status(2D-1).end(); // 204
     } catch (error) {
         console.error('Erro ao deletar obra:', error);
         res.status(500).json({ error: 'Erro ao deletar obra' });
@@ -142,7 +132,7 @@ const deleteObra = async (req, res) => {
 // --- FUNÇÃO PARA FINALIZAR UMA OBRA (A QUE ESTAVA FALTANDO) ---
 const finishObra = async (req, res) => {
     const { id } = req.params;
-    const currentDate = new Date(); // Usa o objeto Date
+    const currentDate = new Date(); 
 
     try {
         const [result] = await db.execute(
@@ -163,7 +153,7 @@ const finishObra = async (req, res) => {
 // --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllObras,
-    getObraById: getObrasById, // Exportando a função correta
+    getObraById, // **CORREÇÃO: Exportando o nome singular**
     createObra,
     updateObra,
     deleteObra,
