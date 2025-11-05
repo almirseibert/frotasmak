@@ -54,7 +54,11 @@ const getObrasById = async (req, res) => {
         }
         
         // CORREÇÃO: Busca o histórico de veículos da tabela 'obras_historico_veiculos'
-        const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos WHERE obraId = ? ORDER BY dataEntrada DESC', [req.params.id]);
+        // **MELHORIA:** Adicionado ORDER BY para mostrar os mais recentes primeiro
+        const [historyRows] = await db.query(
+            'SELECT * FROM obras_historico_veiculos WHERE obraId = ? ORDER BY dataEntrada DESC', 
+            [req.params.id]
+        );
         
         const obra = parseObraJsonFields(rows[0]);
         

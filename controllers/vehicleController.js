@@ -1,6 +1,5 @@
 // controllers/vehicleController.js
 const db = require('../database');
-// ... (código existente de 'randomUUID' e 'parseJsonSafe' sem alterações)
 const { randomUUID } = require('crypto'); // Importar o gerador de UUID
 
 // --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
@@ -30,7 +29,6 @@ const parseJsonSafe = (field, key) => {
 };
 
 // --- Funções Auxiliares para JSON ---
-// ... (código existente de 'parseVehicleJsonFields' sem alterações)
 const parseVehicleJsonFields = (vehicle) => {
     if (!vehicle) return null;
     const newVehicle = { ...vehicle };
@@ -44,7 +42,6 @@ const parseVehicleJsonFields = (vehicle) => {
 };
 
 // --- READ: Obter todos os veículos ---
-// ... (código existente de 'getAllVehicles' sem alterações)
 const getAllVehicles = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles');
@@ -70,7 +67,6 @@ const getAllVehicles = async (req, res) => {
 };
 
 // --- READ: Obter um único veículo por ID ---
-// ... (código existente de 'getVehicleById' sem alterações)
 const getVehicleById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles WHERE id = ?', [req.params.id]);
@@ -95,7 +91,6 @@ const getVehicleById = async (req, res) => {
 };
 
 // --- CREATE: Criar um novo veículo ---
-// ... (código existente de 'createVehicle' sem alterações)
 const createVehicle = async (req, res) => {
     const data = req.body;
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
@@ -117,7 +112,6 @@ const createVehicle = async (req, res) => {
 };
 
 // --- UPDATE: Atualizar um veículo existente ---
-// ... (código existente de 'updateVehicle' sem alterações)
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -143,7 +137,6 @@ const updateVehicle = async (req, res) => {
 };
 
 // --- DELETE: Deletar um veículo (com remoção em cascata) ---
-// ... (código existente de 'deleteVehicle' sem alterações)
 const deleteVehicle = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -169,7 +162,6 @@ const deleteVehicle = async (req, res) => {
 // ROTAS DE ALOCAÇÃO (CORRIGIDAS)
 // -------------------------------------------------------------------------
 
-// --- (código existente de 'allocateToObra' sem alterações)
 const allocateToObra = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { obraId, employeeId, dataEntrada, readingType, readingValue } = req.body;
@@ -218,6 +210,12 @@ const allocateToObra = async (req, res) => {
             localizacaoAtual: obra.nome,
             operationalAssignment: null, // Limpa outra alocação
             maintenanceLocation: null, // Limpa outra alocação
+            // **CORREÇÃO DE SINCRONIA:** Atualiza 'alocadoEm' que o frontend usa
+            alocadoEm: JSON.stringify({
+                type: 'obra',
+                id: obraId,
+                nome: obra.nome
+            }),
             [readingType]: readingValue, // Atualiza a leitura principal
         };
         
@@ -234,7 +232,6 @@ const allocateToObra = async (req, res) => {
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
 
         // 4. (Lógica migrada) Grava na tabela 'obras_historico_veiculos'
-        // Busca os dados do veículo para popular a tabela de histórico
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
         const vehicle = vehicleRows[0];
         
@@ -256,7 +253,6 @@ const allocateToObra = async (req, res) => {
             horimetroSaida: null
         };
         
-        // Constrói a query de inserção para 'obras_historico_veiculos'
         const obraHistoryFields = Object.keys(newObraHistoryEntryData);
         const obraHistoryValues = Object.values(newObraHistoryEntryData);
         const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', ');
@@ -279,7 +275,6 @@ const allocateToObra = async (req, res) => {
 
 const deallocateFromObra = async (req, res) => {
     const { id } = req.params; // vehicleId
-    // **CORREÇÃO: Removido 'obraId' do req.body**
     const { dataSaida, readingType, readingValue, location, shouldFinalizeObra, dataFimObra } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -293,17 +288,13 @@ const deallocateFromObra = async (req, res) => {
             [id, 'obra']
         );
         
-        // **NOVA VALIDAÇÃO**
         if (!historyRows || historyRows.length === 0) {
-            // Se não há histórico ativo, não há o que desalocar.
             throw new Error('Nenhum histórico de alocação em obra ativo encontrado para este veículo.');
         }
 
         const activeHistory = historyRows[0];
-        // **CORREÇÃO: Parse dos detalhes do histórico**
         const historyDetails = parseJsonSafe(activeHistory?.details, 'history.details') || {};
         
-        // **CORREÇÃO: Extrair obraId e employeeId do histórico ativo, não do body**
         const obraIdFromHistory = historyDetails.obraId;
         const employeeIdFromHistory = historyDetails.employeeId;
 
@@ -311,7 +302,6 @@ const deallocateFromObra = async (req, res) => {
             throw new Error('Não foi possível encontrar o ID da obra no histórico ativo. A desalocação falhou.');
         }
 
-        // **CORREÇÃO: Usar 'historyDetails' como base**
         const newDetails = {
             ...historyDetails,
             [`${readingType}Saida`]: readingValue
@@ -327,6 +317,8 @@ const deallocateFromObra = async (req, res) => {
             obraAtualId: null, 
             status: 'Disponível', 
             localizacaoAtual: location, 
+            // **CORREÇÃO DE SINCRONIA:** Limpa 'alocadoEm' que o frontend usa
+            alocadoEm: null,
             [readingType]: readingValue, // Atualiza leitura principal
         };
         
@@ -340,7 +332,6 @@ const deallocateFromObra = async (req, res) => {
         );
 
         // 3. Atualiza funcionário (se houver)
-        // **CORREÇÃO: Usa employeeIdFromHistory extraído dos detalhes**
         if (employeeIdFromHistory) {
              await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdFromHistory]);
         }
@@ -357,9 +348,7 @@ const deallocateFromObra = async (req, res) => {
             obraHistoryUpdateValues.push(readingValue);
         }
 
-        // Adiciona os Criteiros WHERE
         obraHistoryUpdateValues.push(id); // vehicleId
-        // **CORREÇÃO: Usa obraIdFromHistory extraído dos detalhes**
         obraHistoryUpdateValues.push(obraIdFromHistory); // obraId
 
         await connection.execute(
@@ -382,7 +371,6 @@ const deallocateFromObra = async (req, res) => {
 
             await connection.execute(
                 `UPDATE obras SET ${obraSetClause} WHERE id = ?`,
-                // **CORREÇÃO: Usa obraIdFromHistory extraído dos detalhes**
                 [...obraUpdateValues, obraIdFromHistory]
             );
         }
@@ -398,7 +386,6 @@ const deallocateFromObra = async (req, res) => {
     }
 };
 
-// --- (código existente de 'assignToOperational' sem alterações)
 const assignToOperational = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { subGroup, employeeId, observacoes } = req.body;
@@ -458,6 +445,12 @@ const assignToOperational = async (req, res) => {
             status: 'Em Operação',
             obraAtualId: null,
             maintenanceLocation: null,
+            // **CORREÇÃO DE SINCRONIA:** Atualiza 'alocadoEm' que o frontend usa
+            alocadoEm: JSON.stringify({
+                type: 'operacional',
+                subGroup: subGroup,
+                employeeName: employeeName
+            }),
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -483,7 +476,6 @@ const assignToOperational = async (req, res) => {
     }
 };
 
-// --- (código existente de 'unassignFromOperational' sem alterações)
 const unassignFromOperational = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { location } = req.body;
@@ -511,6 +503,8 @@ const unassignFromOperational = async (req, res) => {
             operationalAssignment: null, 
             status: 'Disponível', 
             localizacaoAtual: location, 
+            // **CORREÇÃO DE SINCRONIA:** Limpa 'alocadoEm' que o frontend usa
+            alocadoEm: null,
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -541,7 +535,6 @@ const unassignFromOperational = async (req, res) => {
     }
 };
 
-// --- (código existente de 'startMaintenance' sem alterações)
 const startMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { status, location } = req.body;
@@ -591,6 +584,12 @@ const startMaintenance = async (req, res) => {
             maintenanceLocation: JSON.stringify(maintenanceLocation),
             obraAtualId: null,
             operationalAssignment: null,
+            // **CORREÇÃO DE SINCRONIA:** Atualiza 'alocadoEm' que o frontend usa
+            alocadoEm: JSON.stringify({
+                type: 'manutencao',
+                location: location,
+                status: status
+            }),
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -613,7 +612,6 @@ const startMaintenance = async (req, res) => {
     }
 };
 
-// --- (código existente de 'endMaintenance' sem alterações)
 const endMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { location } = req.body;
@@ -634,6 +632,8 @@ const endMaintenance = async (req, res) => {
             status: 'Disponível',
             maintenanceLocation: null,
             localizacaoAtual: location,
+            // **CORREÇÃO DE SINCRONIA:** Limpa 'alocadoEm' que o frontend usa
+            alocadoEm: null,
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -658,7 +658,6 @@ const endMaintenance = async (req, res) => {
 
 
 module.exports = {
-// ... (código existente de 'module.exports' sem alterações)
     getAllVehicles,
     getVehicleById,
     createVehicle,
