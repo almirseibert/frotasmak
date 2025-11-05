@@ -113,7 +113,18 @@ const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
         // Implementação de exemplo: esta lógica precisa ser adaptada às suas tabelas de histórico
-        res.json({ message: `Histórico para o funcionário ${id} ainda não implementado.`, history: [] });
+        // Por exemplo, buscar em 'vehicle_history' onde o 'employeeId' bate
+        const [historyRows] = await db.execute(
+            "SELECT * FROM vehicle_history WHERE JSON_EXTRACT(details, '$.employeeId') = ?",
+             [id]
+        );
+        
+        const parsedHistory = historyRows.map(h => ({
+            ...h,
+            details: parseJsonSafe(h.details, 'history.details')
+        }));
+
+        res.json(parsedHistory);
     } catch (error) {
         console.error(`Erro ao buscar histórico para o funcionário ${id}:`, error);
         res.status(500).json({ error: 'Erro ao buscar histórico do funcionário' });
@@ -149,6 +160,6 @@ module.exports = {
     createEmployee,
     updateEmployee,
     deleteEmployee,
-    getEmployeeHistory,     // Agora exportada
+    getEmployeeHistory,     // Agora exportada e com lógica básica
     updateEmployeeStatus    // Agora exportada
 };

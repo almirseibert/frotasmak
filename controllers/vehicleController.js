@@ -208,6 +208,7 @@ const allocateToObra = async (req, res) => {
         };
         
         // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
+        // Substitui o 'INSERT ... SET ?'
         const historyFields = Object.keys(newHistoryEntry);
         const historyValues = Object.values(newHistoryEntry);
         const historyPlaceholders = historyFields.map(() => '?').join(', ');

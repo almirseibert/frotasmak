@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const obraController = require('../controllers/obraController');
+const authMiddleware = require('../middlewares/authMiddleware'); // Adicionado authMiddleware
+
+router.use(authMiddleware); // Protegendo todas as rotas de obras
 
 // Rotas CRUD padrão
 router.get('/', obraController.getAllObras);

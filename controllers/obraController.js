@@ -123,7 +123,7 @@ const finishObra = async (req, res) => {
 
     try {
         const [result] = await db.execute(
-            "UPDATE obras SET status = 'Finalizada', endDate = ? WHERE id = ?",
+            "UPDATE obras SET status = 'Finalizada', dataFim = ? WHERE id = ?", // Corrigido de endDate para dataFim
             [currentDate, id]
         );
 
