@@ -122,7 +122,7 @@ const updateObra = async (req, res) => {
 const deleteObra = async (req, res) => {
     try {
         await db.execute('DELETE FROM obras WHERE id = ?', [req.params.id]);
-        res.status(2D-1).end(); // 204
+        res.status(204).end(); // **CORRIGIDO DE 2D-1 PARA 204**
     } catch (error) {
         console.error('Erro ao deletar obra:', error);
         res.status(500).json({ error: 'Erro ao deletar obra' });
