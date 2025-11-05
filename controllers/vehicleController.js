@@ -343,7 +343,16 @@ const deallocateFromObra = async (req, res) => {
             obraUpdate.status = 'finalizada';
             obraUpdate.dataFim = new Date(dataFimObra);
         }
-        await connection.execute('UPDATE obras SET ? WHERE id = ?', [obraUpdate, obraId]);
+
+        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
+        const obraUpdateFields = Object.keys(obraUpdate);
+        const obraUpdateValues = Object.values(obraUpdate);
+        const obraSetClause = obraUpdateFields.map(field => `${field} = ?`).join(', ');
+
+        await connection.execute(
+            `UPDATE obras SET ${obraSetClause} WHERE id = ?`,
+            [...obraUpdateValues, obraId]
+        );
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
@@ -626,4 +635,3 @@ module.exports = {
     startMaintenance,
     endMaintenance
 };
-
