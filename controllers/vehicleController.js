@@ -1,5 +1,6 @@
 // controllers/vehicleController.js
 const db = require('../database');
+const { randomUUID } = require('crypto'); // Importar o gerador de UUID
 
 // --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
 const parseJsonSafe = (field, key) => {
@@ -28,8 +29,6 @@ const parseJsonSafe = (field, key) => {
 };
 
 // --- Funções Auxiliares para JSON ---
-// CORREÇÃO: Removido o parse da coluna 'history', pois ela não existe em 'vehicles'.
-// Adicionado parse para as novas colunas JSON.
 const parseVehicleJsonFields = (vehicle) => {
     if (!vehicle) return null;
     const newVehicle = { ...vehicle };
@@ -43,7 +42,6 @@ const parseVehicleJsonFields = (vehicle) => {
 };
 
 // --- READ: Obter todos os veículos ---
-// CORREÇÃO: Agora busca o histórico da tabela 'vehicle_history' e anexa aos veículos.
 const getAllVehicles = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles');
@@ -52,7 +50,6 @@ const getAllVehicles = async (req, res) => {
         const vehicles = rows.map(v => {
             const vehicle = parseVehicleJsonFields(v);
             // Anexa o histórico relevante a este veículo
-            // CORREÇÃO: Parse 'details' do histórico
             vehicle.history = historyRows
                 .filter(h => h.vehicleId === vehicle.id)
                 .map(h => ({
@@ -70,7 +67,6 @@ const getAllVehicles = async (req, res) => {
 };
 
 // --- READ: Obter um único veículo por ID ---
-// CORREÇÃO: Também busca o histórico da tabela 'vehicle_history'.
 const getVehicleById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles WHERE id = ?', [req.params.id]);
@@ -82,7 +78,6 @@ const getVehicleById = async (req, res) => {
         
         // Busca o histórico para este veículo
         const [historyRows] = await db.execute('SELECT * FROM vehicle_history WHERE vehicleId = ?', [req.params.id]);
-        // CORREÇÃO: Parse 'details' do histórico
         vehicle.history = historyRows.map(h => ({
             ...h,
             details: parseJsonSafe(h.details, 'history.details')
@@ -96,12 +91,10 @@ const getVehicleById = async (req, res) => {
 };
 
 // --- CREATE: Criar um novo veículo ---
-// CORREÇÃO: Removida a lógica de 'history'
 const createVehicle = async (req, res) => {
     const data = req.body;
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
-    // Remove 'history' se ele for enviado acidentalmente
     delete data.history; 
 
     const fields = Object.keys(data);
@@ -119,7 +112,6 @@ const createVehicle = async (req, res) => {
 };
 
 // --- UPDATE: Atualizar um veículo existente ---
-// CORREÇÃO: Removida a lógica de 'history'
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -128,11 +120,9 @@ const updateVehicle = async (req, res) => {
     if (data.maintenanceLocation) data.maintenanceLocation = JSON.stringify(data.maintenanceLocation);
     if (data.operationalAssignment) data.operationalAssignment = JSON.stringify(data.operationalAssignment);
     
-    // Remove 'history' se ele for enviado acidentalmente
     delete data.history;
 
     const fields = Object.keys(data).filter(key => key !== 'id');
-    // CORREÇÃO: Filtra 'id' dos valores também
     const values = fields.map(field => data[field]);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
     const query = `UPDATE vehicles SET ${setClause} WHERE id = ?`;
@@ -147,17 +137,14 @@ const updateVehicle = async (req, res) => {
 };
 
 // --- DELETE: Deletar um veículo (com remoção em cascata) ---
-// Esta função está correta, pois o DB (com 'ON DELETE CASCADE') cuida do 'vehicle_history'
 const deleteVehicle = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
     try {
-        // Remove revisões (se não tiver cascade)
         const [revisions] = await connection.execute('SELECT id FROM revisions WHERE vehicleId = ?', [req.params.id]);
         if (revisions.length > 0) {
             await connection.execute('DELETE FROM revisions WHERE vehicleId = ?', [req.params.id]);
         }
-        // Deleta o veículo (vehicle_history será deletado pelo ON DELETE CASCADE)
         await connection.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
         await connection.commit();
         res.status(204).end();
@@ -207,8 +194,6 @@ const allocateToObra = async (req, res) => {
             })
         };
         
-        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
-        // Substitui o 'INSERT ... SET ?'
         const historyFields = Object.keys(newHistoryEntry);
         const historyValues = Object.values(newHistoryEntry);
         const historyPlaceholders = historyFields.map(() => '?').join(', ');
@@ -228,7 +213,6 @@ const allocateToObra = async (req, res) => {
             [readingType]: readingValue, // Atualiza a leitura principal
         };
         
-        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
         const updateFields = Object.keys(vehicleUpdateData);
         const updateValues = Object.values(vehicleUpdateData);
         const setClause = updateFields.map(field => `${field} = ?`).join(', ');
@@ -241,28 +225,38 @@ const allocateToObra = async (req, res) => {
         // 3. Atualiza o funcionário
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
 
-        // 4. (Lógica legada de 'obras_historico_veiculos' - mantida por segurança)
+        // 4. (Lógica migrada) Grava na tabela 'obras_historico_veiculos'
+        // Busca os dados do veículo para popular a tabela de histórico
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
         const vehicle = vehicleRows[0];
-        const [obraDataRows] = await connection.execute('SELECT historicoVeiculos FROM obras WHERE id = ?', [obraId]);
-        const obraData = obraDataRows[0];
         
-        const legacyHistoryEntry = { 
-            veiculoId: vehicle.id, 
-            placa: vehicle.placa, 
-            tipo: vehicle.tipo, 
-            registroInterno: vehicle.registroInterno, 
-            modelo: `${vehicle.marca} ${vehicle.modelo}`, 
-            dataEntrada: new Date(dataEntrada),
-            dataSaida: null, 
-            [`${readingType}Entrada`]: readingValue,
-            [`${readingType}Saida`]: null,
-            employeeId,
+        const newObraHistoryEntryData = {
+            id: randomUUID(), // Gera um ID único para o registro
+            obraId: obraId,
+            veiculoId: vehicle.id,
+            tipo: vehicle.tipo,
+            registroInterno: vehicle.registroInterno,
+            placa: vehicle.placa,
+            modelo: `${vehicle.marca} ${vehicle.modelo}`,
+            employeeId: employeeId,
             employeeName: employee.nome,
+            dataEntrada: new Date(dataEntrada),
+            dataSaida: null,
+            odometroEntrada: readingType === 'odometro' ? readingValue : null,
+            odometroSaida: null,
+            horimetroEntrada: (readingType === 'horimetro' || readingType === 'horimetroDigital') ? readingValue : null,
+            horimetroSaida: null
         };
-        const updatedObraHistory = parseJsonSafe(obraData.historicoVeiculos, 'obra.historicoVeiculos') || [];
-        updatedObraHistory.push(legacyHistoryEntry);
-        await connection.execute('UPDATE obras SET historicoVeiculos = ? WHERE id = ?', [JSON.stringify(updatedObraHistory), obraId]);
+        
+        // Constrói a query de inserção para 'obras_historico_veiculos'
+        const obraHistoryFields = Object.keys(newObraHistoryEntryData);
+        const obraHistoryValues = Object.values(newObraHistoryEntryData);
+        const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', ');
+
+        await connection.execute(
+            `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`,
+            obraHistoryValues
+        );
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
@@ -285,7 +279,6 @@ const deallocateFromObra = async (req, res) => {
         const exitTimestamp = new Date(dataSaida);
 
         // 1. Atualiza a entrada de histórico em 'vehicle_history'
-        // Busca a entrada ativa para pegar os 'details' antigos
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'obra']
@@ -309,7 +302,6 @@ const deallocateFromObra = async (req, res) => {
             [readingType]: readingValue, // Atualiza leitura principal
         };
         
-        // CORREÇÃO da Sintaxe SQL
         const updateFields = Object.keys(vehicleUpdateData);
         const updateValues = Object.values(vehicleUpdateData);
         const setClause = updateFields.map(field => `${field} = ?`).join(', ');
@@ -327,33 +319,45 @@ const deallocateFromObra = async (req, res) => {
              }
         }
         
-        // 4. Atualiza 'obras' (lógica legada)
-        const [obraDataRows] = await connection.execute('SELECT historicoVeiculos FROM obras WHERE id = ?', [obraId]);
-        const obraData = obraDataRows[0];
-        const legacyHistorico = parseJsonSafe(obraData.historicoVeiculos, 'obra.historicoVeiculos') || [];
-        
-        const updatedLegacyHistorico = legacyHistorico.map(h => {
-            if (h.veiculoId === id && !h.dataSaida) {
-                return { ...h, dataSaida: exitTimestamp, [`${readingType}Saida`]: readingValue };
-            }
-            return h;
-        });
-        
-        const obraUpdate = { historicoVeiculos: JSON.stringify(updatedLegacyHistorico) };
-        if (shouldFinalizeObra) {
-            obraUpdate.status = 'finalizada';
-            obraUpdate.dataFim = new Date(dataFimObra);
+        // 4. (Lógica migrada) Atualiza 'obras_historico_veiculos'
+        const obraHistoryUpdateFields = ['dataSaida = ?'];
+        const obraHistoryUpdateValues = [exitTimestamp];
+
+        if (readingType === 'odometro') {
+            obraHistoryUpdateFields.push('odometroSaida = ?');
+            obraHistoryUpdateValues.push(readingValue);
+        } else if (readingType === 'horimetro' || readingType === 'horimetroDigital') {
+            obraHistoryUpdateFields.push('horimetroSaida = ?');
+            obraHistoryUpdateValues.push(readingValue);
         }
 
-        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
-        const obraUpdateFields = Object.keys(obraUpdate);
-        const obraUpdateValues = Object.values(obraUpdate);
-        const obraSetClause = obraUpdateFields.map(field => `${field} = ?`).join(', ');
+        // Adiciona os Criteiros WHERE
+        obraHistoryUpdateValues.push(id); // vehicleId
+        obraHistoryUpdateValues.push(obraId); // obraId
 
         await connection.execute(
-            `UPDATE obras SET ${obraSetClause} WHERE id = ?`,
-            [...obraUpdateValues, obraId]
+            `UPDATE obras_historico_veiculos 
+             SET ${obraHistoryUpdateFields.join(', ')} 
+             WHERE veiculoId = ? AND obraId = ? AND dataSaida IS NULL`,
+            obraHistoryUpdateValues
         );
+        
+        // 5. (Lógica separada) Atualiza 'obras' se 'shouldFinalizeObra' for verdadeiro
+        if (shouldFinalizeObra) {
+            const obraUpdate = { 
+                status: 'finalizada', // Ajuste para 'Finalizada' se for o caso
+                dataFim: new Date(dataFimObra)
+            };
+
+            const obraUpdateFields = Object.keys(obraUpdate);
+            const obraUpdateValues = Object.values(obraUpdate);
+            const obraSetClause = obraUpdateFields.map(field => `${field} = ?`).join(', ');
+
+            await connection.execute(
+                `UPDATE obras SET ${obraSetClause} WHERE id = ?`,
+                [...obraUpdateValues, obraId]
+            );
+        }
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
@@ -402,7 +406,6 @@ const assignToOperational = async (req, res) => {
             })
         };
         
-        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
         const historyFields = Object.keys(newHistoryEntry);
         const historyValues = Object.values(newHistoryEntry);
         const historyPlaceholders = historyFields.map(() => '?').join(', ');
@@ -420,7 +423,7 @@ const assignToOperational = async (req, res) => {
             startDate: now 
         };
 
-        // 4. Atualiza 'vehicles' (CORREÇÃO: sem 'history', sintaxe corrigida)
+        // 4. Atualiza 'vehicles'
         const vehicleUpdateData = {
             operationalAssignment: JSON.stringify(operationalAssignment),
             status: 'Em Operação',
@@ -473,7 +476,7 @@ const unassignFromOperational = async (req, res) => {
             [now, id, 'operacional']
         );
 
-        // 3. Atualiza 'vehicles' (CORREÇÃO: sintaxe corrigida)
+        // 3. Atualiza 'vehicles'
         const vehicleUpdateData = { 
             operationalAssignment: null, 
             status: 'Disponível', 
@@ -536,7 +539,6 @@ const startMaintenance = async (req, res) => {
             })
         };
         
-        // CORREÇÃO da Sintaxe SQL (ER_PARSE_ERROR)
         const historyFields = Object.keys(newHistoryEntry);
         const historyValues = Object.values(newHistoryEntry);
         const historyPlaceholders = historyFields.map(() => '?').join(', ');
@@ -552,7 +554,7 @@ const startMaintenance = async (req, res) => {
             details: location,
         };
 
-        // 4. Atualiza 'vehicles' (CORREÇÃO: sem 'history', sintaxe corrigida)
+        // 4. Atualiza 'vehicles'
         const vehicleUpdateData = {
             status: status,
             maintenanceLocation: JSON.stringify(maintenanceLocation),
@@ -595,7 +597,7 @@ const endMaintenance = async (req, res) => {
             [now, id, 'manutencao']
         );
 
-        // 2. Atualiza 'vehicles' (CORREÇÃO: sem 'history', sintaxe corrigida)
+        // 2. Atualiza 'vehicles'
         const vehicleUpdateData = {
             status: 'Disponível',
             maintenanceLocation: null,
