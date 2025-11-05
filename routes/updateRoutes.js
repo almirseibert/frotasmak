@@ -1,12 +1,22 @@
 // routes/updateRoutes.js
 const express = require('express');
 const router = express.Router();
-// NOTA: Você precisará criar este controller, ou me enviar o adminController para eu adaptar.
-// Por enquanto, vamos assumir que a lógica está em 'adminController'.
-const adminController = require('../controllers/adminController');
+// NOTA: Agora usamos o 'updateController' que criamos
+const updateController = require('../controllers/updateController');
+const authMiddleware = require('../middlewares/authMiddleware');
 
-// Rota para buscar a última mensagem de atualização
-// Corresponde a GET /api/updates/latest
-router.get('/latest', adminController.getUpdateMessage);
+router.use(authMiddleware); // Protege todas as rotas de 'updates'
+
+// Rota para buscar TODAS as atualizações (corrige o 404 da AdminPage)
+// Corresponde a GET /api/updates
+router.get('/', updateController.getAllUpdates);
+
+// Rota para criar uma nova atualização (para a AdminPage)
+// Corresponde a POST /api/updates
+router.post('/', updateController.createUpdate);
+
+// Rota para deletar uma atualização (para a AdminPage)
+// Corresponde a DELETE /api/updates/:id
+router.delete('/:id', updateController.deleteUpdate);
 
 module.exports = router;

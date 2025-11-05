@@ -1,22 +1,5 @@
 const db = require('../database');
-
-// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
-const parseJsonSafe = (field, key) => {
-    if (field === null || typeof field === 'undefined') return null;
-    if (typeof field === 'object') return field;
-    if (typeof field !== 'string') return field;
-
-    try {
-        const parsed = JSON.parse(field);
-        if (typeof parsed === 'object' && parsed !== null) {
-            return parsed;
-        }
-        return null;
-    } catch (e) {
-        console.warn(`[JSON Parse Error] Falha ao analisar o campo '${key}'. Valor problemático:`, field);
-        return null;
-    }
-};
+const { parseJsonSafe } = require('../utils/parseJsonSafe'); // Supondo que você criou um util
 
 // --- Função Auxiliar para Conversão de JSON nos campos da Obra ---
 const parseObraJsonFields = (obra) => {
@@ -149,7 +132,7 @@ const finishObra = async (req, res) => {
 
     try {
         const [result] = await db.execute(
-            "UPDATE obras SET status = 'Finalizada', dataFim = ? WHERE id = ?",
+            "UPDATE obras SET status = 'finalizada', dataFim = ? WHERE id = ?", // Corrigido para 'finalizada'
             [currentDate, id]
         );
 
@@ -163,6 +146,84 @@ const finishObra = async (req, res) => {
     }
 };
 
+// --- NOVO: Atualizar uma entrada de histórico específica (para ObrasPage.js) ---
+const updateObraHistoryEntry = async (req, res) => {
+    const { historyId } = req.params; // PK da tabela obras_historico_veiculos
+    const { dataEntrada, dataSaida, employeeId, leituraEntrada, leituraSaida } = req.body;
+
+    // Busca o nome do funcionário
+    let employeeName = null;
+    if (employeeId) {
+        try {
+            const [empRows] = await db.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+            if (empRows.length > 0) {
+                employeeName = empRows[0].nome;
+            }
+        } catch (e) {
+            console.warn("Não foi possível buscar nome do funcionário durante a atualização do histórico.");
+        }
+    }
+
+    // Determina os campos de leitura (o frontend envia 'leituraEntrada',
+    // mas não sabemos se é odometro ou horimetro. Precisamos checar o registro original)
+    let odometroEntrada = null;
+    let horimetroEntrada = null;
+    let odometroSaida = null;
+    let horimetroSaida = null;
+
+    try {
+        const [currentHistory] = await db.execute('SELECT * FROM obras_historico_veiculos WHERE id = ?', [historyId]);
+        if (currentHistory.length === 0) {
+            return res.status(404).json({ error: 'Registro de histórico não encontrado.' });
+        }
+
+        const history = currentHistory[0];
+        
+        // Mantém o tipo de leitura original
+        if (history.odometroEntrada !== null) {
+            odometroEntrada = parseFloat(leituraEntrada) || null;
+            odometroSaida = parseFloat(leituraSaida) || null;
+        } else {
+            horimetroEntrada = parseFloat(leituraEntrada) || null;
+            horimetroSaida = parseFloat(leituraSaida) || null;
+        }
+
+        const query = `
+            UPDATE obras_historico_veiculos 
+            SET 
+                dataEntrada = ?, 
+                dataSaida = ?, 
+                employeeId = ?, 
+                employeeName = ?,
+                odometroEntrada = ?,
+                odometroSaida = ?,
+                horimetroEntrada = ?,
+                horimetroSaida = ?
+            WHERE id = ?
+        `;
+        
+        const values = [
+            dataEntrada || null,
+            dataSaida || null,
+            employeeId || null,
+            employeeName,
+            odometroEntrada,
+            odometroSaida,
+            horimetroEntrada,
+            horimetroSaida,
+            historyId
+        ];
+
+        await db.execute(query, values);
+        res.json({ message: 'Histórico da obra atualizado com sucesso.' });
+
+    } catch (error) {
+        console.error('Erro ao atualizar histórico da obra:', error);
+        res.status(500).json({ error: 'Erro ao atualizar histórico da obra.' });
+    }
+};
+
+
 // --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllObras,
@@ -170,5 +231,6 @@ module.exports = {
     createObra,
     updateObra,
     deleteObra,
-    finishObra
+    finishObra,
+    updateObraHistoryEntry // Adiciona a nova função
 };

@@ -16,4 +16,9 @@ router.delete('/:id', obraController.deleteObra);
 // O controlador agora tem a função 'finishObra', então esta linha funcionará
 router.put('/:id/finish', obraController.finishObra);
 
+// --- NOVO: Rota para editar uma entrada de histórico específica ---
+// Esta rota é chamada pelo ObrasPage.js (EditPastVehicleAssignmentModal e EditActiveVehicleAssignmentModal)
+router.put('/:obraId/historico/:historyId', obraController.updateObraHistoryEntry);
+
+
 module.exports = router;
