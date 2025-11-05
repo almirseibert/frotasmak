@@ -1,5 +1,6 @@
 // controllers/vehicleController.js
 const db = require('../database');
+// ... (código existente de 'randomUUID' e 'parseJsonSafe' sem alterações)
 const { randomUUID } = require('crypto'); // Importar o gerador de UUID
 
 // --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
@@ -29,6 +30,7 @@ const parseJsonSafe = (field, key) => {
 };
 
 // --- Funções Auxiliares para JSON ---
+// ... (código existente de 'parseVehicleJsonFields' sem alterações)
 const parseVehicleJsonFields = (vehicle) => {
     if (!vehicle) return null;
     const newVehicle = { ...vehicle };
@@ -42,6 +44,7 @@ const parseVehicleJsonFields = (vehicle) => {
 };
 
 // --- READ: Obter todos os veículos ---
+// ... (código existente de 'getAllVehicles' sem alterações)
 const getAllVehicles = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles');
@@ -67,6 +70,7 @@ const getAllVehicles = async (req, res) => {
 };
 
 // --- READ: Obter um único veículo por ID ---
+// ... (código existente de 'getVehicleById' sem alterações)
 const getVehicleById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles WHERE id = ?', [req.params.id]);
@@ -91,6 +95,7 @@ const getVehicleById = async (req, res) => {
 };
 
 // --- CREATE: Criar um novo veículo ---
+// ... (código existente de 'createVehicle' sem alterações)
 const createVehicle = async (req, res) => {
     const data = req.body;
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
@@ -112,6 +117,7 @@ const createVehicle = async (req, res) => {
 };
 
 // --- UPDATE: Atualizar um veículo existente ---
+// ... (código existente de 'updateVehicle' sem alterações)
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -137,6 +143,7 @@ const updateVehicle = async (req, res) => {
 };
 
 // --- DELETE: Deletar um veículo (com remoção em cascata) ---
+// ... (código existente de 'deleteVehicle' sem alterações)
 const deleteVehicle = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -162,6 +169,7 @@ const deleteVehicle = async (req, res) => {
 // ROTAS DE ALOCAÇÃO (CORRIGIDAS)
 // -------------------------------------------------------------------------
 
+// --- (código existente de 'allocateToObra' sem alterações)
 const allocateToObra = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { obraId, employeeId, dataEntrada, readingType, readingValue } = req.body;
@@ -271,7 +279,8 @@ const allocateToObra = async (req, res) => {
 
 const deallocateFromObra = async (req, res) => {
     const { id } = req.params; // vehicleId
-    const { dataSaida, readingType, readingValue, location, shouldFinalizeObra, dataFimObra, obraId } = req.body;
+    // **CORREÇÃO: Removido 'obraId' do req.body**
+    const { dataSaida, readingType, readingValue, location, shouldFinalizeObra, dataFimObra } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
@@ -283,9 +292,28 @@ const deallocateFromObra = async (req, res) => {
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'obra']
         );
+        
+        // **NOVA VALIDAÇÃO**
+        if (!historyRows || historyRows.length === 0) {
+            // Se não há histórico ativo, não há o que desalocar.
+            throw new Error('Nenhum histórico de alocação em obra ativo encontrado para este veículo.');
+        }
+
         const activeHistory = historyRows[0];
+        // **CORREÇÃO: Parse dos detalhes do histórico**
+        const historyDetails = parseJsonSafe(activeHistory?.details, 'history.details') || {};
+        
+        // **CORREÇÃO: Extrair obraId e employeeId do histórico ativo, não do body**
+        const obraIdFromHistory = historyDetails.obraId;
+        const employeeIdFromHistory = historyDetails.employeeId;
+
+        if (!obraIdFromHistory) {
+            throw new Error('Não foi possível encontrar o ID da obra no histórico ativo. A desalocação falhou.');
+        }
+
+        // **CORREÇÃO: Usar 'historyDetails' como base**
         const newDetails = {
-            ...(parseJsonSafe(activeHistory?.details, 'history.details') || {}),
+            ...historyDetails,
             [`${readingType}Saida`]: readingValue
         };
         
@@ -312,11 +340,9 @@ const deallocateFromObra = async (req, res) => {
         );
 
         // 3. Atualiza funcionário (se houver)
-        if (activeHistory?.details) {
-             const details = parseJsonSafe(activeHistory.details, 'history.details');
-             if (details?.employeeId) {
-                await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [details.employeeId]);
-             }
+        // **CORREÇÃO: Usa employeeIdFromHistory extraído dos detalhes**
+        if (employeeIdFromHistory) {
+             await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdFromHistory]);
         }
         
         // 4. (Lógica migrada) Atualiza 'obras_historico_veiculos'
@@ -333,7 +359,8 @@ const deallocateFromObra = async (req, res) => {
 
         // Adiciona os Criteiros WHERE
         obraHistoryUpdateValues.push(id); // vehicleId
-        obraHistoryUpdateValues.push(obraId); // obraId
+        // **CORREÇÃO: Usa obraIdFromHistory extraído dos detalhes**
+        obraHistoryUpdateValues.push(obraIdFromHistory); // obraId
 
         await connection.execute(
             `UPDATE obras_historico_veiculos 
@@ -355,7 +382,8 @@ const deallocateFromObra = async (req, res) => {
 
             await connection.execute(
                 `UPDATE obras SET ${obraSetClause} WHERE id = ?`,
-                [...obraUpdateValues, obraId]
+                // **CORREÇÃO: Usa obraIdFromHistory extraído dos detalhes**
+                [...obraUpdateValues, obraIdFromHistory]
             );
         }
 
@@ -370,6 +398,7 @@ const deallocateFromObra = async (req, res) => {
     }
 };
 
+// --- (código existente de 'assignToOperational' sem alterações)
 const assignToOperational = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { subGroup, employeeId, observacoes } = req.body;
@@ -454,6 +483,7 @@ const assignToOperational = async (req, res) => {
     }
 };
 
+// --- (código existente de 'unassignFromOperational' sem alterações)
 const unassignFromOperational = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { location } = req.body;
@@ -511,6 +541,7 @@ const unassignFromOperational = async (req, res) => {
     }
 };
 
+// --- (código existente de 'startMaintenance' sem alterações)
 const startMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { status, location } = req.body;
@@ -582,6 +613,7 @@ const startMaintenance = async (req, res) => {
     }
 };
 
+// --- (código existente de 'endMaintenance' sem alterações)
 const endMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { location } = req.body;
@@ -626,6 +658,7 @@ const endMaintenance = async (req, res) => {
 
 
 module.exports = {
+// ... (código existente de 'module.exports' sem alterações)
     getAllVehicles,
     getVehicleById,
     createVehicle,
