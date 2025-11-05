@@ -35,7 +35,21 @@ const parseObraJsonFields = (obra) => {
 const getAllObras = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras');
-        const obras = rows.map(parseObraJsonFields);
+        
+        // *** CORREÇÃO: Busca todo o histórico de obras de uma vez ***
+        const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
+
+        const obras = rows.map(obra => {
+            const parsedObra = parseObraJsonFields(obra);
+            
+            // *** CORREÇÃO: Anexa o histórico relevante a esta obra ***
+            parsedObra.historicoVeiculos = historyRows
+                .filter(h => h.obraId === parsedObra.id)
+                .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada)); // Ordena
+                
+            return parsedObra;
+        });
+        
         res.json(obras);
     } catch (error) {
         console.error('Erro ao buscar obras:', error);
@@ -44,7 +58,6 @@ const getAllObras = async (req, res) => {
 };
 
 // --- GET: Uma obra por ID ---
-// **CORREÇÃO: Renomeada para getObraById (singular) para corresponder à rota**
 const getObraById = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras WHERE id = ?', [req.params.id]);
@@ -122,7 +135,7 @@ const updateObra = async (req, res) => {
 const deleteObra = async (req, res) => {
     try {
         await db.execute('DELETE FROM obras WHERE id = ?', [req.params.id]);
-        res.status(204).end(); // **CORRIGIDO DE 2D-1 PARA 204**
+        res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar obra:', error);
         res.status(500).json({ error: 'Erro ao deletar obra' });
@@ -153,7 +166,7 @@ const finishObra = async (req, res) => {
 // --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllObras,
-    getObraById, // **CORREÇÃO: Exportando o nome singular**
+    getObraById,
     createObra,
     updateObra,
     deleteObra,
