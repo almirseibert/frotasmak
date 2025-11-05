@@ -54,7 +54,7 @@ const getObrasById = async (req, res) => {
         }
         
         // CORREÇÃO: Busca o histórico de veículos da tabela 'obras_historico_veiculos'
-        const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos WHERE obraId = ?', [req.params.id]);
+        const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos WHERE obraId = ? ORDER BY dataEntrada DESC', [req.params.id]);
         
         const obra = parseObraJsonFields(rows[0]);
         
@@ -159,7 +159,7 @@ const finishObra = async (req, res) => {
 // --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllObras,
-    getObraById: getObrasById, // Renomeado para exportar a função correta
+    getObraById: getObrasById, // Exportando a função correta
     createObra,
     updateObra,
     deleteObra,
