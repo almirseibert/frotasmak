@@ -5,6 +5,9 @@ const cors = require('cors');
 const path = require('path'); // Importa o módulo 'path'
 const db = require('./database');
 
+// Importa o multer
+const multer = require('multer');
+
 // Middlewares
 const authMiddleware = require('./middlewares/authMiddleware');
 
@@ -24,10 +27,12 @@ const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
 const adminRoutes = require('./routes/adminRoutes');
-// LINHA CORRIGIDA: './routes.expenseRoutes' -> './routes/expenseRoutes'
 const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
+
+// Importa as novas rotas de upload
+const uploadRoutes = require('./routes/uploadRoutes');
 
 
 const app = express();
@@ -35,6 +40,11 @@ const port = process.env.PORT || 3001;
 
 app.use(express.json());
 app.use(cors());
+
+// Servir arquivos estáticos da pasta 'uploads'
+// Isso torna as imagens acessíveis publicamente (ex: http://sua-api.com/uploads/vehicles/imagem.png)
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
 
 // --- ROTAS DA API ---
 const apiRouter = express.Router();
@@ -51,6 +61,9 @@ apiRouter.use('/registrationRequests', registrationRequestRoutes);
 // Aplica o middleware de autenticação para as rotas protegidas
 apiRouter.use(authMiddleware);
 
+// Rota de Upload (Protegida)
+apiRouter.use('/upload', uploadRoutes);
+
 // Rotas Protegidas
 apiRouter.use('/vehicles', vehicleRoutes);
 apiRouter.use('/obras', obraRoutes);
@@ -59,7 +72,6 @@ apiRouter.use('/partners', partnerRoutes);
 apiRouter.use('/revisions', revisionRoutes);
 apiRouter.use('/fines', fineRoutes);
 apiRouter.use('/refuelings', refuelingRoutes);
-// LINHA CORRIGIDA: api_router -> apiRouter
 apiRouter.use('/comboioTransactions', comboioTransactionRoutes);
 apiRouter.use('/diarioDeBordo', diarioDeBordoRoutes);
 apiRouter.use('/orders', orderRoutes);
@@ -72,11 +84,6 @@ apiRouter.use('/updates', updateRoutes);
 
 // Usa o roteador da API com o prefixo /api
 app.use('/api', apiRouter);
-
-// --- SEÇÃO REMOVIDA ---
-// As linhas app.use(express.static(...)) e app.get('*', ...) foram removidas.
-// Elas não devem existir no servidor de backend, pois causam o crash.
-// Elas pertencem apenas ao server.js do frontend.
 
 
 // Verifica a conexão com o banco de dados ao iniciar
@@ -93,4 +100,3 @@ db.getConnection()
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
 });
-
