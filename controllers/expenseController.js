@@ -1,7 +1,8 @@
 // controllers/expenseController.js
 const db = require('../database');
+const { v4: uuidv4 } = require('uuid'); // Para gerar IDs
 
-// --- Função para Criar ou Atualizar Despesas Semanais (Deve ser chamada dentro de uma transação) ---
+// --- Função para Criar ou Atualizar Despesas Semanais (Função existente) ---
 const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelType, partnerName, valueChange }) => {
     // 1. Condições para não gerar despesa (ex: valor zero)
     if (!valueChange || valueChange === 0) {
@@ -29,10 +30,12 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
     if (querySnapshot.length === 0) {
         // Se não existir, CRIA uma nova despesa
         if (valueChange > 0) {
+            // Gera um ID para a nova despesa
+            const newExpenseId = uuidv4();
             await connection.execute(`INSERT INTO expenses 
-                (obraId, description, amount, category, createdAt, weekStartDate, fuelType, partnerName)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, 
-                [obraId, description, valueChange, 'Combustível', new Date(), weekStartDate, fuelType, partnerName]
+                (id, obraId, description, amount, category, createdAt, weekStartDate, fuelType, partnerName, expenseType)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
+                [newExpenseId, obraId, description, valueChange, 'Combustível', new Date(), weekStartDate, fuelType, partnerName, 'Auto (Combustível)']
             );
         }
     } else {
@@ -40,8 +43,8 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
         const existingExpense = querySnapshot[0];
         const newAmount = existingExpense.amount + valueChange;
 
-        if (newAmount === 0) {
-             // Deleta a despesa se o valor final for zero
+        if (newAmount <= 0) { // Se for zero ou negativo
+             // Deleta a despesa
             await connection.execute('DELETE FROM expenses WHERE id = ?', [existingExpense.id]);
         } else {
             await connection.execute('UPDATE expenses SET amount = ? WHERE id = ?', [newAmount, existingExpense.id]);
@@ -49,20 +52,128 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
     }
 };
 
-// --- Função para Listar Todas as Despesas (Novo endpoint que faltava) ---
+// --- Função para Listar Todas as Despesas (Função existente) ---
 const listExpenses = async (req, res) => {
     try {
-        // Para evitar o erro 500, certifique-se de que a tabela 'expenses' existe
-        const [rows] = await db.execute('SELECT * FROM expenses ORDER BY createdAt DESC'); 
-        res.json(rows);
+        // A tabela 'expenses' deve existir (baseado no seu .sql anterior)
+        const [rows] = await db.execute('SELECT * FROM expenses ORDER BY createdAt DESC');
+        
+        // Garante que 'createdBy' seja um objeto, mesmo que venha como string
+        const expenses = rows.map(exp => ({
+            ...exp,
+            createdBy: typeof exp.createdBy === 'string' ? JSON.parse(exp.createdBy) : exp.createdBy
+        }));
+
+        res.json(expenses);
     } catch (error) {
-        // Se o erro for "Tabela não encontrada", o 500 aqui ajudará no debug
         console.error("Erro ao listar despesas:", error);
         res.status(500).json({ error: 'Erro interno ao listar despesas' });
     }
 };
 
+// --- (NOVO) Criar Despesa Manual ---
+const createExpense = async (req, res) => {
+    // Pega o usuário do middleware de autenticação
+    const { id: userId, email: userEmail } = req.user; 
+    
+    // Dados do frontend
+    const { obraId, description, amount, category } = req.body;
+
+    // Validação
+    if (!obraId || !description || !amount || !category) {
+        return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
+    }
+
+    try {
+        const newExpenseId = uuidv4(); // Gera o ID no backend
+        const createdAt = new Date();
+        const createdBy = JSON.stringify({ userId, userEmail });
+        const expenseType = "Manual"; // Define o tipo
+
+        const query = `
+            INSERT INTO expenses 
+            (id, obraId, description, amount, category, createdAt, createdBy, expenseType)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        
+        await db.execute(query, [
+            newExpenseId,
+            obraId,
+            description,
+            amount,
+            category,
+            createdAt,
+            createdBy,
+            expenseType
+        ]);
+
+        res.status(201).json({ id: newExpenseId, ...req.body, createdAt, createdBy });
+    } catch (error) {
+        console.error("Erro ao criar despesa manual:", error);
+        res.status(500).json({ error: 'Erro ao criar despesa.' });
+    }
+};
+
+// --- (NOVO) Atualizar Despesa Manual ---
+const updateExpense = async (req, res) => {
+    const { id } = req.params;
+    const { obraId, description, amount, category } = req.body;
+
+    // Validação
+    if (!obraId || !description || !amount || !category) {
+        return res.status(400).json({ error: 'Campos obrigatórios ausentes.' });
+    }
+
+    try {
+        const query = `
+            UPDATE expenses 
+            SET obraId = ?, description = ?, amount = ?, category = ?
+            WHERE id = ?
+        `;
+        
+        const [result] = await db.execute(query, [
+            obraId,
+            description,
+            amount,
+            category,
+            id
+        ]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Despesa não encontrada.' });
+        }
+
+        res.json({ message: 'Despesa atualizada com sucesso.' });
+    } catch (error) {
+        console.error("Erro ao atualizar despesa:", error);
+        res.status(500).json({ error: 'Erro ao atualizar despesa.' });
+    }
+};
+
+// --- (NOVO) Deletar Despesa Manual ---
+const deleteExpense = async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        const query = 'DELETE FROM expenses WHERE id = ?';
+        const [result] = await db.execute(query, [id]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Despesa não encontrada.' });
+        }
+
+        res.status(204).end(); // Sucesso, sem conteúdo
+    } catch (error) {
+        console.error("Erro ao deletar despesa:", error);
+        res.status(500).json({ error: 'Erro ao deletar despesa.' });
+    }
+};
+
+
 module.exports = {
     createOrUpdateWeeklyFuelExpense,
-    listExpenses, // Exporta a nova função de listagem
+    listExpenses,
+    createExpense,  // Exporta a nova função
+    updateExpense,  // Exporta a nova função
+    deleteExpense   // Exporta a nova função
 };
