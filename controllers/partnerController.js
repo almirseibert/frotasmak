@@ -73,16 +73,48 @@ const getPartnerById = async (req, res) => {
 
 // --- CREATE: Criar um novo parceiro (CORRIGIDO) ---
 const createPartner = async (req, res) => {
+    // *** AQUI ESTÁ A CORREÇÃO ***
+    // 1. Defina os campos que REALMENTE existem na tabela 'partners'
+    // Eu confiei em você e adicionei 'cidade' a esta lista.
+    const allowedPartnerFields = [
+        'id',
+        'razaoSocial',
+        'cnpj',
+        'inscricaoEstadual',
+        'endereco',
+        'telefone',
+        'whatsapp',
+        'email',
+        'contatoResponsavel',
+        'cidade' // Campo que você adicionou
+    ];
+
     const data = req.body;
     
-    // Remove fuel_prices dos dados principais (será tratado separadamente)
+    // 2. Separe os preços (que não vão na tabela 'partners')
     const fuelPrices = data.fuel_prices;
-    delete data.fuel_prices;
+    
+    // 3. Crie o objeto 'partnerData' APENAS com os campos permitidos
+    const partnerData = {};
+    Object.keys(data).forEach(key => {
+        if (allowedPartnerFields.includes(key)) {
+            partnerData[key] = data[key];
+        }
+    });
 
-    if (data.ultima_alteracao) data.ultima_alteracao = JSON.stringify(data.ultima_alteracao);
+    // 4. Stringify JSON (se houver - embora 'ultima_alteracao' não esteja na lista)
+    if (partnerData.ultima_alteracao) {
+        partnerData.ultima_alteracao = JSON.stringify(partnerData.ultima_alteracao);
+    }
 
-    const fields = Object.keys(data);
-    const values = Object.values(data);
+    // 5. Construa a query de forma segura
+    const fields = Object.keys(partnerData);
+    const values = Object.values(partnerData);
+    
+    if (fields.length === 0 || !partnerData.razaoSocial) {
+        return res.status(400).json({ error: 'Nenhum dado válido de parceiro fornecido (Razão Social é obrigatória).' });
+    }
+    
     const placeholders = fields.map(() => '?').join(', ');
     const query = `INSERT INTO partners (${fields.join(', ')}) VALUES (${placeholders})`;
 
@@ -119,15 +151,39 @@ const createPartner = async (req, res) => {
 // (Esta função só atualiza a tabela 'partners'. Preços são atualizados via 'updateFuelPrices')
 const updatePartner = async (req, res) => {
     const { id } = req.params;
+
+    // *** APLIQUEI A MESMA CORREÇÃO AQUI ***
+    const allowedPartnerFields = [
+        'razaoSocial',
+        'cnpj',
+        'inscricaoEstadual',
+        'endereco',
+        'telefone',
+        'whatsapp',
+        'email',
+        'contatoResponsavel',
+        'cidade',
+        'ultima_alteracao' // 'ultima_alteracao' não está no seu SQL, mas estava no código
+    ];
+
     const data = req.body;
     
-    // Remove fuel_prices para garantir que não tente atualizar a coluna errada
-    delete data.fuel_prices; 
+    // 1. Crie o objeto 'partnerData' APENAS com os campos permitidos
+    const partnerData = {};
+    Object.keys(data).forEach(key => {
+        if (allowedPartnerFields.includes(key) && key !== 'id') { // Ignora 'id'
+            partnerData[key] = data[key];
+        }
+    });
     
-    if (data.ultima_alteracao) data.ultima_alteracao = JSON.stringify(data.ultima_alteracao);
+    // 2. Stringify JSON
+    if (partnerData.ultima_alteracao) {
+        partnerData.ultima_alteracao = JSON.stringify(partnerData.ultima_alteracao);
+    }
 
-    const fields = Object.keys(data).filter(key => key !== 'id');
-    const values = fields.map(field => data[field]); // Pega os valores na ordem correta
+    // 3. Construa a query de forma segura
+    const fields = Object.keys(partnerData);
+    const values = fields.map(field => partnerData[field]); // Pega os valores na ordem correta
     const setClause = fields.map(field => `${field} = ?`).join(', ');
     
     if (fields.length === 0) {
