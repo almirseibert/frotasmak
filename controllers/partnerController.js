@@ -73,11 +73,10 @@ const getPartnerById = async (req, res) => {
 
 // --- CREATE: Criar um novo parceiro (CORRIGIDO) ---
 const createPartner = async (req, res) => {
-    // *** AQUI ESTÁ A CORREÇÃO ***
     // 1. Defina os campos que REALMENTE existem na tabela 'partners'
-    // Eu confiei em você e adicionei 'cidade' a esta lista.
+    // (Baseado no seu frotasmak (1).sql e na sua confirmação)
     const allowedPartnerFields = [
-        'id',
+        'id', // ID é varchar(255) e vem do cliente
         'razaoSocial',
         'cnpj',
         'inscricaoEstadual',
@@ -102,17 +101,17 @@ const createPartner = async (req, res) => {
         }
     });
 
-    // 4. Stringify JSON (se houver - embora 'ultima_alteracao' não esteja na lista)
-    if (partnerData.ultima_alteracao) {
-        partnerData.ultima_alteracao = JSON.stringify(partnerData.ultima_alteracao);
-    }
+    // 4. Stringify JSON (se houver)
+    // O campo 'ultima_alteracao' NÃO existe na tabela partners, então removemos a lógica
+    // if (partnerData.ultima_alteracao) { ... }
 
     // 5. Construa a query de forma segura
     const fields = Object.keys(partnerData);
     const values = Object.values(partnerData);
     
-    if (fields.length === 0 || !partnerData.razaoSocial) {
-        return res.status(400).json({ error: 'Nenhum dado válido de parceiro fornecido (Razão Social é obrigatória).' });
+    // Validação crucial: O ID deve estar presente
+    if (!partnerData.id || !partnerData.razaoSocial) {
+        return res.status(400).json({ error: 'ID e Razão Social são obrigatórios.' });
     }
     
     const placeholders = fields.map(() => '?').join(', ');
@@ -123,7 +122,8 @@ const createPartner = async (req, res) => {
 
     try {
         const [result] = await connection.execute(query, values);
-        const newPartnerId = data.id || result.insertId; // Usa ID se fornecido (ex: UUID) ou o insertId
+        // O ID é o que veio do cliente (partnerData.id)
+        const newPartnerId = partnerData.id; 
 
         // Agora, insere os preços de combustível na tabela 'partner_fuel_prices'
         if (fuelPrices && typeof fuelPrices === 'object') {
@@ -152,7 +152,8 @@ const createPartner = async (req, res) => {
 const updatePartner = async (req, res) => {
     const { id } = req.params;
 
-    // *** APLIQUEI A MESMA CORREÇÃO AQUI ***
+    // *** CORREÇÃO DO BUG 'ultima_alteracao' ***
+    // Esta lista agora reflete 100% a tabela 'partners' do seu .sql + 'cidade'
     const allowedPartnerFields = [
         'razaoSocial',
         'cnpj',
@@ -162,8 +163,8 @@ const updatePartner = async (req, res) => {
         'whatsapp',
         'email',
         'contatoResponsavel',
-        'cidade',
-        'ultima_alteracao' // 'ultima_alteracao' não está no seu SQL, mas estava no código
+        'cidade'
+        // 'ultima_alteracao' foi REMOVIDO pois não existe na tabela partners
     ];
 
     const data = req.body;
@@ -176,10 +177,8 @@ const updatePartner = async (req, res) => {
         }
     });
     
-    // 2. Stringify JSON
-    if (partnerData.ultima_alteracao) {
-        partnerData.ultima_alteracao = JSON.stringify(partnerData.ultima_alteracao);
-    }
+    // 2. Stringify JSON (Lógica removida, 'ultima_alteracao' não está aqui)
+    // if (partnerData.ultima_alteracao) { ... }
 
     // 3. Construa a query de forma segura
     const fields = Object.keys(partnerData);
