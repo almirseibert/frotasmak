@@ -1,6 +1,8 @@
 // controllers/expenseController.js
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid'); // Para gerar IDs
+// *** ADICIONADO: Importa o parser seguro que já existe no seu projeto ***
+const { parseJsonSafe } = require('../utils/parseJsonSafe');
 
 // --- Função para Criar ou Atualizar Despesas Semanais (Função existente) ---
 const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelType, partnerName, valueChange }) => {
@@ -41,7 +43,8 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
     } else {
         // Se existir, ATUALIZA o valor (incrementando ou decrementando)
         const existingExpense = querySnapshot[0];
-        const newAmount = existingExpense.amount + valueChange;
+        // *** CORREÇÃO: Garante que 'amount' seja um número antes de somar ***
+        const newAmount = (parseFloat(existingExpense.amount) || 0) + valueChange;
 
         if (newAmount <= 0) { // Se for zero ou negativo
              // Deleta a despesa
@@ -58,10 +61,13 @@ const listExpenses = async (req, res) => {
         // A tabela 'expenses' deve existir (baseado no seu .sql anterior)
         const [rows] = await db.execute('SELECT * FROM expenses ORDER BY createdAt DESC');
         
-        // Garante que 'createdBy' seja um objeto, mesmo que venha como string
+        // *** CORREÇÃO DO ERRO 500 ***
+        // Trocamos o JSON.parse() inseguro pelo 'parseJsonSafe'
         const expenses = rows.map(exp => ({
             ...exp,
-            createdBy: typeof exp.createdBy === 'string' ? JSON.parse(exp.createdBy) : exp.createdBy
+            // Isso vai tentar parsear 'createdBy'. Se falhar (ex: for null ou ""),
+            // ele vai retornar o valor padrão (null) e não vai quebrar o servidor.
+            createdBy: parseJsonSafe(exp.createdBy, 'createdBy', null)
         }));
 
         res.json(expenses);
