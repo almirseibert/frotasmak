@@ -54,40 +54,105 @@ const getEmployeeById = async (req, res) => {
     }
 };
 
-// --- POST: Criar um novo funcionário ---
-const createEmployee = async (req, res) => {
-    const data = { ...req.body };
-    if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
-    if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
+// --- (NOVO) Lista de campos permitidos da tabela 'employees' ---
+// (Baseado no seu frotasmak (1).sql)
+const allowedEmployeeFields = [
+    'id',
+    'userId',
+    'nome',
+    'vulgo',
+    'funcao',
+    'registroInterno',
+    'cpf',
+    'endereco',
+    'cidade',
+    'contato',
+    'status',
+    'dataContratacao',
+    'cnhNumero',
+    'cnhCategoria',
+    'cnhVencimento',
+    'podeAcessarAbastecimento',
+    'alocadoEm',
+    'ultimaAlteracao'
+];
 
-    const fields = Object.keys(data);
-    const values = Object.values(data);
+// --- POST: Criar um novo funcionário (CORRIGIDO E SEGURO) ---
+const createEmployee = async (req, res) => {
+    const data = req.body;
+    
+    // 1. Filtra apenas os campos permitidos
+    const employeeData = {};
+    Object.keys(data).forEach(key => {
+        if (allowedEmployeeFields.includes(key)) {
+            employeeData[key] = data[key];
+        }
+    });
+
+    // 2. Validação crucial (ID e Nome/Registro)
+    if (!employeeData.id) {
+        return res.status(400).json({ error: 'ID do funcionário é obrigatório (gerado pelo cliente).' });
+    }
+    if (!employeeData.nome || !employeeData.registroInterno) {
+         return res.status(400).json({ error: 'Nome e Registro Interno são obrigatórios.' });
+    }
+
+    // 3. Define o status padrão se não for fornecido
+    if (!employeeData.status) {
+        employeeData.status = 'ativo';
+    }
+
+    // 4. Stringify campos JSON
+    if (employeeData.alocadoEm) employeeData.alocadoEm = JSON.stringify(employeeData.alocadoEm);
+    if (employeeData.ultimaAlteracao) employeeData.ultimaAlteracao = JSON.stringify(employeeData.ultimaAlteracao);
+
+    // 5. Constrói a query
+    const fields = Object.keys(employeeData);
+    const values = Object.values(employeeData);
     const placeholders = fields.map(() => '?').join(', ');
     const query = `INSERT INTO employees (${fields.join(', ')}) VALUES (${placeholders})`;
 
     try {
         await db.execute(query, values);
-        res.status(201).json({ message: 'Funcionário criado com sucesso' });
+        res.status(201).json({ id: employeeData.id, ...req.body }); // Retorna o objeto completo
     } catch (error) {
         console.error('Erro ao criar funcionário:', error);
         res.status(500).json({ error: 'Erro ao criar funcionário' });
     }
 };
 
-// --- UPDATE: Atualizar um funcionário existente ---
+// --- UPDATE: Atualizar um funcionário existente (CORRIGIDO E SEGURO) ---
 const updateEmployee = async (req, res) => {
     const { id } = req.params;
-    const data = { ...req.body };
-    if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
-    if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
+    const data = req.body;
 
-    const fields = Object.keys(data);
-    const values = Object.values(data);
+    // 1. Filtra apenas os campos permitidos (exceto 'id' e 'userId' que não devem ser mudados aqui)
+    const employeeData = {};
+    Object.keys(data).forEach(key => {
+        if (allowedEmployeeFields.includes(key) && key !== 'id' && key !== 'userId') {
+            employeeData[key] = data[key];
+        }
+    });
+    
+    // 2. Stringify campos JSON
+    if (employeeData.alocadoEm) employeeData.alocadoEm = JSON.stringify(employeeData.alocadoEm);
+    if (employeeData.ultimaAlteracao) employeeData.ultimaAlteracao = JSON.stringify(employeeData.ultimaAlteracao);
+
+    // 3. Constrói a query
+    const fields = Object.keys(employeeData);
+    if (fields.length === 0) {
+        return res.status(400).json({ message: 'Nenhum dado para atualizar.' });
+    }
+    
+    const values = Object.values(employeeData);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
     const query = `UPDATE employees SET ${setClause} WHERE id = ?`;
 
     try {
-        await db.execute(query, [...values, id]);
+        const [result] = await db.execute(query, [...values, id]);
+        if (result.affectedRows === 0) {
+             return res.status(404).json({ message: 'Funcionário não encontrado.' });
+        }
         res.json({ message: 'Funcionário atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar funcionário:', error);
@@ -98,7 +163,10 @@ const updateEmployee = async (req, res) => {
 // --- DELETE: Deletar um funcionário ---
 const deleteEmployee = async (req, res) => {
     try {
-        await db.execute('DELETE FROM employees WHERE id = ?', [req.params.id]);
+        const [result] = await db.execute('DELETE FROM employees WHERE id = ?', [req.params.id]);
+         if (result.affectedRows === 0) {
+             return res.status(404).json({ message: 'Funcionário não encontrado.' });
+        }
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar funcionário:', error);
@@ -106,7 +174,7 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
-// --- FUNÇÕES QUE ESTAVAM EM FALTA ---
+// --- FUNÇÕES QUE ESTAVAM EM FALTA (JÁ EXISTENTES NO SEU ARQUIVO) ---
 
 // --- GET: Obter histórico de um funcionário ---
 const getEmployeeHistory = async (req, res) => {
