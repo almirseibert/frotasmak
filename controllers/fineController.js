@@ -19,12 +19,26 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-// --- (NOVO) Função Auxiliar para formatar a multa para o frontend ---
+// --- (CORRIGIDO) Função Auxiliar para formatar a multa para o frontend ---
 // Ela pega os dados do JOIN e os transforma nos objetos JSON esperados
+// E TRADUZ os nomes das colunas do banco (ex: paymentStatus) para os nomes do frontend (ex: status)
 const formatFineForFrontend = (fine) => {
     if (!fine) return null;
 
-    const newFine = { ...fine };
+    // Renomeia os campos do banco para os campos do frontend
+    const {
+        paymentStatus,
+        localInfracao,
+        codigoInfracao,
+        ...rest
+    } = fine;
+
+    const newFine = {
+        ...rest,
+        status: paymentStatus,         // Traduz paymentStatus -> status
+        local: localInfracao,          // Traduz localInfracao -> local
+        codigoInfração: codigoInfracao,  // Traduz codigoInfracao -> codigoInfração
+    };
 
     // 1. Cria os objetos esperados pelo frontend
     newFine.vehicleInfo = {
@@ -62,7 +76,7 @@ const getAllFines = async (req, res) => {
             ORDER BY f.dataInfração DESC
         `;
         const [rows] = await db.execute(query);
-        // Formata cada linha para o formato que o frontend espera
+        // Formata cada linha (e traduz os campos) para o formato que o frontend espera
         res.json(rows.map(formatFineForFrontend));
     } catch (error) {
         console.error('Erro ao buscar multas:', error);
@@ -88,7 +102,7 @@ const getFineById = async (req, res) => {
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Multa não encontrada' });
         }
-        // Formata a linha para o formato que o frontend espera
+        // Formata a linha (e traduz os campos) para o formato que o frontend espera
         res.json(formatFineForFrontend(rows[0]));
     } catch (error) {
         console.error('Erro ao buscar multa:', error);
@@ -96,7 +110,7 @@ const getFineById = async (req, res) => {
     }
 };
 
-// --- (NOVO) Função auxiliar para buscar infos de Veículo e Funcionário ---
+// --- Função auxiliar para buscar infos de Veículo e Funcionário ---
 const getInfoObjects = async (vehicleId, employeeId) => {
     let vehicleInfo = null;
     let employeeInfo = null;
@@ -114,80 +128,113 @@ const getInfoObjects = async (vehicleId, employeeId) => {
 };
 
 
-// --- CREATE: Criar uma nova multa (Corrigido com auto-população de JSON) ---
+// --- CREATE: Criar uma nova multa (CORRIGIDO para Erro 500) ---
 const createFine = async (req, res) => {
-    const data = req.body;
+    const dataFromFrontend = req.body;
     
     // 1. Gera o ID da multa (o banco de dados é VARCHAR)
     const newFineId = uuidv4();
-    data.id = newFineId; // Adiciona o ID ao objeto de dados
-
+    
     try {
         // 2. Busca os dados do veículo e funcionário para popular os campos JSON
-        const { vehicleInfo, employeeInfo } = await getInfoObjects(data.vehicleId, data.employeeId);
+        const { vehicleInfo, employeeInfo } = await getInfoObjects(dataFromFrontend.vehicleId, dataFromFrontend.employeeId);
         
-        // 3. Adiciona os objetos JSON stringificados
-        data.vehicleInfo = vehicleInfo ? JSON.stringify(vehicleInfo) : null;
-        data.employeeInfo = employeeInfo ? JSON.stringify(employeeInfo) : null;
-        
-        // Pega o usuário logado (assumindo que o authMiddleware o adiciona)
+        // 3. Pega o usuário logado (assumindo que o authMiddleware o adiciona)
+        let ultimaAlteracao = null;
         if(req.user) {
-             data.ultimaAlteracao = JSON.stringify({
+             ultimaAlteracao = JSON.stringify({
                 userId: req.user.id,
                 userEmail: req.user.email,
                 timestamp: new Date().toISOString()
             });
         }
+        
+        // 4. *** CORREÇÃO: Traduz os nomes do frontend para os nomes do BD ***
+        const dataForDB = {
+            id: newFineId,
+            vehicleId: dataFromFrontend.vehicleId,
+            employeeId: dataFromFrontend.employeeId,
+            dataInfração: dataFromFrontend.dataInfração,
+            localInfracao: dataFromFrontend.local, // Traduzido
+            codigoInfracao: dataFromFrontend.codigoInfração, // Traduzido
+            descricao: dataFromFrontend.descricao,
+            valor: dataFromFrontend.valor,
+            dataVencimento: dataFromFrontend.dataVencimento,
+            paymentStatus: dataFromFrontend.status, // Traduzido
+            vehicleInfo: vehicleInfo ? JSON.stringify(vehicleInfo) : null,
+            employeeInfo: employeeInfo ? JSON.stringify(employeeInfo) : null,
+            ultimaAlteracao: ultimaAlteracao
+        };
 
-        // 4. Constrói a query de inserção
-        const fields = Object.keys(data);
-        const values = Object.values(data);
+        // 5. Constrói a query de inserção
+        const fields = Object.keys(dataForDB);
+        const values = Object.values(dataForDB);
         const placeholders = fields.map(() => '?').join(', ');
         const query = `INSERT INTO fines (${fields.join(', ')}) VALUES (${placeholders})`;
 
-        // 5. Executa
+        // 6. Executa
         await db.execute(query, values);
-        res.status(201).json({ id: newFineId, ...req.body });
+        res.status(201).json({ id: newFineId, ...dataFromFrontend }); // Retorna os dados do frontend
     } catch (error) {
         console.error('Erro ao criar multa:', error);
+        // Loga o erro específico do SQL, se houver
+        if (error.sqlMessage) {
+            console.error('SQL Error:', error.sqlMessage);
+        }
         res.status(500).json({ error: 'Erro ao criar multa' });
     }
 };
 
-// --- UPDATE: Atualizar uma multa existente (Corrigido com auto-população de JSON) ---
+// --- UPDATE: Atualizar uma multa existente (CORRIGIDO para Erro 500) ---
 const updateFine = async (req, res) => {
     const { id } = req.params;
-    const data = req.body;
+    const dataFromFrontend = req.body;
 
     try {
         // 1. Busca os dados do veículo e funcionário para ATUALIZAR os campos JSON
-        // (Caso o veículo/funcionário da multa tenha sido alterado)
-        const { vehicleInfo, employeeInfo } = await getInfoObjects(data.vehicleId, data.employeeId);
+        const { vehicleInfo, employeeInfo } = await getInfoObjects(dataFromFrontend.vehicleId, dataFromFrontend.employeeId);
 
-        // 2. Adiciona os objetos JSON stringificados
-        data.vehicleInfo = vehicleInfo ? JSON.stringify(vehicleInfo) : null;
-        data.employeeInfo = employeeInfo ? JSON.stringify(employeeInfo) : null;
-
-        // Pega o usuário logado
+        // 2. Pega o usuário logado
+         let ultimaAlteracao = null;
          if(req.user) {
-             data.ultimaAlteracao = JSON.stringify({
+             ultimaAlteracao = JSON.stringify({
                 userId: req.user.id,
                 userEmail: req.user.email,
                 timestamp: new Date().toISOString()
             });
         }
         
-        // 3. Constrói a query
-        const fields = Object.keys(data).filter(key => key !== 'id'); // Não atualiza o ID
-        const values = fields.map(key => data[key]); // Pega os valores na ordem correta
+        // 3. *** CORREÇÃO: Traduz os nomes do frontend para os nomes do BD ***
+         const dataForDB = {
+            vehicleId: dataFromFrontend.vehicleId,
+            employeeId: dataFromFrontend.employeeId,
+            dataInfração: dataFromFrontend.dataInfração,
+            localInfracao: dataFromFrontend.local, // Traduzido
+            codigoInfracao: dataFromFrontend.codigoInfração, // Traduzido
+            descricao: dataFromFrontend.descricao,
+            valor: dataFromFrontend.valor,
+            dataVencimento: dataFromFrontend.dataVencimento,
+            paymentStatus: dataFromFrontend.status, // Traduzido
+            vehicleInfo: vehicleInfo ? JSON.stringify(vehicleInfo) : null,
+            employeeInfo: employeeInfo ? JSON.stringify(employeeInfo) : null,
+            ultimaAlteracao: ultimaAlteracao
+        };
+
+        // 4. Constrói a query
+        const fields = Object.keys(dataForDB);
+        const values = fields.map(key => dataForDB[key]); // Pega os valores na ordem correta
         const setClause = fields.map(field => `${field} = ?`).join(', ');
         const query = `UPDATE fines SET ${setClause} WHERE id = ?`;
 
-        // 4. Executa
+        // 5. Executa
         await db.execute(query, [...values, id]);
         res.json({ message: 'Multa atualizada com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar multa:', error);
+         // Loga o erro específico do SQL, se houver
+        if (error.sqlMessage) {
+            console.error('SQL Error:', error.sqlMessage);
+        }
         res.status(500).json({ error: 'Erro ao atualizar multa' });
     }
 };
