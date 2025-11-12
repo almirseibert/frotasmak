@@ -1,21 +1,15 @@
 const db = require('../database');
-// const { parseJsonSafe } = require('../utils/parseJsonSafe'); // Removido Import
+// const { parseJsonSafe } = require('../utils/parseJsonSafe'); // Removido, não é mais necessário aqui
 
 // ===================================================================================
-// FUNÇÃO AUXILIAR DE PARSE SEGURO (Adicionada localmente)
+// FUNÇÃO AUXILIAR DE PARSE SEGURO (Adicionada localmente APENAS para os campos da OBRA)
 // ===================================================================================
-// Esta função tenta fazer o parse de um campo. Se falhar (ex: é um email
-// ou texto simples), ela registra um aviso e retorna o valor padrão (ex: null).
+// Esta função só vai tratar os campos JSON da tabela 'obras',
+// não mais do histórico.
 const parseJsonSafe = (field, key, defaultValue = null) => {
     if (field === null || typeof field === 'undefined') return defaultValue;
     if (typeof field === 'object') return field; // Já é um objeto
     if (typeof field !== 'string' || (!field.startsWith('{') && !field.startsWith('['))) {
-        // Se não for string ou não parecer JSON, retorna o próprio campo (como texto)
-        // Mudança: Retorna o texto original se não for JSON, para campos de "details"
-        // que são apenas texto (como "Entrada em manutenção...")
-        if (key === 'history.details') {
-             return field;
-        }
         return defaultValue; 
     }
 
@@ -23,12 +17,7 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
         const parsed = JSON.parse(field);
         return (typeof parsed === 'object' && parsed !== null) ? parsed : defaultValue;
     } catch (e) {
-        // Se falhar o parse, registra o aviso e retorna o valor original (texto)
-        // Isso é importante para os logs de "Entrada em manutenção..."
         console.warn(`[JSON Parse Warning] Campo '${key}' não é JSON. Valor problemático:`, field);
-        if (key === 'history.details') {
-            return field; // Retorna o texto original
-        }
         return defaultValue;
     }
 };
@@ -39,6 +28,7 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
+    // Campos JSON da tabela 'obras'
     const fieldsToParse = ['horasContratadasPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
     fieldsToParse.forEach(field => {
         if (obra.hasOwnProperty(field)) {
@@ -48,27 +38,55 @@ const parseObraJsonFields = (obra) => {
     return newObra;
 };
 
+// ===================================================================================
+// FUNÇÃO AUXILIAR PARA FORMATAR O HISTÓRICO (A CORREÇÃO)
+// ===================================================================================
+// Esta função pega os dados "planos" do banco e cria o objeto 'details'
+// que o frontend (EmployeesPage.js) espera.
+const formatObraHistoryForFrontend = (historyEntry) => {
+    const { 
+        employeeId, 
+        employeeName, 
+        registroInterno, // Este é o registroInterno do Veículo
+        // ... captura o resto dos campos
+        ...rest 
+    } = historyEntry;
+
+    // Constrói o objeto 'details'
+    const details = {
+        employeeId: employeeId,
+        employeeName: employeeName,
+        vehicleRegistroInterno: registroInterno 
+        // Adicione aqui qualquer outro campo que o frontend
+        // espere que esteja dentro de 'details'
+    };
+
+    // Retorna a estrutura esperada pelo frontend
+    return {
+        ...rest, // id, obraId, veiculoId, dataEntrada, dataSaida, etc.
+        details: details // O objeto 'details' empacotado
+    };
+};
+// ===================================================================================
+
+
 // --- GET: Todas as obras ---
 const getAllObras = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras');
         
-        // *** CORREÇÃO: Busca todo o histórico de obras de uma vez ***
+        // Busca todo o histórico de obras de uma vez
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
 
-        // *** CORREÇÃO: Faz o parse seguro dos 'details' do histórico ANTES de mapear ***
-        const parsedHistory = historyRows.map(h => {
-            return {
-                ...h,
-                details: parseJsonSafe(h.details, 'history.details')
-            };
-        });
+        // *** CORREÇÃO APLICADA AQUI ***
+        // Mapeia o histórico para o formato que o frontend espera
+        const formattedHistory = historyRows.map(formatObraHistoryForFrontend);
 
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
             
-            // *** CORREÇÃO: Anexa o histórico JÁ COM PARSE FEITO ***
-            parsedObra.historicoVeiculos = parsedHistory
+            // Anexa o histórico JÁ FORMATADO
+            parsedObra.historicoVeiculos = formattedHistory
                 .filter(h => h.obraId === parsedObra.id)
                 .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada)); // Ordena
                 
@@ -97,11 +115,9 @@ const getObraById = async (req, res) => {
         
         const obra = parseObraJsonFields(rows[0]);
         
-        // *** CORREÇÃO: Aplica o parse seguro no histórico ANTES de anexar ***
-        obra.historicoVeiculos = historyRows.map(h => ({
-             ...h,
-             details: parseJsonSafe(h.details, 'history.details')
-        }));
+        // *** CORREÇÃO APLICADA AQUI ***
+        // Formata o histórico ANTES de anexar
+        obra.historicoVeiculos = historyRows.map(formatObraHistoryForFrontend);
         
         res.json(obra);
     } catch (error) {
@@ -170,14 +186,14 @@ const deleteObra = async (req, res) => {
     }
 };
 
-// --- FUNÇÃO PARA FINALIZAR UMA OBRA (A QUE ESTAVA FALTANDO) ---
+// --- FUNÇÃO PARA FINALIZAR UMA OBRA ---
 const finishObra = async (req, res) => {
     const { id } = req.params;
     const currentDate = new Date(); 
 
     try {
         const [result] = await db.execute(
-            "UPDATE obras SET status = 'finalizada', dataFim = ? WHERE id = ?", // Corrigido para 'finalizada'
+            "UPDATE obras SET status = 'finalizada', dataFim = ? WHERE id = ?",
             [currentDate, id]
         );
 
@@ -191,9 +207,10 @@ const finishObra = async (req, res) => {
     }
 };
 
-// --- NOVO: Atualizar uma entrada de histórico específica (para ObrasPage.js) ---
+// --- Atualizar uma entrada de histórico específica ---
 const updateObraHistoryEntry = async (req, res) => {
     const { historyId } = req.params; // PK da tabela obras_historico_veiculos
+    // O frontend enviará os dados "planos", sem 'details'
     const { dataEntrada, dataSaida, employeeId, leituraEntrada, leituraSaida } = req.body;
 
     // Busca o nome do funcionário
@@ -209,8 +226,6 @@ const updateObraHistoryEntry = async (req, res) => {
         }
     }
 
-    // Determina os campos de leitura (o frontend envia 'leituraEntrada',
-    // mas não sabemos se é odometro ou horimetro. Precisamos checar o registro original)
     let odometroEntrada = null;
     let horimetroEntrada = null;
     let odometroSaida = null;
@@ -233,6 +248,7 @@ const updateObraHistoryEntry = async (req, res) => {
             horimetroSaida = parseFloat(leituraSaida) || null;
         }
 
+        // *** CORREÇÃO: Atualiza os campos planos do banco ***
         const query = `
             UPDATE obras_historico_veiculos 
             SET 
@@ -277,5 +293,5 @@ module.exports = {
     updateObra,
     deleteObra,
     finishObra,
-    updateObraHistoryEntry // Adiciona a nova função
+    updateObraHistoryEntry
 };
