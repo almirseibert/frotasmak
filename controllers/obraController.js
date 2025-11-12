@@ -1,5 +1,39 @@
 const db = require('../database');
-const { parseJsonSafe } = require('../utils/parseJsonSafe'); // Supondo que você criou um util
+// const { parseJsonSafe } = require('../utils/parseJsonSafe'); // Removido Import
+
+// ===================================================================================
+// FUNÇÃO AUXILIAR DE PARSE SEGURO (Adicionada localmente)
+// ===================================================================================
+// Esta função tenta fazer o parse de um campo. Se falhar (ex: é um email
+// ou texto simples), ela registra um aviso e retorna o valor padrão (ex: null).
+const parseJsonSafe = (field, key, defaultValue = null) => {
+    if (field === null || typeof field === 'undefined') return defaultValue;
+    if (typeof field === 'object') return field; // Já é um objeto
+    if (typeof field !== 'string' || (!field.startsWith('{') && !field.startsWith('['))) {
+        // Se não for string ou não parecer JSON, retorna o próprio campo (como texto)
+        // Mudança: Retorna o texto original se não for JSON, para campos de "details"
+        // que são apenas texto (como "Entrada em manutenção...")
+        if (key === 'history.details') {
+             return field;
+        }
+        return defaultValue; 
+    }
+
+    try {
+        const parsed = JSON.parse(field);
+        return (typeof parsed === 'object' && parsed !== null) ? parsed : defaultValue;
+    } catch (e) {
+        // Se falhar o parse, registra o aviso e retorna o valor original (texto)
+        // Isso é importante para os logs de "Entrada em manutenção..."
+        console.warn(`[JSON Parse Warning] Campo '${key}' não é JSON. Valor problemático:`, field);
+        if (key === 'history.details') {
+            return field; // Retorna o texto original
+        }
+        return defaultValue;
+    }
+};
+// ===================================================================================
+
 
 // --- Função Auxiliar para Conversão de JSON nos campos da Obra ---
 const parseObraJsonFields = (obra) => {
@@ -22,11 +56,19 @@ const getAllObras = async (req, res) => {
         // *** CORREÇÃO: Busca todo o histórico de obras de uma vez ***
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
 
+        // *** CORREÇÃO: Faz o parse seguro dos 'details' do histórico ANTES de mapear ***
+        const parsedHistory = historyRows.map(h => {
+            return {
+                ...h,
+                details: parseJsonSafe(h.details, 'history.details')
+            };
+        });
+
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
             
-            // *** CORREÇÃO: Anexa o histórico relevante a esta obra ***
-            parsedObra.historicoVeiculos = historyRows
+            // *** CORREÇÃO: Anexa o histórico JÁ COM PARSE FEITO ***
+            parsedObra.historicoVeiculos = parsedHistory
                 .filter(h => h.obraId === parsedObra.id)
                 .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada)); // Ordena
                 
@@ -55,8 +97,11 @@ const getObraById = async (req, res) => {
         
         const obra = parseObraJsonFields(rows[0]);
         
-        // Anexa o histórico à obra
-        obra.historicoVeiculos = historyRows; 
+        // *** CORREÇÃO: Aplica o parse seguro no histórico ANTES de anexar ***
+        obra.historicoVeiculos = historyRows.map(h => ({
+             ...h,
+             details: parseJsonSafe(h.details, 'history.details')
+        }));
         
         res.json(obra);
     } catch (error) {

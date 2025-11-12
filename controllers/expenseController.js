@@ -1,8 +1,30 @@
 // controllers/expenseController.js
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid'); // Para gerar IDs
-// *** ADICIONADO: Importa o parser seguro que já existe no seu projeto ***
-const { parseJsonSafe } = require('../utils/parseJsonSafe');
+
+// ===================================================================================
+// FUNÇÃO AUXILIAR DE PARSE SEGURO (Adicionada localmente)
+// ===================================================================================
+// Esta função tenta fazer o parse de um campo. Se falhar (ex: é um email
+// ou texto simples), ela registra um aviso e retorna o valor padrão (ex: null).
+const parseJsonSafe = (field, key, defaultValue = null) => {
+    if (field === null || typeof field === 'undefined') return defaultValue;
+    if (typeof field === 'object') return field; // Já é um objeto
+    if (typeof field !== 'string' || (!field.startsWith('{') && !field.startsWith('['))) {
+        // Se não for string ou não parecer JSON, retorna o padrão (evita tentar parsear emails)
+        return defaultValue; 
+    }
+
+    try {
+        const parsed = JSON.parse(field);
+        return (typeof parsed === 'object' && parsed !== null) ? parsed : defaultValue;
+    } catch (e) {
+        console.warn(`[JSON Parse Error] Falha ao analisar o campo '${key}'. Valor problemático:`, field);
+        return defaultValue; // Retorna o padrão em caso de erro
+    }
+};
+// ===================================================================================
+
 
 // --- Função para Criar ou Atualizar Despesas Semanais (Função existente) ---
 const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelType, partnerName, valueChange }) => {
@@ -65,7 +87,7 @@ const listExpenses = async (req, res) => {
         // Trocamos o JSON.parse() inseguro pelo 'parseJsonSafe'
         const expenses = rows.map(exp => ({
             ...exp,
-            // Isso vai tentar parsear 'createdBy'. Se falhar (ex: for null ou ""),
+            // Isso vai tentar parsear 'createdBy'. Se falhar (ex: for um email),
             // ele vai retornar o valor padrão (null) e não vai quebrar o servidor.
             createdBy: parseJsonSafe(exp.createdBy, 'createdBy', null)
         }));
