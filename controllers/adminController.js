@@ -1,6 +1,7 @@
 // controllers/adminController.js
 const db = require('../database');
 const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid'); // *** ADICIONADO PARA GERAR IDs DE USUÁRIO ***
 
 // --- Função Auxiliar para Conversar com o Banco de Dados ---
 const parseAdminJsonFields = (data) => {
@@ -35,8 +36,12 @@ const approveRegistrationRequest = async (req, res) => {
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // *** CORREÇÃO: Gera UUID para o ID do usuário ***
+        const newUserId = uuidv4();
 
-        await connection.execute('INSERT INTO users (email, role, password) VALUES (?, ?, ?)', [
+        await connection.execute('INSERT INTO users (id, email, role, password) VALUES (?, ?, ?, ?)', [
+            newUserId,
             request.email,
             role || 'operador', // Define 'operador' como padrão se não for especificado
             hashedPassword
@@ -105,6 +110,65 @@ const saveUpdateMessage = async (req, res) => {
     }
 };
 
+// *** NOVA FUNÇÃO ADICIONADA ***
+// --- ROTA: Migrar funcionários (que não têm user) para usuários ---
+const adminMigrateUsers = async (req, res) => {
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        // 1. Encontra funcionários ativos sem userId
+        const [employeesToMigrate] = await connection.execute(
+            "SELECT id, nome, registroInterno FROM employees WHERE status = 'ativo' AND userId IS NULL"
+        );
+
+        if (employeesToMigrate.length === 0) {
+            await connection.rollback();
+            return res.status(200).json({ message: 'Nenhum funcionário para migrar.' });
+        }
+
+        let migratedCount = 0;
+
+        for (const employee of employeesToMigrate) {
+            const newUserId = uuidv4();
+            // Senha padrão = registroInterno
+            const defaultPassword = employee.registroInterno || 'mak123'; 
+            const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+            // Email padrão
+            const email = `${employee.registroInterno.toLowerCase()}@frotasmak.com.br`;
+
+            // 2. Cria o novo usuário
+            await connection.execute(
+                `INSERT INTO users (id, email, password, role, employeeId, name) 
+                 VALUES (?, ?, ?, ?, ?, ?)`,
+                [newUserId, email, hashedPassword, 'operador', employee.id, employee.nome]
+            );
+
+            // 3. Atualiza o funcionário com o novo userId
+            await connection.execute(
+                `UPDATE employees SET userId = ? WHERE id = ?`,
+                [newUserId, employee.id]
+            );
+            
+            migratedCount++;
+        }
+
+        await connection.commit();
+        res.status(200).json({ message: `Migração concluída! ${migratedCount} usuários foram criados e vinculados.` });
+
+    } catch (error) {
+        await connection.rollback();
+        console.error('Erro ao migrar usuários:', error);
+        // Trata erro de email duplicado
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(500).json({ error: 'Erro de Duplicidade: Um dos emails (registroInterno@frotasmak.com.br) já existe na tabela de usuários.' });
+        }
+        res.status(500).json({ error: 'Erro interno ao migrar usuários.' });
+    } finally {
+        connection.release();
+    }
+};
+
 
 module.exports = {
     getRegistrationRequests,
@@ -112,5 +176,6 @@ module.exports = {
     deleteRegistrationRequest,
     assignRole,
     getUpdateMessage,
-    saveUpdateMessage
+    saveUpdateMessage,
+    adminMigrateUsers // *** ADICIONADO À EXPORTAÇÃO ***
 };

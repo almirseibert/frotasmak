@@ -18,4 +18,8 @@ router.put('/assign-role', adminController.assignRole);
 router.get('/update-message', adminController.getUpdateMessage);
 router.put('/update-message', adminController.saveUpdateMessage);
 
+// *** NOVA ROTA ADICIONADA ***
+// Rota para migrar funcionários existentes para usuários
+router.post('/migrate-users', adminController.adminMigrateUsers);
+
 module.exports = router;
