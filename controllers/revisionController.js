@@ -204,29 +204,27 @@ const completeRevision = async (req, res) => {
         // 1. Encontrar o 'revisionId' (PK da tabela 'revisions') usando o 'vehicleId'
         const [rows] = await connection.execute('SELECT id FROM revisions WHERE vehicleId = ?', [vehicleId]);
         
+        let revisionId;
+        
         if (rows.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ error: 'Nenhum plano de revisão encontrado para este veículo.' });
+            // Se não houver plano, cria um para poder adicionar o histórico
+            console.warn(`Nenhum plano de revisão encontrado para vehicleId: ${vehicleId}. Criando um novo plano para registrar o histórico.`);
+            revisionId = uuidv4();
+            const newPlanQuery = `INSERT INTO revisions (id, vehicleId, ultimaAlteracao) VALUES (?, ?, ?)`;
+            const ultimaAlteracao = JSON.stringify({
+                userId: req.user?.id || 'sistema',
+                userEmail: req.user?.email || 'sistema',
+                timestamp: new Date().toISOString(),
+                action: 'Criação automática por conclusão de revisão'
+            });
+            await connection.execute(newPlanQuery, [revisionId, vehicleId, ultimaAlteracao]);
+            
+            // Não retorna, continua para adicionar o histórico
+        } else {
+             revisionId = rows[0].id;
         }
-        const revisionId = rows[0].id;
 
         // 2. Adicionar o registro ao histórico (tabela 'revisions_history')
-        // O .sql (linha 694) espera: id (AI), revisionId, data, odometro, horimetro, descricao, realizadaEm, realizadaPor
-        // O frontend envia: leituraRealizada, realizadaEm, realizadaPor, descricao
-        // Vamos assumir que 'leituraRealizada' deve ir para 'odometro' ou 'horimetro'
-        // Simples: vamos salvar o que o frontend enviou.
-        const historyData = {
-            revisionId: revisionId,
-            data: historyEntry.realizadaEm, // Mapeia 'realizadaEm' para 'data' (ou o campo correto do .sql)
-            // odometro: ??? (o .sql tem, mas o frontend não envia)
-            // horimetro: ??? (o .sql tem, mas o frontend não envia)
-            descricao: historyEntry.descricao,
-            realizadaEm: historyEntry.realizadaEm,
-            realizadaPor: historyEntry.realizadaPor
-            // Adicionando a leitura no campo 'odometro' por padrão, já que 'leituraRealizada' não existe no .sql
-            // odometro: historyEntry.leituraRealizada 
-        };
-        // Vamos verificar o .sql (linha 694)
         // `revisions_history` (id, revisionId, data, odometro, horimetro, descricao, realizadaEm, realizadaPor)
         // O frontend (linha 279) envia: { leituraRealizada, realizadaEm, realizadaPor, descricao }
         
@@ -257,13 +255,13 @@ const completeRevision = async (req, res) => {
                 ultimaAlteracao = ?
             WHERE id = ?
         `;
-        const ultimaAlteracao = JSON.stringify({
+        const ultimaAlteracaoReset = JSON.stringify({
              userId: req.user?.id || 'sistema',
              userEmail: req.user?.email || 'sistema',
              timestamp: new Date().toISOString(),
              action: 'Conclusão de Revisão'
         });
-        await connection.execute(resetQuery, [ultimaAlteracao, revisionId]);
+        await connection.execute(resetQuery, [ultimaAlteracaoReset, revisionId]);
 
         await connection.commit();
         res.status(200).json({ message: 'Revisão concluída com sucesso!' });
