@@ -78,7 +78,7 @@ const createRevisionPlan = async (req, res) => {
 // --- PUT: Atualizar um plano de revisão (CORRIGIDO) ---
 // Usa "UPSERT" (Update or Insert) baseado no vehicleId.
 const updateRevisionPlan = async (req, res) => {
-    // O ID da rota é o vehicleId
+    // O ID da rota é o vehicleId (vindo do revisionRoutes.js)
     const { id: vehicleId } = req.params; 
     const data = { ...req.body };
 
@@ -218,15 +218,13 @@ const completeRevision = async (req, res) => {
                 action: 'Criação automática por conclusão de revisão'
             });
             await connection.execute(newPlanQuery, [revisionId, vehicleId, ultimaAlteracao]);
-            
-            // Não retorna, continua para adicionar o histórico
         } else {
              revisionId = rows[0].id;
         }
 
         // 2. Adicionar o registro ao histórico (tabela 'revisions_history')
         // `revisions_history` (id, revisionId, data, odometro, horimetro, descricao, realizadaEm, realizadaPor)
-        // O frontend (linha 279) envia: { leituraRealizada, realizadaEm, realizadaPor, descricao }
+        // O frontend (RevisionsPage.js linha ~279) envia: { leituraRealizada, realizadaEm, realizadaPor, descricao }
         
         // Vamos adaptar a inserção para o .sql
         const historyQuery = `
@@ -239,7 +237,7 @@ const completeRevision = async (req, res) => {
             historyEntry.descricao,
             historyEntry.realizadaEm, // 'realizadaEm'
             historyEntry.realizadaPor,
-            historyEntry.leituraRealizada // 'odometro' (assumindo)
+            historyEntry.leituraRealizada // 'odometro' (assumindo que 'leituraRealizada' é o odometro)
         ]);
 
         // 3. Limpar (resetar) o plano de revisão agendado na tabela 'revisions'
