@@ -11,15 +11,14 @@ const parseJsonSafe = (field, key) => {
         const parsed = JSON.parse(field);
         return (typeof parsed === 'object' && parsed !== null) ? parsed : null;
     } catch (e) {
-        // Não loga aviso, pois o campo 'historico' não existe no BD
+        // Silenciado para não poluir logs com campos de texto puro
         // console.warn(`[JSON Parse Error] Falha ao analisar o campo '${key}'. Valor:`, field);
         return null;
     }
 };
 
-// --- GET: Obter todos os planos de revisão (Sem mudanças) ---
-// A lógica original estava correta. Ela busca todos os campos (incluindo
-// proximaRevisaoHorimetro) e junta com o histórico.
+// --- GET: Obter todos os planos de revisão (CORRIGIDO) ---
+// Busca os planos e o histórico, e junta os dois.
 const getAllRevisionPlans = async (req, res) => {
     try {
         // 1. Busca todos os planos de revisão
@@ -33,14 +32,20 @@ const getAllRevisionPlans = async (req, res) => {
             // O 'historico' que o frontend espera é o 'revisions_history'
             const historico = historyRows.filter(h => h.revisionId === plan.id);
             
-            // Tenta parsear 'ultimaAlteracao'
+            // Tenta parsear 'ultimaAlteracao' (que existe no .sql)
             const ultimaAlteracao = parseJsonSafe(plan.ultimaAlteracao, 'ultimaAlteracao');
 
+            // --- CORREÇÃO (Tradução DB -> Frontend) ---
+            // Renomeia 'tipo' (do DB) para 'descricao' (para o Frontend)
+            const { tipo, ...restOfPlan } = plan; 
+
             return {
-                ...plan,
+                ...restOfPlan,
                 ultimaAlteracao: ultimaAlteracao,
                 historico: historico, // Injeta o array de histórico
+                descricao: tipo, // Renomeia 'tipo' para 'descricao'
             };
+            // --- Fim da Correção ---
         });
         
         res.json(revisions);
@@ -52,10 +57,19 @@ const getAllRevisionPlans = async (req, res) => {
 
 // --- POST: Criar um novo plano de revisão (Não usado pelo frontend, mas mantido) ---
 const createRevisionPlan = async (req, res) => {
-    const data = { ...req.body };
+    // Esta função não é chamada pelo RevisionsPage, mas corrigida por precaução
+    const { descricao, ...restOfBody } = req.body;
+    const data = { 
+        ...restOfBody, 
+        tipo: descricao // Mapeia 'descricao' para 'tipo'
+    };
     
+    // Adiciona o ID gerado (já que é varchar)
     if (!data.id) data.id = uuidv4();
+    
+    // Remove 'historico' se ele foi enviado acidentalmente
     delete data.historico; 
+    
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
 
     const fields = Object.keys(data);
@@ -72,14 +86,20 @@ const createRevisionPlan = async (req, res) => {
     }
 };
 
-// --- PUT: Atualizar um plano de revisão (Sem mudanças) ---
-// A lógica original de "UPSERT" que usa as chaves dinâmicas do req.body
-// já aceita 'proximaRevisaoHorimetro' e 'proximaRevisaoOdometro'
-// enviados pelo frontend corrigido.
+// --- PUT: Atualizar um plano de revisão (CORRIGIDO) ---
+// Usa "UPSERT" (Update or Insert) baseado no vehicleId.
 const updateRevisionPlan = async (req, res) => {
-    // O ID da rota é o vehicleId
+    // O ID da rota é o vehicleId (vindo do revisionRoutes.js)
     const { id: vehicleId } = req.params; 
-    const data = { ...req.body };
+
+    // --- CORREÇÃO (Tradução Frontend -> DB) ---
+    // Pega 'descricao' do frontend e renomeia para 'tipo'
+    const { descricao, ...restOfBody } = req.body;
+    const data = {
+        ...restOfBody,
+        tipo: descricao // Renomeia 'descricao' (frontend) para 'tipo' (DB)
+    };
+    // --- Fim da Correção ---
 
     // Pega o usuário logado
     const ultimaAlteracao = JSON.stringify({
@@ -99,37 +119,38 @@ const updateRevisionPlan = async (req, res) => {
             // 2. SE EXISTE: Atualiza o plano existente
             const revisionId = rows[0].id;
             
+            // Remove campos que não podem ser atualizados pelo frontend
             delete data.id;
             delete data.vehicleId;
             delete data.historico;
 
-            data.ultimaAlteracao = ultimaAlteracao;
+            data.ultimaAlteracao = ultimaAlteracao; // Adiciona info de alteração
 
             const fields = Object.keys(data);
             const values = Object.values(data);
-            // Esta linha é chave: ela monta o SET dinamicamente
             const setClause = fields.map(field => `${field} = ?`).join(', ');
             const query = `UPDATE revisions SET ${setClause} WHERE id = ?`;
 
             await connection.execute(query, [...values, revisionId]);
         } else {
             // 3. SE NÃO EXISTE: Cria um novo plano
-            const newRevisionId = uuidv4(); 
+            const newRevisionId = uuidv4(); // Cria um ID para a tabela 'revisions'
             
             const newPlan = {
                 id: newRevisionId,
                 vehicleId: vehicleId,
-                ...data, // Inclui proximaRevisaoData, proximaRevisaoOdometro, proximaRevisaoHorimetro, etc.
+                ...data, // tipo, proximaRevisaoData, etc. (agora 'data' tem 'tipo' e não 'descricao')
                 ultimaAlteracao: ultimaAlteracao
             };
             
-            delete newPlan.historico;
+            delete newPlan.historico; // Garante que o campo de array não seja salvo
 
             const fields = Object.keys(newPlan);
             const values = Object.values(newPlan);
             const placeholders = fields.map(() => '?').join(', ');
             const query = `INSERT INTO revisions (${fields.join(', ')}) VALUES (${placeholders})`;
 
+            // Esta é a linha que estava falhando (linha ~134 do seu log)
             await connection.execute(query, values);
         }
 
@@ -138,7 +159,8 @@ const updateRevisionPlan = async (req, res) => {
     } catch (error)
     {
         await connection.rollback();
-        console.error('Erro ao salvar plano de revisão:', error);
+        // Este é o erro que você está vendo no log
+        console.error('Erro ao salvar plano de revisão:', error); 
         res.status(500).json({ error: 'Erro ao salvar plano de revisão' });
     } finally {
         connection.release();
@@ -148,6 +170,7 @@ const updateRevisionPlan = async (req, res) => {
 // --- DELETE: Deletar um plano de revisão (Mantido) ---
 const deleteRevisionPlan = async (req, res) => {
     try {
+        // Assume que o ID aqui é o REVISION ID, não o vehicleId
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
         res.status(204).end();
     } catch (error) {
@@ -156,7 +179,7 @@ const deleteRevisionPlan = async (req, res) => {
     }
 };
 
-// --- GET: Obter o plano consolidado (Mantido) ---
+// --- GET: Obter o plano consolidado (Mantido, embora não usado pelo RevisionsPage) ---
 const getConsolidatedRevisionPlan = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM revisions WHERE proximaRevisaoData IS NOT NULL');
@@ -167,11 +190,14 @@ const getConsolidatedRevisionPlan = async (req, res) => {
     }
 };
 
-// --- GET: Obter o histórico de um veículo (Sem mudanças) ---
-// A lógica original com JOIN estava correta.
+// --- GET: Obter o histórico de um veículo (CORRIGIDO) ---
 const getRevisionHistoryByVehicle = async (req, res) => {
     const { vehicleId } = req.params;
+    if (!vehicleId) {
+        return res.status(400).json({ error: 'vehicleId é obrigatório.' });
+    }
     try {
+        // Consulta corrigida para buscar o histórico baseado no vehicleId (usando JOIN)
         const query = `
             SELECT h.* FROM revisions_history h
             JOIN revisions r ON h.revisionId = r.id
@@ -188,10 +214,8 @@ const getRevisionHistoryByVehicle = async (req, res) => {
 
 // --- POST: Concluir uma revisão (CORRIGIDO) ---
 const completeRevision = async (req, res) => {
-    // --- CORREÇÃO CONCLUIR (Início) ---
-    // Pega o 'isHourBased' enviado pelo frontend
+    // O frontend envia { vehicleId, isHourBased, leituraRealizada, realizadaEm, realizadaPor, descricao }
     const { vehicleId, isHourBased, ...historyEntry } = req.body;
-    // --- CORREÇÃO CONCLUIR (Fim) ---
     
     if (!vehicleId) {
         return res.status(400).json({ error: 'vehicleId é obrigatório.' });
@@ -207,7 +231,7 @@ const completeRevision = async (req, res) => {
         let revisionId;
         
         if (rows.length === 0) {
-            // Se não houver plano, cria um
+            // Se não houver plano, cria um para poder adicionar o histórico
             console.warn(`Nenhum plano de revisão encontrado para vehicleId: ${vehicleId}. Criando um novo plano para registrar o histórico.`);
             revisionId = uuidv4();
             const newPlanQuery = `INSERT INTO revisions (id, vehicleId, ultimaAlteracao) VALUES (?, ?, ?)`;
@@ -222,8 +246,9 @@ const completeRevision = async (req, res) => {
              revisionId = rows[0].id;
         }
 
-        // --- CORREÇÃO CONCLUIR (Início) ---
         // 2. Adicionar o registro ao histórico (tabela 'revisions_history')
+        // `revisions_history` (id, revisionId, data, odometro, horimetro, descricao, realizadaEm, realizadaPor)
+        
         const historyQuery = `
             INSERT INTO revisions_history (
                 revisionId, data, descricao, realizadaEm, realizadaPor, 
@@ -239,13 +264,12 @@ const completeRevision = async (req, res) => {
         await connection.execute(historyQuery, [
             revisionId,
             historyEntry.realizadaEm, // 'data'
-            historyEntry.descricao,
+            historyEntry.descricao,   // 'descricao' (vindo do frontend, que leu o 'tipo' do plano)
             historyEntry.realizadaEm, // 'realizadaEm'
             historyEntry.realizadaPor,
             odometroValue,            // 'odometro'
             horimetroValue            // 'horimetro'
         ]);
-        // --- CORREÇÃO CONCLUIR (Fim) ---
 
         // 3. Limpar (resetar) o plano de revisão agendado na tabela 'revisions'
         const resetQuery = `
@@ -256,7 +280,7 @@ const completeRevision = async (req, res) => {
                 proximaRevisaoHorimetro = NULL,
                 avisoAntecedenciaKmHr = NULL,
                 avisoAntecedenciaDias = NULL,
-                descricao = NULL,
+                tipo = NULL, 
                 ultimaAlteracao = ?
             WHERE id = ?
         `;
