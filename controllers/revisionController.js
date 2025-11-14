@@ -1,8 +1,8 @@
 // controllers/revisionController.js
 const db = require('../database');
-const { v4: uuidv4 } = require('uuid'); // Para gerar IDs
+const { v4: uuidv4 } = require('uuid');
 
-// --- Função Auxiliar para Conversão de JSON (Mantida) ---
+// ... (parseJsonSafe se mantém igual) ...
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
     if (typeof field === 'object') return field;
@@ -11,39 +11,39 @@ const parseJsonSafe = (field, key) => {
         const parsed = JSON.parse(field);
         return (typeof parsed === 'object' && parsed !== null) ? parsed : null;
     } catch (e) {
-        // Silenciado para não poluir logs com campos de texto puro
-        // console.warn(`[JSON Parse Error] Falha ao analisar o campo '${key}'. Valor:`, field);
         return null;
     }
 };
 
+
 // --- GET: Obter todos os planos de revisão (CORRIGIDO) ---
-// Busca os planos e o histórico, e junta os dois.
+// Normaliza os dados legados (Firebase) e novos (MySQL)
 const getAllRevisionPlans = async (req, res) => {
     try {
-        // 1. Busca todos os planos de revisão
         const [plans] = await db.query('SELECT * FROM revisions');
-        
-        // 2. Busca todo o histórico de revisões
         const [historyRows] = await db.query('SELECT * FROM revisions_history ORDER BY data DESC');
 
-        // 3. Mapeia os planos e injeta o histórico correspondente
         const revisions = plans.map(plan => {
-            // O 'historico' que o frontend espera é o 'revisions_history'
-            const historico = historyRows.filter(h => h.revisionId === plan.id);
-            
-            // Tenta parsear 'ultimaAlteracao' (que existe no .sql)
             const ultimaAlteracao = parseJsonSafe(plan.ultimaAlteracao, 'ultimaAlteracao');
 
-            // --- CORREÇÃO (Tradução DB -> Frontend) ---
-            // Renomeia 'tipo' (do DB) para 'descricao' (para o Frontend)
-            const { tipo, ...restOfPlan } = plan; 
+            // --- CORREÇÃO (Normalização de Dados Legados) ---
+            // 1. Define o vehicleId correto
+            // Se plan.vehicleId for nulo/vazio (dado legado), usa plan.id como vehicleId.
+            const isImported = !plan.vehicleId;
+            const effectiveVehicleId = isImported ? plan.id : plan.vehicleId;
 
+            // 2. Renomeia 'tipo' (DB) para 'descricao' (Frontend)
+            const { tipo, ...restOfPlan } = plan;
+
+            // 3. Encontra o histórico (o revisionId no histórico SEMPRE aponta para o plan.id)
+            const historico = historyRows.filter(h => h.revisionId === plan.id);
+            
             return {
                 ...restOfPlan,
-                ultimaAlteracao: ultimaAlteracao,
-                historico: historico, // Injeta o array de histórico
+                vehicleId: effectiveVehicleId, // Envia o vehicleId normalizado
                 descricao: tipo, // Renomeia 'tipo' para 'descricao'
+                ultimaAlteracao: ultimaAlteracao,
+                historico: historico,
             };
             // --- Fim da Correção ---
         });
@@ -55,7 +55,7 @@ const getAllRevisionPlans = async (req, res) => {
     }
 };
 
-// --- POST: Criar um novo plano de revisão (Não usado pelo frontend, mas mantido) ---
+// ... (createRevisionPlan se mantém igual, pois ele só cria dados NOVOS) ...
 const createRevisionPlan = async (req, res) => {
     // Esta função não é chamada pelo RevisionsPage, mas corrigida por precaução
     const { descricao, ...restOfBody } = req.body;
@@ -86,22 +86,18 @@ const createRevisionPlan = async (req, res) => {
     }
 };
 
-// --- PUT: Atualizar um plano de revisão (CORRIGIDO) ---
-// Usa "UPSERT" (Update or Insert) baseado no vehicleId.
-const updateRevisionPlan = async (req, res) => {
-    // O ID da rota é o vehicleId (vindo do revisionRoutes.js)
-    const { id: vehicleId } = req.params; 
 
-    // --- CORREÇÃO (Tradução Frontend -> DB) ---
-    // Pega 'descricao' do frontend e renomeia para 'tipo'
+// --- PUT: Atualizar um plano de revisão (CORRIGIDO) ---
+// Acha o registro legado (por ID) ou novo (por VehicleID)
+const updateRevisionPlan = async (req, res) => {
+    // O ID da rota é o vehicleId (vindo do frontend)
+    const { id: vehicleId } = req.params; 
     const { descricao, ...restOfBody } = req.body;
     const data = {
         ...restOfBody,
         tipo: descricao // Renomeia 'descricao' (frontend) para 'tipo' (DB)
     };
-    // --- Fim da Correção ---
 
-    // Pega o usuário logado
     const ultimaAlteracao = JSON.stringify({
         userId: req.user?.id || 'sistema',
         userEmail: req.user?.email || 'sistema',
@@ -112,19 +108,22 @@ const updateRevisionPlan = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // 1. Verifica se já existe um plano para este veículo
-        const [rows] = await connection.execute('SELECT id FROM revisions WHERE vehicleId = ?', [vehicleId]);
+        // --- CORREÇÃO (Achar registro legado OU novo) ---
+        // Tenta encontrar o registro pelo vehicleId (novo) OU pelo id (legado)
+        const [rows] = await connection.execute(
+            'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
+            [vehicleId, vehicleId]
+        );
+        // --- Fim da Correção ---
         
         if (rows.length > 0) {
             // 2. SE EXISTE: Atualiza o plano existente
-            const revisionId = rows[0].id;
+            const revisionId = rows[0].id; // Este é o PK (seja o uuid ou o id legado)
             
-            // Remove campos que não podem ser atualizados pelo frontend
             delete data.id;
             delete data.vehicleId;
             delete data.historico;
-
-            data.ultimaAlteracao = ultimaAlteracao; // Adiciona info de alteração
+            data.ultimaAlteracao = ultimaAlteracao; 
 
             const fields = Object.keys(data);
             const values = Object.values(data);
@@ -133,24 +132,23 @@ const updateRevisionPlan = async (req, res) => {
 
             await connection.execute(query, [...values, revisionId]);
         } else {
-            // 3. SE NÃO EXISTE: Cria um novo plano
-            const newRevisionId = uuidv4(); // Cria um ID para a tabela 'revisions'
+            // 3. SE NÃO EXISTE (ex: primeiro agendamento): Cria um novo plano
+            const newRevisionId = uuidv4(); 
             
             const newPlan = {
                 id: newRevisionId,
                 vehicleId: vehicleId,
-                ...data, // tipo, proximaRevisaoData, etc. (agora 'data' tem 'tipo' e não 'descricao')
+                ...data, // tipo, proximaRevisaoData, etc.
                 ultimaAlteracao: ultimaAlteracao
             };
             
-            delete newPlan.historico; // Garante que o campo de array não seja salvo
+            delete newPlan.historico;
 
             const fields = Object.keys(newPlan);
             const values = Object.values(newPlan);
             const placeholders = fields.map(() => '?').join(', ');
             const query = `INSERT INTO revisions (${fields.join(', ')}) VALUES (${placeholders})`;
 
-            // Esta é a linha que estava falhando (linha ~134 do seu log)
             await connection.execute(query, values);
         }
 
@@ -159,7 +157,6 @@ const updateRevisionPlan = async (req, res) => {
     } catch (error)
     {
         await connection.rollback();
-        // Este é o erro que você está vendo no log
         console.error('Erro ao salvar plano de revisão:', error); 
         res.status(500).json({ error: 'Erro ao salvar plano de revisão' });
     } finally {
@@ -167,7 +164,7 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- DELETE: Deletar um plano de revisão (Mantido) ---
+// ... (deleteRevisionPlan se mantém igual) ...
 const deleteRevisionPlan = async (req, res) => {
     try {
         // Assume que o ID aqui é o REVISION ID, não o vehicleId
@@ -179,7 +176,7 @@ const deleteRevisionPlan = async (req, res) => {
     }
 };
 
-// --- GET: Obter o plano consolidado (Mantido, embora não usado pelo RevisionsPage) ---
+// ... (getConsolidatedRevisionPlan se mantém igual) ...
 const getConsolidatedRevisionPlan = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM revisions WHERE proximaRevisaoData IS NOT NULL');
@@ -190,22 +187,45 @@ const getConsolidatedRevisionPlan = async (req, res) => {
     }
 };
 
+
 // --- GET: Obter o histórico de um veículo (CORRIGIDO) ---
+// Acha o histórico legado OU novo
 const getRevisionHistoryByVehicle = async (req, res) => {
     const { vehicleId } = req.params;
     if (!vehicleId) {
         return res.status(400).json({ error: 'vehicleId é obrigatório.' });
     }
     try {
-        // Consulta corrigida para buscar o histórico baseado no vehicleId (usando JOIN)
+        // --- CORREÇÃO (Achar histórico legado OU novo) ---
+        // 1. Encontra o ID da revisão (seja legado ou novo)
+        const [planRows] = await db.execute(
+            'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
+            [vehicleId, vehicleId]
+        );
+
+        if (planRows.length === 0) {
+             // Se não há plano, não pode haver histórico (baseado no FK)
+             // No entanto, os dados legados podem não ter o plano, mas ter o histórico
+             // Vamos checar o histórico DIRETAMENTE com o vehicleId (que era o revisionId legado)
+             const [historyRowsLegacy] = await db.query('SELECT * FROM revisions_history WHERE revisionId = ? ORDER BY data DESC', [vehicleId]);
+             if (historyRowsLegacy.length > 0) {
+                return res.json(historyRowsLegacy);
+             }
+             return res.json([]); // Nenhum plano e nenhum histórico legado encontrado
+        }
+
+        const revisionId = planRows[0].id; // Este é o PK da tabela revisions
+
+        // 2. Busca o histórico usando o PK (revisionId)
+        // O .sql mostra que `revisions_history.revisionId` aponta para `revisions.id`
         const query = `
             SELECT h.* FROM revisions_history h
-            JOIN revisions r ON h.revisionId = r.id
-            WHERE r.vehicleId = ? 
+            WHERE h.revisionId = ? 
             ORDER BY h.data DESC
         `;
-        const [rows] = await db.query(query, [vehicleId]);
+        const [rows] = await db.query(query, [revisionId]);
         res.json(rows);
+        // --- Fim da Correção ---
     } catch (error) {
         console.error(`Erro ao buscar histórico do veículo ${vehicleId}:`, error);
         res.status(500).json({ error: 'Erro ao buscar histórico de revisões' });
@@ -213,8 +233,8 @@ const getRevisionHistoryByVehicle = async (req, res) => {
 };
 
 // --- POST: Concluir uma revisão (CORRIGIDO) ---
+// Acha o registro legado (por ID) ou novo (por VehicleID)
 const completeRevision = async (req, res) => {
-    // O frontend envia { vehicleId, isHourBased, leituraRealizada, realizadaEm, realizadaPor, descricao }
     const { vehicleId, isHourBased, ...historyEntry } = req.body;
     
     if (!vehicleId) {
@@ -225,13 +245,18 @@ const completeRevision = async (req, res) => {
     try {
         await connection.beginTransaction();
 
+        // --- CORREÇÃO (Achar registro legado OU novo) ---
         // 1. Encontrar o 'revisionId' (PK da tabela 'revisions') usando o 'vehicleId'
-        const [rows] = await connection.execute('SELECT id FROM revisions WHERE vehicleId = ?', [vehicleId]);
+        const [rows] = await connection.execute(
+            'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
+            [vehicleId, vehicleId]
+        );
+        // --- Fim da Correção ---
         
         let revisionId;
         
         if (rows.length === 0) {
-            // Se não houver plano, cria um para poder adicionar o histórico
+            // Se não houver plano, cria um (padrão novo)
             console.warn(`Nenhum plano de revisão encontrado para vehicleId: ${vehicleId}. Criando um novo plano para registrar o histórico.`);
             revisionId = uuidv4();
             const newPlanQuery = `INSERT INTO revisions (id, vehicleId, ultimaAlteracao) VALUES (?, ?, ?)`;
@@ -243,12 +268,10 @@ const completeRevision = async (req, res) => {
             });
             await connection.execute(newPlanQuery, [revisionId, vehicleId, ultimaAlteracao]);
         } else {
-             revisionId = rows[0].id;
+             revisionId = rows[0].id; // Usa o PK encontrado
         }
 
-        // 2. Adicionar o registro ao histórico (tabela 'revisions_history')
-        // `revisions_history` (id, revisionId, data, odometro, horimetro, descricao, realizadaEm, realizadaPor)
-        
+        // 2. Adicionar o registro ao histórico (lógica mantida, estava correta)
         const historyQuery = `
             INSERT INTO revisions_history (
                 revisionId, data, descricao, realizadaEm, realizadaPor, 
@@ -257,21 +280,20 @@ const completeRevision = async (req, res) => {
             VALUES (?, ?, ?, ?, ?, ?, ?)
         `;
         
-        // Define os valores com base no isHourBased
         const odometroValue = !isHourBased ? (historyEntry.leituraRealizada || null) : null;
         const horimetroValue = isHourBased ? (historyEntry.leituraRealizada || null) : null;
 
         await connection.execute(historyQuery, [
             revisionId,
-            historyEntry.realizadaEm, // 'data'
-            historyEntry.descricao,   // 'descricao' (vindo do frontend, que leu o 'tipo' do plano)
-            historyEntry.realizadaEm, // 'realizadaEm'
+            historyEntry.realizadaEm, 
+            historyEntry.descricao,   
+            historyEntry.realizadaEm, 
             historyEntry.realizadaPor,
-            odometroValue,            // 'odometro'
-            horimetroValue            // 'horimetro'
+            odometroValue,
+            horimetroValue
         ]);
 
-        // 3. Limpar (resetar) o plano de revisão agendado na tabela 'revisions'
+        // 3. Limpar (resetar) o plano de revisão (lógica mantida, 'tipo' estava correto)
         const resetQuery = `
             UPDATE revisions 
             SET 
