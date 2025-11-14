@@ -283,15 +283,22 @@ const completeRevision = async (req, res) => {
         const odometroValue = !isHourBased ? (historyEntry.leituraRealizada || null) : null;
         const horimetroValue = isHourBased ? (historyEntry.leituraRealizada || null) : null;
 
+        // --- CORREÇÃO ---
+        // Converte a string ISO 'realizadaEm' (vinda do frontend) em um objeto Date.
+        // O driver mysql2 lida melhor com objetos Date para colunas TIMESTAMP.
+        // Isso evita falhas de tipo de dado que causam o Erro 500.
+        const dataRevisao = new Date(historyEntry.realizadaEm);
+
         await connection.execute(historyQuery, [
             revisionId,
-            historyEntry.realizadaEm, 
+            dataRevisao,              // param 2 (data) - Agora é um objeto Date
             historyEntry.descricao,   
-            historyEntry.realizadaEm, 
+            dataRevisao,              // param 4 (realizadaEm) - Agora é um objeto Date
             historyEntry.realizadaPor,
             odometroValue,
             horimetroValue
         ]);
+        // --- Fim da Correção ---
 
         // 3. Limpar (resetar) o plano de revisão (lógica mantida, 'tipo' estava correto)
         const resetQuery = `
