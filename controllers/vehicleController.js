@@ -2,6 +2,7 @@
 const db = require('../database');
 const { randomUUID } = require('crypto');
 const fs = require('fs'); // File System para deletar imagem antiga se houver
+const path = require('path'); // <-- 1. IMPORTAR O PATH
 
 // --- CORREÇÃO DE BUG 2: Função parseJsonSafe substituída ---
 // Esta versão é mais robusta e não tentará parsear strings simples.
@@ -20,10 +21,8 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
         }
     }
     
-    // Se for uma string que não parece JSON (ex: "Entrada em manutenção..."), retorna nulo (ou o próprio campo se preferir)
-    // Retornar nulo é mais seguro para o frontend que espera um objeto ou nulo.
+    // Se for uma string que não parece JSON (ex: "Entrada em manutenção..."), retorna nulo
     if (typeof field === 'string') {
-        // console.warn(`[JSON Parse Info] Campo '${key}' é uma string simples, não JSON.`, field);
         return defaultValue;
     }
     
@@ -164,17 +163,27 @@ const uploadVehicleImage = async (req, res) => {
 
         // 1. (Opcional) Busca a foto antiga para deletar do servidor
         const [rows] = await connection.execute('SELECT fotoURL FROM vehicles WHERE id = ?', [id]);
+        
+        // --- CORREÇÃO DE BUG (PATH RELATIVO) ---
         if (rows.length > 0 && rows[0].fotoURL) {
-            const oldPath = rows[0].fotoURL; // Ex: /uploads/old-image.jpg
-            const localPath = `public${oldPath}`; // Ex: public/uploads/old-image.jpg
+            const oldFotoURL = rows[0].fotoURL; // Ex: /uploads/old-image.jpg
             
-            // Tenta deletar o arquivo antigo do file system
-            if (fs.existsSync(localPath)) {
-                fs.unlink(localPath, (err) => {
-                    if (err) console.error(`Erro ao deletar imagem antiga ${localPath}:`, err);
-                });
+            // Resolve o caminho absoluto: 'public' + '/uploads/old-image.jpg'
+            // O substring(1) remove o '/' inicial de '/uploads'
+            const oldLocalPath = path.resolve('public', oldFotoURL.substring(1)); 
+
+            // Usa try...catch para que uma falha na deleção (ex: arquivo não existe)
+            // NÃO cancele a transação de upload.
+            try {
+                if (fs.existsSync(oldLocalPath)) {
+                    fs.unlinkSync(oldLocalPath); // Usa Sync para aguardar a deleção
+                    console.log(`[Upload] Imagem antiga ${oldLocalPath} deletada.`);
+                }
+            } catch (unlinkError) {
+                console.warn(`[Upload] Aviso: Falha ao deletar imagem antiga ${oldLocalPath}.`, unlinkError.message);
             }
         }
+        // --- FIM DA CORREÇÃO ---
 
         // 2. Atualiza o banco com o novo URL
         await connection.execute('UPDATE vehicles SET fotoURL = ? WHERE id = ?', [fotoURL, id]);
@@ -300,8 +309,7 @@ const allocateToObra = async (req, res) => {
         const vehicle = vehicleRows[0];
         
         const newObraHistoryEntryData = {
-            // --- CORREÇÃO DE BUG 1: RE-ADICIONADO O ID ---
-            // Esta tabela (obras_historico_veiculos) não é AUTO_INCREMENT e precisa de um ID.
+            // --- CORREÇÃO DE BUG (Mantida): Esta tabela precisa de ID ---
             id: randomUUID(),
             // --- FIM DA CORREÇÃO ---
             obraId: obraId,
