@@ -86,9 +86,12 @@ const assignRole = async (req, res) => {
 // --- ROTA: Obter a mensagem de atualização do sistema ---
 const getUpdateMessage = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM updates LIMIT 1');
+        // --- CORREÇÃO DO BUG: Busca a ÚLTIMA mensagem salva, não a primeira ---
+        const [rows] = await db.execute('SELECT * FROM updates ORDER BY timestamp DESC LIMIT 1');
+        
         if (rows.length === 0) {
-            return res.status(404).json({ error: 'Nenhuma mensagem de atualização encontrada.' });
+            // Retorna um objeto padrão vazio se não houver mensagens
+            return res.json({ message: '', showPopup: false });
         }
         res.json(rows[0]);
     } catch (error) {
@@ -100,9 +103,19 @@ const getUpdateMessage = async (req, res) => {
 // --- ROTA: Salvar a mensagem de atualização do sistema ---
 const saveUpdateMessage = async (req, res) => {
     const { message, showPopup } = req.body;
+    
+    // O ideal seria ter uma lógica de "UPSERT" (update or insert)
+    // Mas a query que você tem (ON DUPLICATE KEY) vai INSERIR NOVAS LINHAS
+    // se não houver uma chave primária/única para conflitar.
+    // Como já corrigimos o GET (acima) para pegar a mais recente, esta função VAI funcionar
+    // como esperado, embora vá encher o banco de dados com mensagens antigas.
+    // (Uma solução melhor seria deletar as antigas ou usar um ID fixo)
+    
     try {
+        // Query original (continua inserindo novas linhas, mas o GET agora pega a mais recente)
         await db.execute('INSERT INTO updates (message, showPopup, timestamp) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE message = ?, showPopup = ?, timestamp = ?',
             [message, showPopup, new Date(), message, showPopup, new Date()]);
+        
         res.status(200).json({ message: 'Mensagem de atualização salva com sucesso.' });
     } catch (error) {
         console.error('Erro ao salvar mensagem de atualização:', error);
@@ -110,7 +123,6 @@ const saveUpdateMessage = async (req, res) => {
     }
 };
 
-// *** NOVA FUNÇÃO ADICIONADA ***
 // --- ROTA: Migrar funcionários (que não têm user) para usuários ---
 const adminMigrateUsers = async (req, res) => {
     const connection = await db.getConnection();
