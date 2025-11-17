@@ -1,11 +1,8 @@
 const db = require('../database');
-// const { parseJsonSafe } = require('../utils/parseJsonSafe'); // Removido, não é mais necessário aqui
 
 // ===================================================================================
-// FUNÇÃO AUXILIAR DE PARSE SEGURO (Adicionada localmente APENAS para os campos da OBRA)
+// FUNÇÃO AUXILIAR DE PARSE SEGURO (Apenas para campos da tabela 'obras')
 // ===================================================================================
-// Esta função só vai tratar os campos JSON da tabela 'obras',
-// não mais do histórico.
 const parseJsonSafe = (field, key, defaultValue = null) => {
     if (field === null || typeof field === 'undefined') return defaultValue;
     if (typeof field === 'object') return field; // Já é um objeto
@@ -39,34 +36,9 @@ const parseObraJsonFields = (obra) => {
 };
 
 // ===================================================================================
-// FUNÇÃO AUXILIAR PARA FORMATAR O HISTÓRICO (A CORREÇÃO)
-// ===================================================================================
-// Esta função pega os dados "planos" do banco e cria o objeto 'details'
-// que o frontend (EmployeesPage.js) espera.
-const formatObraHistoryForFrontend = (historyEntry) => {
-    const { 
-        employeeId, 
-        employeeName, 
-        registroInterno, // Este é o registroInterno do Veículo
-        // ... captura o resto dos campos
-        ...rest 
-    } = historyEntry;
-
-    // Constrói o objeto 'details'
-    const details = {
-        employeeId: employeeId,
-        employeeName: employeeName,
-        vehicleRegistroInterno: registroInterno 
-        // Adicione aqui qualquer outro campo que o frontend
-        // espere que esteja dentro de 'details'
-    };
-
-    // Retorna a estrutura esperada pelo frontend
-    return {
-        ...rest, // id, obraId, veiculoId, dataEntrada, dataSaida, etc.
-        details: details // O objeto 'details' empacotado
-    };
-};
+// FUNÇÃO 'formatObraHistoryForFrontend' REMOVIDA
+// Ela estava movendo os campos (como employeeName) para dentro de 'details'
+// desnecessariamente, causando o bug no frontend ObrasPage.js.
 // ===================================================================================
 
 
@@ -79,14 +51,14 @@ const getAllObras = async (req, res) => {
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
 
         // *** CORREÇÃO APLICADA AQUI ***
-        // Mapeia o histórico para o formato que o frontend espera
-        const formattedHistory = historyRows.map(formatObraHistoryForFrontend);
+        // Não precisamos mais formatar o histórico (remover 'formatObraHistoryForFrontend')
+        // const formattedHistory = historyRows.map(formatObraHistoryForFrontend); // REMOVIDO
 
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
             
-            // Anexa o histórico JÁ FORMATADO
-            parsedObra.historicoVeiculos = formattedHistory
+            // Anexa o histórico "plano" (flat) como o frontend espera
+            parsedObra.historicoVeiculos = historyRows // Usa 'historyRows' diretamente
                 .filter(h => h.obraId === parsedObra.id)
                 .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada)); // Ordena
                 
@@ -116,8 +88,8 @@ const getObraById = async (req, res) => {
         const obra = parseObraJsonFields(rows[0]);
         
         // *** CORREÇÃO APLICADA AQUI ***
-        // Formata o histórico ANTES de anexar
-        obra.historicoVeiculos = historyRows.map(formatObraHistoryForFrontend);
+        // Retorna o histórico "plano" (flat) como o ObrasPage.js espera
+        obra.historicoVeiculos = historyRows; // REMOVIDO: .map(formatObraHistoryForFrontend)
         
         res.json(obra);
     } catch (error) {
@@ -129,6 +101,9 @@ const getObraById = async (req, res) => {
 // --- POST: Criar uma nova obra ---
 const createObra = async (req, res) => {
     const data = { ...req.body };
+    // Remove o ID pois o banco deve gerar (se for auto-increment)
+    // Se o ID for UUID, ele deve ser gerado aqui
+    // data.id = randomUUID(); // Descomente se 'id' for VARCHAR/UUID
     delete data.historicoVeiculos; 
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
@@ -154,7 +129,8 @@ const createObra = async (req, res) => {
 const updateObra = async (req, res) => {
     const { id } = req.params;
     const data = { ...req.body };
-    delete data.historicoVeiculos;
+    delete data.historicoVeiculos; // O histórico é atualizado por outra rota
+    delete data.id; // Não atualiza a chave primária
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
@@ -164,6 +140,12 @@ const updateObra = async (req, res) => {
     const fields = Object.keys(data);
     const values = Object.values(data);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
+    
+    // Evita query vazia se só enviar o ID
+    if(fields.length === 0){
+        return res.status(400).json({ error: 'Nenhum dado para atualizar.' });
+    }
+    
     const query = `UPDATE obras SET ${setClause} WHERE id = ?`;
 
     try {
@@ -189,12 +171,13 @@ const deleteObra = async (req, res) => {
 // --- FUNÇÃO PARA FINALIZAR UMA OBRA ---
 const finishObra = async (req, res) => {
     const { id } = req.params;
-    const currentDate = new Date(); 
+    const { dataFim } = req.body; // Pega a dataFim do frontend
+    const finalDate = dataFim ? new Date(dataFim) : new Date(); // Usa data do frontend ou data atual
 
     try {
         const [result] = await db.execute(
             "UPDATE obras SET status = 'finalizada', dataFim = ? WHERE id = ?",
-            [currentDate, id]
+            [finalDate, id]
         );
 
         if (result.affectedRows === 0) {
