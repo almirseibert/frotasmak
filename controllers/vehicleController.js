@@ -2,36 +2,31 @@
 const db = require('../database');
 const { randomUUID } = require('crypto');
 const fs = require('fs'); // File System para deletar imagem antiga se houver
-const path = require('path'); // <-- 1. IMPORTAR O PATH
+const path = require('path'); // Importar o Path
 
-// --- CORREÇÃO DE BUG 2: Função parseJsonSafe substituída ---
-// Esta versão é mais robusta e não tentará parsear strings simples.
+// ... (parseJsonSafe está correto, sem mudanças) ...
 const parseJsonSafe = (field, key, defaultValue = null) => {
     if (field === null || typeof field === 'undefined') return defaultValue;
     if (typeof field === 'object') return field; // Já é um objeto
     
-    // Verifica se é uma string e se PARECE um JSON antes de tentar
     if (typeof field === 'string' && (field.startsWith('{') || field.startsWith('['))) {
         try {
             const parsed = JSON.parse(field);
             return (typeof parsed === 'object' && parsed !== null) ? parsed : defaultValue;
         } catch (e) {
             console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
-            return defaultValue; // Retorna nulo se o parse falhar
+            return defaultValue; 
         }
     }
     
-    // Se for uma string que não parece JSON (ex: "Entrada em manutenção..."), retorna nulo
     if (typeof field === 'string') {
         return defaultValue;
     }
     
-    return defaultValue; // Retorna nulo para tipos inesperados (números, etc.)
+    return defaultValue;
 };
-// --- FIM DA CORREÇÃO ---
 
-
-// ... (parseVehicleJsonFields se mantém igual) ...
+// ... (parseVehicleJsonFields está correto, sem mudanças) ...
 const parseVehicleJsonFields = (vehicle) => {
     if (!vehicle) return null;
     const newVehicle = { ...vehicle };
@@ -44,7 +39,7 @@ const parseVehicleJsonFields = (vehicle) => {
     return newVehicle;
 };
 
-// ... (getAllVehicles se mantém igual) ...
+// ... (getAllVehicles está correto, sem mudanças) ...
 const getAllVehicles = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles');
@@ -52,12 +47,11 @@ const getAllVehicles = async (req, res) => {
         
         const vehicles = rows.map(v => {
             const vehicle = parseVehicleJsonFields(v);
-            // Anexa o histórico relevante a este veículo
             vehicle.history = historyRows
                 .filter(h => h.vehicleId === vehicle.id)
                 .map(h => ({
                     ...h,
-                    details: parseJsonSafe(h.details, 'history.details') // Agora usa a nova função
+                    details: parseJsonSafe(h.details, 'history.details') 
                 }));
             return vehicle;
         });
@@ -69,7 +63,7 @@ const getAllVehicles = async (req, res) => {
     }
 };
 
-// ... (getVehicleById se mantém igual) ...
+// ... (getVehicleById está correto, sem mudanças) ...
 const getVehicleById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles WHERE id = ?', [req.params.id]);
@@ -79,11 +73,10 @@ const getVehicleById = async (req, res) => {
         
         const vehicle = parseVehicleJsonFields(rows[0]);
         
-        // Busca o histórico para este veículo
         const [historyRows] = await db.execute('SELECT * FROM vehicle_history WHERE vehicleId = ?', [req.params.id]);
         vehicle.history = historyRows.map(h => ({
             ...h,
-            details: parseJsonSafe(h.details, 'history.details') // Agora usa a nova função
+            details: parseJsonSafe(h.details, 'history.details')
         }));
         
         res.json(vehicle);
@@ -93,15 +86,13 @@ const getVehicleById = async (req, res) => {
     }
 };
 
-// --- CREATE: Criar um novo veículo ---
+// ... (createVehicle está correto, sem mudanças) ...
 const createVehicle = async (req, res) => {
     const data = req.body;
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     delete data.history; 
 
-    // --- Adiciona ID gerado pelo Node ---
-    // O frontend não envia mais o ID
     data.id = randomUUID();
 
     const fields = Object.keys(data);
@@ -111,7 +102,6 @@ const createVehicle = async (req, res) => {
 
     try {
         await db.execute(query, values);
-        // Retorna o objeto completo com o novo ID
         res.status(201).json({ ...req.body, id: data.id }); 
     } catch (error) {
         console.error('Erro ao criar veículo:', error);
@@ -119,7 +109,7 @@ const createVehicle = async (req, res) => {
     }
 };
 
-// --- UPDATE: Atualizar um veículo existente ---
+// ... (updateVehicle está correto, sem mudanças) ...
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -164,26 +154,23 @@ const uploadVehicleImage = async (req, res) => {
         // 1. (Opcional) Busca a foto antiga para deletar do servidor
         const [rows] = await connection.execute('SELECT fotoURL FROM vehicles WHERE id = ?', [id]);
         
-        // --- CORREÇÃO DE BUG (PATH RELATIVO) ---
         if (rows.length > 0 && rows[0].fotoURL) {
             const oldFotoURL = rows[0].fotoURL; // Ex: /uploads/old-image.jpg
             
-            // Resolve o caminho absoluto: 'public' + '/uploads/old-image.jpg'
-            // O substring(1) remove o '/' inicial de '/uploads'
-            const oldLocalPath = path.resolve('public', oldFotoURL.substring(1)); 
+            // --- CORREÇÃO DE PATH ---
+            // Usa process.cwd() para garantir o caminho absoluto a partir da raiz do projeto
+            const oldLocalPath = path.resolve(process.cwd(), 'public', oldFotoURL.substring(1)); 
+            // --- FIM DA CORREÇÃO ---
 
-            // Usa try...catch para que uma falha na deleção (ex: arquivo não existe)
-            // NÃO cancele a transação de upload.
             try {
                 if (fs.existsSync(oldLocalPath)) {
-                    fs.unlinkSync(oldLocalPath); // Usa Sync para aguardar a deleção
+                    fs.unlinkSync(oldLocalPath); 
                     console.log(`[Upload] Imagem antiga ${oldLocalPath} deletada.`);
                 }
             } catch (unlinkError) {
                 console.warn(`[Upload] Aviso: Falha ao deletar imagem antiga ${oldLocalPath}.`, unlinkError.message);
             }
         }
-        // --- FIM DA CORREÇÃO ---
 
         // 2. Atualiza o banco com o novo URL
         await connection.execute('UPDATE vehicles SET fotoURL = ? WHERE id = ?', [fotoURL, id]);
@@ -203,22 +190,18 @@ const uploadVehicleImage = async (req, res) => {
 };
 
 
-// ... (deleteVehicle se mantém igual) ...
+// ... (deleteVehicle está correto, sem mudanças) ...
 const deleteVehicle = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
     try {
-        // ... (lógica de delete) ...
         const [revisions] = await connection.execute('SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', [req.params.id, req.params.id]);
         if (revisions.length > 0) {
             const revisionIds = revisions.map(r => r.id);
-            // Deleta o histórico primeiro
             await connection.execute(`DELETE FROM revisions_history WHERE revisionId IN (?)`, [revisionIds]);
-            // Deleta os planos
             await connection.execute(`DELETE FROM revisions WHERE id IN (?)`, [revisionIds]);
         }
         
-        // Deleta o veículo (que deleta o histórico de alocação em cascata)
         await connection.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
         
         await connection.commit();
@@ -232,8 +215,7 @@ const deleteVehicle = async (req, res) => {
     }
 };
 
-// ... (Rotas de Alocação, allocateToObra, deallocateFromObra, etc. se mantêm iguais) ...
-// ... (Nenhuma mudança necessária neles para esta task) ...
+// ... (allocateToObra está correto, sem mudanças) ...
 const allocateToObra = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { obraId, employeeId, dataEntrada, readingType, readingValue } = req.body;
@@ -251,15 +233,13 @@ const allocateToObra = async (req, res) => {
             throw new Error("Dados de obra ou funcionário inválidos.");
         }
         
-        // 1. Cria a nova entrada de histórico na tabela 'vehicle_history'
-        // (ID é AUTO_INCREMENT, então não passamos)
+        // 1. 'vehicle_history'
         const newHistoryEntry = {
-            // id: randomUUID(), // REMOVIDO (Correto)
             vehicleId: id,
             historyType: 'obra',
             startDate: new Date(),
             endDate: null,
-            details: JSON.stringify({ // 'details' é um campo JSON
+            details: JSON.stringify({ 
                 obraId: obraId,
                 obraNome: obra.nome,
                 employeeId: employeeId,
@@ -270,26 +250,26 @@ const allocateToObra = async (req, res) => {
         
         const historyFields = Object.keys(newHistoryEntry);
         const historyValues = Object.values(newHistoryEntry);
-        const historyPlaceholders = historyFields.map(() => '?').join(', '); // Variável para a tabela 1
+        const historyPlaceholders = historyFields.map(() => '?').join(', '); 
 
         await connection.execute(
             `INSERT INTO vehicle_history (${historyFields.join(', ')}) VALUES (${historyPlaceholders})`,
             historyValues
         );
         
-        // 2. Prepara a atualização do veículo
+        // 2. 'vehicles'
         const vehicleUpdateData = {
             obraAtualId: obraId,
             status: 'Em Obra',
             localizacaoAtual: obra.nome,
-            operationalAssignment: null, // Limpa outra alocação
-            maintenanceLocation: null, // Limpa outra alocação
+            operationalAssignment: null, 
+            maintenanceLocation: null, 
             alocadoEm: JSON.stringify({
                 type: 'obra',
                 id: obraId,
                 nome: obra.nome
             }),
-            [readingType]: readingValue, // Atualiza a leitura principal
+            [readingType]: readingValue, 
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -301,17 +281,15 @@ const allocateToObra = async (req, res) => {
             [...updateValues, id]
         );
         
-        // 3. Atualiza o funcionário
+        // 3. 'employees'
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
 
-        // 4. (Lógica migrada) Grava na tabela 'obras_historico_veiculos'
+        // 4. 'obras_historico_veiculos'
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
         const vehicle = vehicleRows[0];
         
         const newObraHistoryEntryData = {
-            // --- CORREÇÃO DE BUG (Mantida): Esta tabela precisa de ID ---
-            id: randomUUID(),
-            // --- FIM DA CORREÇÃO ---
+            id: randomUUID(), // Correto
             obraId: obraId,
             veiculoId: vehicle.id,
             tipo: vehicle.tipo,
@@ -330,9 +308,8 @@ const allocateToObra = async (req, res) => {
         
         const obraHistoryFields = Object.keys(newObraHistoryEntryData);
         const obraHistoryValues = Object.values(newObraHistoryEntryData);
-        const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', '); // Variável para a tabela 2
+        const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', '); 
 
-        // A correção da variável (obraHistoryPlaceholders) da última vez está mantida
         await connection.execute(
             `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`, 
             obraHistoryValues
@@ -349,6 +326,7 @@ const allocateToObra = async (req, res) => {
     }
 };
 
+// ... (deallocateFromObra está correto, sem mudanças) ...
 const deallocateFromObra = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { dataSaida, readingType, readingValue, location, shouldFinalizeObra, dataFimObra } = req.body;
@@ -358,7 +336,7 @@ const deallocateFromObra = async (req, res) => {
     try {
         const exitTimestamp = new Date(dataSaida);
 
-        // 1. Atualiza a entrada de histórico em 'vehicle_history'
+        // 1. 'vehicle_history'
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'obra']
@@ -388,13 +366,13 @@ const deallocateFromObra = async (req, res) => {
             [exitTimestamp, JSON.stringify(newDetails), activeHistory.id]
         );
 
-        // 2. Atualiza o veículo
+        // 2. 'vehicles'
         const vehicleUpdateData = {
             obraAtualId: null, 
             status: 'Disponível', 
             localizacaoAtual: location, 
             alocadoEm: null,
-            [readingType]: readingValue, // Atualiza leitura principal
+            [readingType]: readingValue, 
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -406,12 +384,12 @@ const deallocateFromObra = async (req, res) => {
             [...updateValues, id]
         );
 
-        // 3. Atualiza funcionário (se houver)
+        // 3. 'employees'
         if (employeeIdFromHistory) {
              await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdFromHistory]);
         }
         
-        // 4. (Lógica migrada) Atualiza 'obras_historico_veiculos'
+        // 4. 'obras_historico_veiculos'
         const obraHistoryUpdateFields = ['dataSaida = ?'];
         const obraHistoryUpdateValues = [exitTimestamp];
 
@@ -423,8 +401,8 @@ const deallocateFromObra = async (req, res) => {
             obraHistoryUpdateValues.push(readingValue);
         }
 
-        obraHistoryUpdateValues.push(id); // vehicleId
-        obraHistoryUpdateValues.push(obraIdFromHistory); // obraId
+        obraHistoryUpdateValues.push(id); 
+        obraHistoryUpdateValues.push(obraIdFromHistory); 
 
         await connection.execute(
             `UPDATE obras_historico_veiculos 
@@ -433,10 +411,10 @@ const deallocateFromObra = async (req, res) => {
             obraHistoryUpdateValues
         );
         
-        // 5. (Lógica separada) Atualiza 'obras' se 'shouldFinalizeObra' for verdadeiro
+        // 5. 'obras'
         if (shouldFinalizeObra) {
             const obraUpdate = { 
-                status: 'finalizada', // Ajuste para 'Finalizada' se for o caso
+                status: 'finalizada', 
                 dataFim: new Date(dataFimObra)
             };
 
@@ -461,26 +439,21 @@ const deallocateFromObra = async (req, res) => {
     }
 };
 
+// ... (assignToOperational está correto, sem mudanças) ...
 const assignToOperational = async (req, res) => {
-    const { id } = req.params; // vehicleId
-    
-    // --- CORREÇÃO (Mantida) ---
+    const { id } = req.params; 
     const { subGroup, employeeId, observacoes } = req.body;
     const connection = await db.getConnection();
-    // --- FIM DA CORREÇÃO ---
-
     await connection.beginTransaction();
 
     try {
-        // --- CORREÇÃO DE BUG (Mantida) ---
         if (!employeeId) {
             throw new Error('ID do funcionário não pode ser vazio.');
         }
-        // --- FIM DA CORREÇÃO ---
 
         const now = new Date();
         
-        // 1. Finaliza histórico anterior (se houver)
+        // 1. Finaliza histórico anterior
         await connection.execute(
             'UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND endDate IS NULL',
             [now, id]
@@ -488,18 +461,14 @@ const assignToOperational = async (req, res) => {
         
         const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
         
-        // --- CORREÇÃO DE BUG (Mantida) ---
         if (!selectedEmployeeRows || selectedEmployeeRows.length === 0) {
             console.error(`Falha ao alocar: Funcionário com ID ${employeeId} não encontrado.`);
             throw new Error('Funcionário selecionado não encontrado no banco de dados.');
         }
         const employeeName = selectedEmployeeRows[0]?.nome;
-        // --- FIM DA CORREÇÃO ---
         
-        // 2. Cria nova entrada de histórico
-        // (ID é AUTO_INCREMENT, então não passamos)
+        // 2. 'vehicle_history'
         const newHistoryEntry = {
-            // id: randomUUID(), // REMOVIDO (Correto)
             vehicleId: id,
             historyType: 'operacional',
             startDate: now,
@@ -521,7 +490,7 @@ const assignToOperational = async (req, res) => {
             historyValues
         );
         
-        // 3. Prepara dados da alocação para 'vehicles'
+        // 3. 'vehicles' (operationalAssignment)
         const operationalAssignment = { 
             subGroup, 
             employeeId, 
@@ -529,7 +498,7 @@ const assignToOperational = async (req, res) => {
             startDate: now 
         };
 
-        // 4. Atualiza 'vehicles'
+        // 4. 'vehicles' (status)
         const vehicleUpdateData = {
             operationalAssignment: JSON.stringify(operationalAssignment),
             status: 'Em Operação',
@@ -551,20 +520,21 @@ const assignToOperational = async (req, res) => {
             [...updateValues, id]
         );
         
-        // 5. Atualiza 'employees'
+        // 5. 'employees'
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeId]);
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo alocado para operação com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro ao alocar veículo para operação:", error.message); // Log mais claro
+        console.error("Erro ao alocar veículo para operação:", error.message); 
         res.status(500).json({ error: 'Falha ao alocar o veículo.', message: error.message });
     } finally {
         connection.release();
     }
 };
 
+// ... (unassignFromOperational está correto, sem mudanças) ...
 const unassignFromOperational = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { location } = req.body;
@@ -574,22 +544,21 @@ const unassignFromOperational = async (req, res) => {
     try {
         const now = new Date();
 
-        // 1. Busca funcionário alocado antes de limpar
+        // 1. 'vehicle_history'
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'operacional']
         );
         const activeHistory = historyRows[0];
         
-        // 2. Finaliza histórico
-        if (activeHistory) { // Adiciona verificação se histórico existe
+        if (activeHistory) { 
             await connection.execute(
                 'UPDATE vehicle_history SET endDate = ? WHERE id = ?',
                 [now, activeHistory.id]
             );
         }
 
-        // 3. Atualiza 'vehicles'
+        // 2. 'vehicles'
         const vehicleUpdateData = { 
             operationalAssignment: null, 
             status: 'Disponível', 
@@ -606,9 +575,9 @@ const unassignFromOperational = async (req, res) => {
             [...updateValues, id]
         );
 
-        // 4. Atualiza 'employees'
+        // 3. 'employees'
         if (activeHistory?.details) {
-             const details = parseJsonSafe(activeHistory.details, 'history.details'); // Agora usa a nova função
+             const details = parseJsonSafe(activeHistory.details, 'history.details'); 
              if (details?.employeeId) {
                 await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [details.employeeId]);
              }
@@ -625,14 +594,11 @@ const unassignFromOperational = async (req, res) => {
     }
 };
 
+// ... (startMaintenance está correto, sem mudanças) ...
 const startMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
-    
-    // --- CORREÇÃO (Mantida) ---
     const { status, location } = req.body;
     const connection = await db.getConnection();
-    // --- FIM DA CORREÇÃO ---
-
     await connection.beginTransaction();
 
     try {
@@ -644,10 +610,8 @@ const startMaintenance = async (req, res) => {
             [now, id]
         );
 
-        // 2. Cria nova entrada de histórico
-        // (ID é AUTO_INCREMENT, então não passamos)
+        // 2. 'vehicle_history'
         const newHistoryEntry = {
-            // id: randomUUID(), // REMOVIDO (Correto)
             vehicleId: id,
             historyType: 'manutencao',
             startDate: now,
@@ -667,13 +631,13 @@ const startMaintenance = async (req, res) => {
             historyValues
         );
         
-        // 3. Prepara dados da manutenção para 'vehicles'
+        // 3. 'vehicles' (maintenanceLocation)
         const maintenanceLocation = {
             type: location === 'Pátio MAK Lajeado' || location === 'Pátio MAK Santa Maria' ? 'Pátio' : 'Outros',
             details: location,
         };
 
-        // 4. Atualiza 'vehicles'
+        // 4. 'vehicles' (status)
         const vehicleUpdateData = {
             status: status,
             maintenanceLocation: JSON.stringify(maintenanceLocation),
@@ -706,6 +670,7 @@ const startMaintenance = async (req, res) => {
     }
 };
 
+// ... (endMaintenance está correto, sem mudanças) ...
 const endMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
     const { location } = req.body;
@@ -715,13 +680,13 @@ const endMaintenance = async (req, res) => {
     try {
         const now = new Date();
         
-        // 1. Finaliza histórico de manutenção
+        // 1. 'vehicle_history'
         await connection.execute(
             'UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [now, id, 'manutencao']
         );
 
-        // 2. Atualiza 'vehicles'
+        // 2. 'vehicles'
         const vehicleUpdateData = {
             status: 'Disponível',
             maintenanceLocation: null,

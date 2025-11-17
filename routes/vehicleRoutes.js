@@ -4,17 +4,19 @@ const router = express.Router();
 const vehicleController = require('../controllers/vehicleController');
 const authMiddleware = require('../middlewares/authMiddleware');
 const multer = require('multer');
-const fs = require('fs'); // <-- 1. Importar o File System
-const path = require('path'); // <-- 2. Importar o Path
+const fs = require('fs');
+const path = require('path');
 
 // --- Configuração do Multer para Upload de Imagens ---
 
-// 3. Definir o diretório de upload
 const uploadDir = 'public/uploads';
 
-// 4. Resolver o caminho absoluto e criar o diretório se ele não existir
-// path.resolve() garante que estamos no caminho certo a partir da raiz do projeto
-const absoluteUploadDir = path.resolve(uploadDir);
+// --- CORREÇÃO DE PATH ---
+// Usar process.cwd() garante que o caminho é absoluto a partir da raiz do projeto,
+// o que é mais seguro em ambientes de contêiner (Easypanel/Docker).
+const absoluteUploadDir = path.resolve(process.cwd(), uploadDir);
+// --- FIM DA CORREÇÃO ---
+
 if (!fs.existsSync(absoluteUploadDir)) {
     fs.mkdirSync(absoluteUploadDir, { recursive: true });
     console.log(`[Multer] Diretório de upload criado em: ${absoluteUploadDir}`);
@@ -24,7 +26,7 @@ if (!fs.existsSync(absoluteUploadDir)) {
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
         // Agora o diretório garantidamente existe
-        cb(null, uploadDir); // <-- 5. Usar a variável
+        cb(null, absoluteUploadDir); // Usa o caminho absoluto
     },
     filename: function (req, file, cb) {
         // Cria um nome de arquivo único (ex: vehicle-1731592800000.jpg)
