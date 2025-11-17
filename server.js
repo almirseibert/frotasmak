@@ -41,9 +41,11 @@ const port = process.env.PORT || 3001;
 app.use(express.json());
 app.use(cors());
 
-// Servir arquivos estáticos da pasta 'uploads'
-// Isso torna as imagens acessíveis publicamente (ex: http://sua-api.com/uploads/vehicles/imagem.png)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// --- CORREÇÃO DE BUG ---
+// O caminho deve corresponder ao local onde o multer salva (public/uploads)
+// Isso torna as imagens acessíveis publicamente (ex: http://sua-api.com/uploads/imagem.png)
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+// --- FIM DA CORREÇÃO ---
 
 
 // --- ROTAS DA API ---
@@ -62,10 +64,12 @@ apiRouter.use('/registrationRequests', registrationRequestRoutes);
 apiRouter.use(authMiddleware);
 
 // Rota de Upload (Protegida)
+// ATENÇÃO: A rota /api/upload (esta linha) pode estar em conflito com /api/vehicles/:id/upload-image
+// Se o upload de veículos parar de funcionar, comente a linha abaixo.
 apiRouter.use('/upload', uploadRoutes);
 
 // Rotas Protegidas
-apiRouter.use('/vehicles', vehicleRoutes);
+apiRouter.use('/vehicles', vehicleRoutes); // Esta rota já lida com upload de veículos
 apiRouter.use('/obras', obraRoutes);
 apiRouter.use('/employees', employeeRoutes);
 apiRouter.use('/partners', partnerRoutes);
