@@ -1,4 +1,5 @@
 const db = require('../database');
+const { v4: uuidv4 } = require('uuid'); // <-- 1. IMPORTAR O UUID
 
 // ===================================================================================
 // FUNÇÃO AUXILIAR DE PARSE SEGURO (Apenas para campos da tabela 'obras')
@@ -35,24 +36,13 @@ const parseObraJsonFields = (obra) => {
     return newObra;
 };
 
-// ===================================================================================
-// FUNÇÃO 'formatObraHistoryForFrontend' REMOVIDA
-// Ela estava movendo os campos (como employeeName) para dentro de 'details'
-// desnecessariamente, causando o bug no frontend ObrasPage.js.
-// ===================================================================================
-
-
-// --- GET: Todas as obras ---
+// ... (getAllObras - sem mudanças) ...
 const getAllObras = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras');
         
         // Busca todo o histórico de obras de uma vez
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
-
-        // *** CORREÇÃO APLICADA AQUI ***
-        // Não precisamos mais formatar o histórico (remover 'formatObraHistoryForFrontend')
-        // const formattedHistory = historyRows.map(formatObraHistoryForFrontend); // REMOVIDO
 
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
@@ -72,7 +62,7 @@ const getAllObras = async (req, res) => {
     }
 };
 
-// --- GET: Uma obra por ID ---
+// ... (getObraById - sem mudanças) ...
 const getObraById = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras WHERE id = ?', [req.params.id]);
@@ -87,9 +77,8 @@ const getObraById = async (req, res) => {
         
         const obra = parseObraJsonFields(rows[0]);
         
-        // *** CORREÇÃO APLICADA AQUI ***
         // Retorna o histórico "plano" (flat) como o ObrasPage.js espera
-        obra.historicoVeiculos = historyRows; // REMOVIDO: .map(formatObraHistoryForFrontend)
+        obra.historicoVeiculos = historyRows; 
         
         res.json(obra);
     } catch (error) {
@@ -101,15 +90,21 @@ const getObraById = async (req, res) => {
 // --- POST: Criar uma nova obra ---
 const createObra = async (req, res) => {
     const data = { ...req.body };
-    // Remove o ID pois o banco deve gerar (se for auto-increment)
-    // Se o ID for UUID, ele deve ser gerado aqui
-    // data.id = randomUUID(); // Descomente se 'id' for VARCHAR/UUID
+
+    // --- CORREÇÃO DE BUG ---
+    // Adiciona o ID que está faltando para a tabela 'obras'
+    data.id = uuidv4();
+    // --- FIM DA CORREÇÃO ---
+
     delete data.historicoVeiculos; 
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
+
+    // Define o status padrão no backend
+    data.status = 'ativa';
 
     const fields = Object.keys(data);
     const values = Object.values(data);
@@ -125,7 +120,7 @@ const createObra = async (req, res) => {
     }
 };
 
-// --- PUT: Atualizar uma obra existente ---
+// ... (updateObra - sem mudanças) ...
 const updateObra = async (req, res) => {
     const { id } = req.params;
     const data = { ...req.body };
@@ -157,7 +152,7 @@ const updateObra = async (req, res) => {
     }
 };
 
-// --- DELETE: Deletar uma obra ---
+// ... (deleteObra - sem mudanças) ...
 const deleteObra = async (req, res) => {
     try {
         await db.execute('DELETE FROM obras WHERE id = ?', [req.params.id]);
@@ -168,7 +163,7 @@ const deleteObra = async (req, res) => {
     }
 };
 
-// --- FUNÇÃO PARA FINALIZAR UMA OBRA ---
+// ... (finishObra - sem mudanças) ...
 const finishObra = async (req, res) => {
     const { id } = req.params;
     const { dataFim } = req.body; // Pega a dataFim do frontend
@@ -190,7 +185,7 @@ const finishObra = async (req, res) => {
     }
 };
 
-// --- Atualizar uma entrada de histórico específica ---
+// ... (updateObraHistoryEntry - sem mudanças) ...
 const updateObraHistoryEntry = async (req, res) => {
     const { historyId } = req.params; // PK da tabela obras_historico_veiculos
     // O frontend enviará os dados "planos", sem 'details'
