@@ -232,9 +232,7 @@ const allocateToObra = async (req, res) => {
         
         // 1. Cria a nova entrada de histórico na tabela 'vehicle_history'
         const newHistoryEntry = {
-            // --- CORREÇÃO ---
-            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
-            // --- FIM DA CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
             vehicleId: id,
             historyType: 'obra',
             startDate: new Date(),
@@ -250,7 +248,7 @@ const allocateToObra = async (req, res) => {
         
         const historyFields = Object.keys(newHistoryEntry);
         const historyValues = Object.values(newHistoryEntry);
-        const historyPlaceholders = historyFields.map(() => '?').join(', ');
+        const historyPlaceholders = historyFields.map(() => '?').join(', '); // Variável para a tabela 1
 
         await connection.execute(
             `INSERT INTO vehicle_history (${historyFields.join(', ')}) VALUES (${historyPlaceholders})`,
@@ -289,9 +287,7 @@ const allocateToObra = async (req, res) => {
         const vehicle = vehicleRows[0];
         
         const newObraHistoryEntryData = {
-            // --- CORREÇÃO ---
-            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
-            // --- FIM DA CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
             obraId: obraId,
             veiculoId: vehicle.id,
             tipo: vehicle.tipo,
@@ -310,12 +306,15 @@ const allocateToObra = async (req, res) => {
         
         const obraHistoryFields = Object.keys(newObraHistoryEntryData);
         const obraHistoryValues = Object.values(newObraHistoryEntryData);
-        const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', ');
+        const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', '); // Variável para a tabela 2
 
+        // --- CORREÇÃO DO BUG ---
+        // O código estava usando 'historyPlaceholders' (da tabela 1) em vez de 'obraHistoryPlaceholders'
         await connection.execute(
-            `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`, // Corrigido para obraHistoryPlaceholders
+            `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`, // <-- CORRIGIDO
             obraHistoryValues
         );
+        // --- FIM DA CORREÇÃO ---
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
@@ -477,9 +476,7 @@ const assignToOperational = async (req, res) => {
         
         // 2. Cria nova entrada de histórico
         const newHistoryEntry = {
-            // --- CORREÇÃO ---
-            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
-            // --- FIM DA CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
             vehicleId: id,
             historyType: 'operacional',
             startDate: now,
@@ -626,9 +623,7 @@ const startMaintenance = async (req, res) => {
 
         // 2. Cria nova entrada de histórico
         const newHistoryEntry = {
-            // --- CORREÇÃO ---
-            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
-            // --- FIM DA CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
             vehicleId: id,
             historyType: 'manutencao',
             startDate: now,
