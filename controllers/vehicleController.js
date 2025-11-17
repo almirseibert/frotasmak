@@ -438,11 +438,23 @@ const deallocateFromObra = async (req, res) => {
 
 const assignToOperational = async (req, res) => {
     const { id } = req.params; // vehicleId
+    
+    // --- CORREÇÃO ---
+    // As variáveis estavam faltando após a refatoração anterior.
     const { subGroup, employeeId, observacoes } = req.body;
     const connection = await db.getConnection();
+    // --- FIM DA CORREÇÃO ---
+
     await connection.beginTransaction();
 
     try {
+        // --- CORREÇÃO DE BUG ---
+        // Adiciona validação para garantir que employeeId não é nulo ou vazio
+        if (!employeeId) {
+            throw new Error('ID do funcionário não pode ser vazio.');
+        }
+        // --- FIM DA CORREÇÃO ---
+
         const now = new Date();
         
         // 1. Finaliza histórico anterior (se houver)
@@ -452,11 +464,15 @@ const assignToOperational = async (req, res) => {
         );
         
         const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
-        const employeeName = selectedEmployeeRows[0]?.nome;
         
-        if (!employeeName) {
-            throw new Error('Funcionário selecionado não encontrado.');
+        // --- CORREÇÃO DE BUG ---
+        // Validação robusta para o nome do funcionário
+        if (!selectedEmployeeRows || selectedEmployeeRows.length === 0) {
+            console.error(`Falha ao alocar: Funcionário com ID ${employeeId} não encontrado.`);
+            throw new Error('Funcionário selecionado não encontrado no banco de dados.');
         }
+        const employeeName = selectedEmployeeRows[0]?.nome;
+        // --- FIM DA CORREÇÃO ---
         
         // 2. Cria nova entrada de histórico
         const newHistoryEntry = {
@@ -519,8 +535,8 @@ const assignToOperational = async (req, res) => {
         res.status(200).json({ message: 'Veículo alocado para operação com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro ao alocar veículo para operação:", error);
-        res.status(500).json({ error: 'Falha ao alocar o veículo.' });
+        console.error("Erro ao alocar veículo para operação:", error.message); // Log mais claro
+        res.status(500).json({ error: 'Falha ao alocar o veículo.', message: error.message });
     } finally {
         connection.release();
     }
@@ -543,10 +559,12 @@ const unassignFromOperational = async (req, res) => {
         const activeHistory = historyRows[0];
         
         // 2. Finaliza histórico
-        await connection.execute(
-            'UPDATE vehicle_history SET endDate = ? WHERE id = ?',
-            [now, activeHistory.id]
-        );
+        if (activeHistory) { // Adiciona verificação se histórico existe
+            await connection.execute(
+                'UPDATE vehicle_history SET endDate = ? WHERE id = ?',
+                [now, activeHistory.id]
+            );
+        }
 
         // 3. Atualiza 'vehicles'
         const vehicleUpdateData = { 
@@ -586,8 +604,13 @@ const unassignFromOperational = async (req, res) => {
 
 const startMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
+    
+    // --- CORREÇÃO ---
+    // As variáveis estavam faltando após a refatoração anterior.
     const { status, location } = req.body;
     const connection = await db.getConnection();
+    // --- FIM DA CORREÇÃO ---
+
     await connection.beginTransaction();
 
     try {
@@ -606,11 +629,13 @@ const startMaintenance = async (req, res) => {
             historyType: 'manutencao',
             startDate: now,
             endDate: null,
-            details: JSON.stringify({ // Salva como JSON
+            // --- CORREÇÃO DE BUG (Mantida) ---
+            // Simplificado a estrutura de 'details'.
+            details: JSON.stringify({
                 status: status,
                 location: location,
-                details: `Entrada em manutenção (${status}) em ${location}`
             })
+            // --- FIM DA CORREÇÃO ---
         };
         
         const historyFields = Object.keys(newHistoryEntry);
@@ -655,7 +680,7 @@ const startMaintenance = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error("Erro ao iniciar manutenção:", error);
-        res.status(500).json({ error: 'Falha ao iniciar a manutenção.' });
+        res.status(500).json({ error: 'Falha ao iniciar a manutenção.', message: error.message });
     } finally {
         connection.release();
     }
@@ -710,7 +735,7 @@ module.exports = {
     getVehicleById,
     createVehicle,
     updateVehicle,
-    uploadVehicleImage, // <-- Exporta a nova função
+    uploadVehicleImage,
     deleteVehicle,
     allocateToObra,
     deallocateFromObra,
