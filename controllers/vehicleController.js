@@ -232,7 +232,9 @@ const allocateToObra = async (req, res) => {
         
         // 1. Cria a nova entrada de histórico na tabela 'vehicle_history'
         const newHistoryEntry = {
-            id: randomUUID(), // Adiciona ID ao histórico
+            // --- CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
+            // --- FIM DA CORREÇÃO ---
             vehicleId: id,
             historyType: 'obra',
             startDate: new Date(),
@@ -287,7 +289,9 @@ const allocateToObra = async (req, res) => {
         const vehicle = vehicleRows[0];
         
         const newObraHistoryEntryData = {
-            id: randomUUID(), // Gera um ID único para o registro
+            // --- CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
+            // --- FIM DA CORREÇÃO ---
             obraId: obraId,
             veiculoId: vehicle.id,
             tipo: vehicle.tipo,
@@ -309,7 +313,7 @@ const allocateToObra = async (req, res) => {
         const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', ');
 
         await connection.execute(
-            `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${historyPlaceholders})`,
+            `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`, // Corrigido para obraHistoryPlaceholders
             obraHistoryValues
         );
 
@@ -439,8 +443,7 @@ const deallocateFromObra = async (req, res) => {
 const assignToOperational = async (req, res) => {
     const { id } = req.params; // vehicleId
     
-    // --- CORREÇÃO ---
-    // As variáveis estavam faltando após a refatoração anterior.
+    // --- CORREÇÃO (Mantida) ---
     const { subGroup, employeeId, observacoes } = req.body;
     const connection = await db.getConnection();
     // --- FIM DA CORREÇÃO ---
@@ -448,8 +451,7 @@ const assignToOperational = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        // --- CORREÇÃO DE BUG ---
-        // Adiciona validação para garantir que employeeId não é nulo ou vazio
+        // --- CORREÇÃO DE BUG (Mantida) ---
         if (!employeeId) {
             throw new Error('ID do funcionário não pode ser vazio.');
         }
@@ -465,8 +467,7 @@ const assignToOperational = async (req, res) => {
         
         const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
         
-        // --- CORREÇÃO DE BUG ---
-        // Validação robusta para o nome do funcionário
+        // --- CORREÇÃO DE BUG (Mantida) ---
         if (!selectedEmployeeRows || selectedEmployeeRows.length === 0) {
             console.error(`Falha ao alocar: Funcionário com ID ${employeeId} não encontrado.`);
             throw new Error('Funcionário selecionado não encontrado no banco de dados.');
@@ -476,7 +477,9 @@ const assignToOperational = async (req, res) => {
         
         // 2. Cria nova entrada de histórico
         const newHistoryEntry = {
-            id: randomUUID(), // Adiciona ID
+            // --- CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
+            // --- FIM DA CORREÇÃO ---
             vehicleId: id,
             historyType: 'operacional',
             startDate: now,
@@ -605,8 +608,7 @@ const unassignFromOperational = async (req, res) => {
 const startMaintenance = async (req, res) => {
     const { id } = req.params; // vehicleId
     
-    // --- CORREÇÃO ---
-    // As variáveis estavam faltando após a refatoração anterior.
+    // --- CORREÇÃO (Mantida) ---
     const { status, location } = req.body;
     const connection = await db.getConnection();
     // --- FIM DA CORREÇÃO ---
@@ -624,18 +626,17 @@ const startMaintenance = async (req, res) => {
 
         // 2. Cria nova entrada de histórico
         const newHistoryEntry = {
-            id: randomUUID(), // Adiciona ID
+            // --- CORREÇÃO ---
+            // id: randomUUID(), // REMOVIDO: Deixa o DB (AUTO_INCREMENT) gerar o ID
+            // --- FIM DA CORREÇÃO ---
             vehicleId: id,
             historyType: 'manutencao',
             startDate: now,
             endDate: null,
-            // --- CORREÇÃO DE BUG (Mantida) ---
-            // Simplificado a estrutura de 'details'.
             details: JSON.stringify({
                 status: status,
                 location: location,
             })
-            // --- FIM DA CORREÇÃO ---
         };
         
         const historyFields = Object.keys(newHistoryEntry);
