@@ -3,22 +3,34 @@ const db = require('../database');
 const { randomUUID } = require('crypto');
 const fs = require('fs'); // File System para deletar imagem antiga se houver
 
-// ... (parseJsonSafe se mantém igual) ...
-const parseJsonSafe = (field, key) => {
-    if (field === null || typeof field === 'undefined') return null;
-    if (typeof field === 'object') return field; 
-    if (typeof field !== 'string') return field;
-    try {
-        const parsed = JSON.parse(field);
-        if (typeof parsed === 'object' && parsed !== null) {
-            return parsed;
+// --- CORREÇÃO DE BUG 2: Função parseJsonSafe substituída ---
+// Esta versão é mais robusta e não tentará parsear strings simples.
+const parseJsonSafe = (field, key, defaultValue = null) => {
+    if (field === null || typeof field === 'undefined') return defaultValue;
+    if (typeof field === 'object') return field; // Já é um objeto
+    
+    // Verifica se é uma string e se PARECE um JSON antes de tentar
+    if (typeof field === 'string' && (field.startsWith('{') || field.startsWith('['))) {
+        try {
+            const parsed = JSON.parse(field);
+            return (typeof parsed === 'object' && parsed !== null) ? parsed : defaultValue;
+        } catch (e) {
+            console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
+            return defaultValue; // Retorna nulo se o parse falhar
         }
-        return null; 
-    } catch (e) {
-        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
-        return null; 
     }
+    
+    // Se for uma string que não parece JSON (ex: "Entrada em manutenção..."), retorna nulo (ou o próprio campo se preferir)
+    // Retornar nulo é mais seguro para o frontend que espera um objeto ou nulo.
+    if (typeof field === 'string') {
+        // console.warn(`[JSON Parse Info] Campo '${key}' é uma string simples, não JSON.`, field);
+        return defaultValue;
+    }
+    
+    return defaultValue; // Retorna nulo para tipos inesperados (números, etc.)
 };
+// --- FIM DA CORREÇÃO ---
+
 
 // ... (parseVehicleJsonFields se mantém igual) ...
 const parseVehicleJsonFields = (vehicle) => {
@@ -46,7 +58,7 @@ const getAllVehicles = async (req, res) => {
                 .filter(h => h.vehicleId === vehicle.id)
                 .map(h => ({
                     ...h,
-                    details: parseJsonSafe(h.details, 'history.details')
+                    details: parseJsonSafe(h.details, 'history.details') // Agora usa a nova função
                 }));
             return vehicle;
         });
@@ -72,7 +84,7 @@ const getVehicleById = async (req, res) => {
         const [historyRows] = await db.execute('SELECT * FROM vehicle_history WHERE vehicleId = ?', [req.params.id]);
         vehicle.history = historyRows.map(h => ({
             ...h,
-            details: parseJsonSafe(h.details, 'history.details')
+            details: parseJsonSafe(h.details, 'history.details') // Agora usa a nova função
         }));
         
         res.json(vehicle);
@@ -231,8 +243,9 @@ const allocateToObra = async (req, res) => {
         }
         
         // 1. Cria a nova entrada de histórico na tabela 'vehicle_history'
+        // (ID é AUTO_INCREMENT, então não passamos)
         const newHistoryEntry = {
-            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
+            // id: randomUUID(), // REMOVIDO (Correto)
             vehicleId: id,
             historyType: 'obra',
             startDate: new Date(),
@@ -287,7 +300,10 @@ const allocateToObra = async (req, res) => {
         const vehicle = vehicleRows[0];
         
         const newObraHistoryEntryData = {
-            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
+            // --- CORREÇÃO DE BUG 1: RE-ADICIONADO O ID ---
+            // Esta tabela (obras_historico_veiculos) não é AUTO_INCREMENT e precisa de um ID.
+            id: randomUUID(),
+            // --- FIM DA CORREÇÃO ---
             obraId: obraId,
             veiculoId: vehicle.id,
             tipo: vehicle.tipo,
@@ -308,13 +324,11 @@ const allocateToObra = async (req, res) => {
         const obraHistoryValues = Object.values(newObraHistoryEntryData);
         const obraHistoryPlaceholders = obraHistoryFields.map(() => '?').join(', '); // Variável para a tabela 2
 
-        // --- CORREÇÃO DO BUG ---
-        // O código estava usando 'historyPlaceholders' (da tabela 1) em vez de 'obraHistoryPlaceholders'
+        // A correção da variável (obraHistoryPlaceholders) da última vez está mantida
         await connection.execute(
-            `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`, // <-- CORRIGIDO
+            `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`, 
             obraHistoryValues
         );
-        // --- FIM DA CORREÇÃO ---
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
@@ -475,8 +489,9 @@ const assignToOperational = async (req, res) => {
         // --- FIM DA CORREÇÃO ---
         
         // 2. Cria nova entrada de histórico
+        // (ID é AUTO_INCREMENT, então não passamos)
         const newHistoryEntry = {
-            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
+            // id: randomUUID(), // REMOVIDO (Correto)
             vehicleId: id,
             historyType: 'operacional',
             startDate: now,
@@ -585,7 +600,7 @@ const unassignFromOperational = async (req, res) => {
 
         // 4. Atualiza 'employees'
         if (activeHistory?.details) {
-             const details = parseJsonSafe(activeHistory.details, 'history.details');
+             const details = parseJsonSafe(activeHistory.details, 'history.details'); // Agora usa a nova função
              if (details?.employeeId) {
                 await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [details.employeeId]);
              }
@@ -622,8 +637,9 @@ const startMaintenance = async (req, res) => {
         );
 
         // 2. Cria nova entrada de histórico
+        // (ID é AUTO_INCREMENT, então não passamos)
         const newHistoryEntry = {
-            // id: randomUUID(), // REMOVIDO (Corrigido na última etapa)
+            // id: randomUUID(), // REMOVIDO (Correto)
             vehicleId: id,
             historyType: 'manutencao',
             startDate: now,
