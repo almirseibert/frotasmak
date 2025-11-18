@@ -1,36 +1,71 @@
 const db = require('../database');
+const { v4: uuidv4 } = require('uuid');
 
-// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro ---
+// ===================================================================================
+// FUNÇÕES AUXILIARES DE SANITIZAÇÃO
+// ===================================================================================
+
+/**
+ * Tenta fazer o parse de um campo que pode estar "sujo" com JSON stringificado.
+ * Se falhar, retorna o valor original ou null.
+ */
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
-    if (typeof field === 'object') return field;
-    if (typeof field !== 'string') return field;
+    if (typeof field === 'object') return field; // Já é objeto
+    if (typeof field !== 'string') return field; // Não é string, retorna como está
 
     try {
-        const parsed = JSON.parse(field);
-        if (typeof parsed === 'object' && parsed !== null) {
-            return parsed;
+        // Tenta detectar se parece um JSON antes de parsear
+        if (field.trim().startsWith('{') || field.trim().startsWith('[')) {
+            const parsed = JSON.parse(field);
+            if (typeof parsed === 'object' && parsed !== null) {
+                return parsed;
+            }
         }
-        return null;
+        return field; // É uma string normal
     } catch (e) {
-        console.warn(`[JSON Parse Error] Falha ao analisar o campo '${key}'. Valor problemático:`, field);
-        return null;
+        return field; // Retorna a string original se der erro no parse
     }
 };
 
-// --- Função Auxiliar para processar campos JSON de um funcionário ---
+/**
+ * Processa e limpa os dados do funcionário vindos do banco antes de enviar ao frontend.
+ * Resolve o problema crítico de status vindo como '{"status":"ativo"}'
+ */
 const parseEmployeeJsonFields = (employee) => {
     if (!employee) return null;
     const newEmployee = { ...employee };
+    
+    // Parse de campos que são legitimamente JSON
     newEmployee.alocadoEm = parseJsonSafe(employee.alocadoEm, 'alocadoEm');
     newEmployee.ultimaAlteracao = parseJsonSafe(employee.ultimaAlteracao, 'ultimaAlteracao');
+    
+    // CORREÇÃO CRÍTICA DE STATUS
+    // Se o status no banco estiver "sujo" (ex: JSON stringificado), limpamos aqui para o frontend não quebrar.
+    if (newEmployee.status && typeof newEmployee.status === 'string' && newEmployee.status.includes('{')) {
+        try {
+            const statusObj = JSON.parse(newEmployee.status);
+            // Tenta pegar o status dentro do objeto, ou define 'ativo' como fallback seguro
+            newEmployee.status = statusObj.status || 'ativo';
+        } catch (e) {
+            // Se não conseguir ler, assume 'ativo' para não travar a UI, mas loga o erro
+            console.warn(`Falha ao limpar status do funcionário ID ${employee.id}:`, employee.status);
+            newEmployee.status = 'ativo'; 
+        }
+    }
+    
     return newEmployee;
 };
+
+// ===================================================================================
+// CONTROLLERS
+// ===================================================================================
 
 // --- GET: Todos os funcionários ---
 const getAllEmployees = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM employees');
+        // Aplica a limpeza em cada registro
         const employees = rows.map(parseEmployeeJsonFields);
         res.json(employees);
     } catch (error) {
@@ -54,34 +89,17 @@ const getEmployeeById = async (req, res) => {
     }
 };
 
-// --- (NOVO) Lista de campos permitidos da tabela 'employees' ---
-// (Baseado no seu frotasmak (1).sql)
 const allowedEmployeeFields = [
-    'id',
-    'userId',
-    'nome',
-    'vulgo',
-    'funcao',
-    'registroInterno',
-    'cpf',
-    'endereco',
-    'cidade',
-    'contato',
-    'status',
-    'dataContratacao',
-    'cnhNumero',
-    'cnhCategoria',
-    'cnhVencimento',
-    'podeAcessarAbastecimento',
-    'alocadoEm',
-    'ultimaAlteracao'
+    'id', 'userId', 'nome', 'vulgo', 'funcao', 'registroInterno', 'cpf',
+    'endereco', 'cidade', 'contato', 'status', 'dataContratacao',
+    'cnhNumero', 'cnhCategoria', 'cnhVencimento', 'podeAcessarAbastecimento',
+    'alocadoEm', 'ultimaAlteracao', 'dataAdmissao', 'dataDesligamento'
 ];
 
-// --- POST: Criar um novo funcionário (CORRIGIDO E SEGURO) ---
+// --- POST: Criar um novo funcionário ---
 const createEmployee = async (req, res) => {
     const data = req.body;
     
-    // 1. Filtra apenas os campos permitidos
     const employeeData = {};
     Object.keys(data).forEach(key => {
         if (allowedEmployeeFields.includes(key)) {
@@ -89,24 +107,27 @@ const createEmployee = async (req, res) => {
         }
     });
 
-    // 2. Validação crucial (ID e Nome/Registro)
-    if (!employeeData.id) {
-        return res.status(400).json({ error: 'ID do funcionário é obrigatório (gerado pelo cliente).' });
-    }
-    if (!employeeData.nome || !employeeData.registroInterno) {
-         return res.status(400).json({ error: 'Nome e Registro Interno são obrigatórios.' });
-    }
+    if (!employeeData.id) return res.status(400).json({ error: 'ID obrigatório.' });
+    if (!employeeData.nome || !employeeData.registroInterno) return res.status(400).json({ error: 'Dados incompletos.' });
 
-    // 3. Define o status padrão se não for fornecido
+    // SANITIZAÇÃO DE STATUS NO CREATE
     if (!employeeData.status) {
         employeeData.status = 'ativo';
+    } else if (typeof employeeData.status === 'object' || (typeof employeeData.status === 'string' && employeeData.status.includes('{'))) {
+         // Se o frontend enviou lixo no create, forçamos 'ativo'
+         employeeData.status = 'ativo';
     }
 
-    // 4. Stringify campos JSON
+    // *** REGRA DE NEGÓCIO: Sincronia de Datas ***
+    // Garante que dataContratacao (usado em relatórios antigos) seja igual à dataAdmissao (novo padrão)
+    if (employeeData.dataAdmissao) {
+        employeeData.dataContratacao = employeeData.dataAdmissao;
+    }
+
+    // Prepara campos JSON legítimos
     if (employeeData.alocadoEm) employeeData.alocadoEm = JSON.stringify(employeeData.alocadoEm);
     if (employeeData.ultimaAlteracao) employeeData.ultimaAlteracao = JSON.stringify(employeeData.ultimaAlteracao);
 
-    // 5. Constrói a query
     const fields = Object.keys(employeeData);
     const values = Object.values(employeeData);
     const placeholders = fields.map(() => '?').join(', ');
@@ -114,35 +135,42 @@ const createEmployee = async (req, res) => {
 
     try {
         await db.execute(query, values);
-        res.status(201).json({ id: employeeData.id, ...req.body }); // Retorna o objeto completo
+        res.status(201).json({ id: employeeData.id, ...req.body });
     } catch (error) {
         console.error('Erro ao criar funcionário:', error);
         res.status(500).json({ error: 'Erro ao criar funcionário' });
     }
 };
 
-// --- UPDATE: Atualizar um funcionário existente (CORRIGIDO E SEGURO) ---
+// --- UPDATE: Atualizar um funcionário existente ---
 const updateEmployee = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
 
-    // 1. Filtra apenas os campos permitidos (exceto 'id' e 'userId' que não devem ser mudados aqui)
     const employeeData = {};
     Object.keys(data).forEach(key => {
         if (allowedEmployeeFields.includes(key) && key !== 'id' && key !== 'userId') {
             employeeData[key] = data[key];
         }
     });
+
+    // *** REGRA DE NEGÓCIO: Sincronia de Datas na Edição ***
+    if (employeeData.dataAdmissao) {
+        employeeData.dataContratacao = employeeData.dataAdmissao;
+    }
+
+    // *** PROTEÇÃO CONTRA STATUS SUJO ***
+    // Se tentarem atualizar status por aqui enviando um objeto, removemos o campo da query.
+    // O status deve ser alterado preferencialmente pela rota dedicada 'updateEmployeeStatus'.
+    if (employeeData.status && (typeof employeeData.status === 'object' || employeeData.status.includes('{'))) {
+         delete employeeData.status; 
+    }
     
-    // 2. Stringify campos JSON
     if (employeeData.alocadoEm) employeeData.alocadoEm = JSON.stringify(employeeData.alocadoEm);
     if (employeeData.ultimaAlteracao) employeeData.ultimaAlteracao = JSON.stringify(employeeData.ultimaAlteracao);
 
-    // 3. Constrói a query
     const fields = Object.keys(employeeData);
-    if (fields.length === 0) {
-        return res.status(400).json({ message: 'Nenhum dado para atualizar.' });
-    }
+    if (fields.length === 0) return res.status(400).json({ message: 'Nenhum dado válido para atualização.' });
     
     const values = Object.values(employeeData);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
@@ -150,84 +178,159 @@ const updateEmployee = async (req, res) => {
 
     try {
         const [result] = await db.execute(query, [...values, id]);
-        if (result.affectedRows === 0) {
-             return res.status(404).json({ message: 'Funcionário não encontrado.' });
-        }
-        res.json({ message: 'Funcionário atualizado com sucesso' });
+        if (result.affectedRows === 0) return res.status(404).json({ message: 'Funcionário não encontrado.' });
+        res.json({ message: 'Atualizado com sucesso' });
     } catch (error) {
-        console.error('Erro ao atualizar funcionário:', error);
-        res.status(500).json({ error: 'Erro ao atualizar funcionário' });
+        console.error('Erro ao atualizar:', error);
+        res.status(500).json({ error: 'Erro ao atualizar' });
     }
 };
 
-// --- DELETE: Deletar um funcionário ---
+// --- DELETE ---
 const deleteEmployee = async (req, res) => {
     try {
         const [result] = await db.execute('DELETE FROM employees WHERE id = ?', [req.params.id]);
-         if (result.affectedRows === 0) {
-             return res.status(404).json({ message: 'Funcionário não encontrado.' });
-        }
+         if (result.affectedRows === 0) return res.status(404).json({ message: 'Não encontrado.' });
         res.status(204).end();
     } catch (error) {
-        console.error('Erro ao deletar funcionário:', error);
-        res.status(500).json({ error: 'Erro ao deletar funcionário' });
+        console.error('Erro ao deletar:', error);
+        res.status(500).json({ error: 'Erro ao deletar' });
     }
 };
 
-// --- FUNÇÕES QUE ESTAVAM EM FALTA (JÁ EXISTENTES NO SEU ARQUIVO) ---
-
-// --- GET: Obter histórico de um funcionário ---
+// --- GET Histórico ---
 const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
-        // Implementação de exemplo: esta lógica precisa ser adaptada às suas tabelas de histórico
-        // Por exemplo, buscar em 'vehicle_history' onde o 'employeeId' bate
-        const [historyRows] = await db.execute(
-            "SELECT * FROM vehicle_history WHERE JSON_EXTRACT(details, '$.employeeId') = ?",
-             [id]
+        const [rhEvents] = await db.execute(
+            "SELECT * FROM employee_events_history WHERE employeeId = ? ORDER BY eventDate DESC", [id]
         );
-        
-        const parsedHistory = historyRows.map(h => ({
-            ...h,
-            details: parseJsonSafe(h.details, 'history.details')
-        }));
+        const [obraHistory] = await db.execute(
+            "SELECT * FROM obras_historico_veiculos WHERE employeeId = ? ORDER BY dataEntrada DESC", [id]
+        );
 
-        res.json(parsedHistory);
+        const unifiedHistory = [];
+        rhEvents.forEach(event => {
+            unifiedHistory.push({
+                type: 'rh',
+                eventType: event.eventType,
+                date: event.eventDate,
+                description: event.eventType === 'desligamento' ? 'Desligamento' : 'Admissão/Readmissão',
+                notes: event.notes
+            });
+        });
+
+        const [obras] = await db.execute("SELECT id, nome FROM obras");
+        const obrasMap = obras.reduce((acc, o) => ({...acc, [o.id]: o.nome}), {});
+
+        obraHistory.forEach(h => {
+            unifiedHistory.push({
+                type: 'obra',
+                obraName: obrasMap[h.obraId] || 'Obra Desconhecida',
+                vehicle: h.registroInterno ? `${h.registroInterno} (${h.modelo})` : 'N/A',
+                dateStart: h.dataEntrada,
+                dateEnd: h.dataSaida,
+                date: h.dataEntrada 
+            });
+        });
+
+        unifiedHistory.sort((a, b) => new Date(b.date) - new Date(a.date));
+        res.json(unifiedHistory);
     } catch (error) {
-        console.error(`Erro ao buscar histórico para o funcionário ${id}:`, error);
-        res.status(500).json({ error: 'Erro ao buscar histórico do funcionário' });
+        console.error(`Erro ao buscar histórico:`, error);
+        res.status(500).json({ error: 'Erro ao buscar histórico' });
     }
 };
 
-// --- PUT: Atualizar o status de um funcionário ---
+// --- PUT: Atualizar Status (Rota Especializada e Blindada) ---
 const updateEmployeeStatus = async (req, res) => {
     const { id } = req.params;
-    const { status } = req.body;
+    // Tenta extrair status e data. 
+    let { status, date } = req.body;
 
-    if (!status) {
-        return res.status(400).json({ message: 'O novo status é obrigatório.' });
+    // Validação básica
+    if (!status || !date) {
+        return res.status(400).json({ message: 'Status e Data são obrigatórios.' });
     }
 
+    // *** LIMPEZA CRÍTICA DE DADOS ***
+    // Se o frontend enviar um objeto {status: "...", date: "..."} DENTRO da variável status,
+    // ou uma string JSON, nós detectamos e limpamos aqui.
+    if (typeof status === 'object') {
+        status = status.status || 'ativo';
+    } else if (typeof status === 'string' && status.includes('{')) {
+        try {
+            const parsed = JSON.parse(status);
+            status = parsed.status || 'ativo';
+        } catch (e) {
+            console.warn("Recebido status corrompido que não pôde ser parseado. Forçando 'ativo'.", status);
+            status = 'ativo'; // Fallback de segurança
+        }
+    }
+
+    // Normalização
+    status = status.toLowerCase();
+    // Garante que só entra 'ativo' ou 'inativo' no banco
+    if (status !== 'ativo' && status !== 'inativo') {
+         // Se vier algo estranho, tenta deduzir ou usa padrão
+         status = 'ativo';
+    }
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
     try {
-        const [result] = await db.execute('UPDATE employees SET status = ? WHERE id = ?', [status, id]);
+        let queryEmployee = '';
+        let paramsEmployee = [];
+        let eventType = '';
+        let notes = '';
+
+        if (status === 'ativo') {
+            // ATIVAR: Atualiza status, dataAdmissao E dataContratacao, e limpa dataDesligamento
+            queryEmployee = 'UPDATE employees SET status = ?, dataAdmissao = ?, dataContratacao = ?, dataDesligamento = NULL WHERE id = ?';
+            paramsEmployee = ['ativo', date, date, id]; 
+            eventType = 'readmissao';
+            notes = 'Funcionário reativado/readmitido via Sistema.';
+        } else {
+            // INATIVAR: Atualiza status e dataDesligamento. Mantém admissão antiga.
+            queryEmployee = 'UPDATE employees SET status = ?, dataDesligamento = ? WHERE id = ?';
+            paramsEmployee = ['inativo', date, id];
+            eventType = 'desligamento';
+            notes = 'Funcionário desligado/inativado via Sistema.';
+        }
+
+        // 1. Executa a Query Principal
+        const [result] = await connection.execute(queryEmployee, paramsEmployee);
         if (result.affectedRows === 0) {
+            await connection.rollback();
             return res.status(404).json({ message: 'Funcionário não encontrado.' });
         }
-        res.json({ message: 'Status do funcionário atualizado com sucesso.' });
+
+        // 2. Grava no Histórico de Eventos
+        const eventId = uuidv4();
+        await connection.execute(
+            `INSERT INTO employee_events_history (id, employeeId, eventType, eventDate, notes) VALUES (?, ?, ?, ?, ?)`,
+            [eventId, id, eventType, date, notes]
+        );
+
+        await connection.commit();
+        res.json({ message: `Status atualizado para ${status} com sucesso.` });
+
     } catch (error) {
-        console.error('Erro ao atualizar status do funcionário:', error);
-        res.status(500).json({ error: 'Erro ao atualizar o status do funcionário' });
+        await connection.rollback();
+        console.error('Erro ao atualizar status:', error);
+        res.status(500).json({ error: 'Erro ao atualizar status.' });
+    } finally {
+        connection.release();
     }
 };
 
-
-// --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllEmployees,
     getEmployeeById,
     createEmployee,
     updateEmployee,
     deleteEmployee,
-    getEmployeeHistory,     // Agora exportada e com lógica básica
-    updateEmployeeStatus    // Agora exportada
+    getEmployeeHistory,
+    updateEmployeeStatus
 };
