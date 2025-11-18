@@ -245,14 +245,29 @@ const getEmployeeHistory = async (req, res) => {
 // --- PUT: Atualizar Status (Rota Especializada e Blindada) ---
 const updateEmployeeStatus = async (req, res) => {
     const { id } = req.params;
-    // Tenta extrair status e data. 
-    let { status, date } = req.body;
+    
+    const body = req.body || {}; // Garante que body é um objeto
+    let { status, date } = body;
 
-    // Validação básica
-    if (!status || !date) {
-        return res.status(400).json({ message: 'Status e Data são obrigatórios.' });
+    // --- DEBUG LOGGING: Adicionado para ajudar o usuário a depurar o ambiente ---
+    console.log(`[DEBUG] Tentativa de atualização de status para ID: ${id}`);
+    console.log(`[DEBUG] Corpo (Body) da Requisição recebido:`, body);
+    console.log(`[DEBUG] Status extraído: ${status}, Data extraída: ${date}`);
+    // --- FIM DEBUG LOGGING ---
+
+    // Validação básica: Verifica se as propriedades existem no body
+    if (!body.status || !body.date) {
+        // Retorna o erro 400, mas com a mensagem exata do que faltou
+        let missingFields = [];
+        if (!body.status) missingFields.push('status');
+        if (!body.date) missingFields.push('date');
+        
+        console.error(`[ERRO CRÍTICO] Campos obrigatórios faltando: ${missingFields.join(', ')}`);
+        return res.status(400).json({ message: `Status e Data são obrigatórios. Campos faltantes no Body: ${missingFields.join(', ')}` });
     }
 
+    // A partir daqui, as variáveis status e date são usadas
+    
     // *** LIMPEZA CRÍTICA DE DADOS ***
     // Se o frontend enviar um objeto {status: "...", date: "..."} DENTRO da variável status,
     // ou uma string JSON, nós detectamos e limpamos aqui.
