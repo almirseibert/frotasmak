@@ -249,7 +249,7 @@ const updateEmployeeStatus = async (req, res) => {
     const body = req.body || {}; // Garante que body é um objeto
     let { status, date } = body;
 
-    // --- DEBUG LOGGING: Adicionado para ajudar o usuário a depurar o ambiente ---
+    // --- DEBUG LOGGING: MANTIDO para ajudar o usuário a depurar o ambiente ---
     console.log(`[DEBUG] Tentativa de atualização de status para ID: ${id}`);
     console.log(`[DEBUG] Corpo (Body) da Requisição recebido:`, body);
     console.log(`[DEBUG] Status extraído: ${status}, Data extraída: ${date}`);

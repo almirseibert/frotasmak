@@ -2,7 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const path = require('path'); // Importa o módulo 'path'
+const path = require('path');
 const db = require('./database');
 
 // Importa o multer
@@ -38,14 +38,15 @@ const uploadRoutes = require('./routes/uploadRoutes');
 const app = express();
 const port = process.env.PORT || 3001;
 
-app.use(express.json());
+// --- CORREÇÃO CRÍTICA DE MIDDLEWARE ---
+// Estas linhas DEVEM vir antes de QUALQUER rota para garantir que o req.body seja lido.
 app.use(cors());
+app.use(express.json()); 
+// --- FIM CORREÇÃO CRÍTICA ---
 
-// --- CORREÇÃO DE BUG ---
+
 // O caminho deve corresponder ao local onde o multer salva (public/uploads)
-// Isso torna as imagens acessíveis publicamente (ex: http://sua-api.com/uploads/imagem.png)
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
-// --- FIM DA CORREÇÃO ---
 
 
 // --- ROTAS DA API ---
@@ -64,12 +65,10 @@ apiRouter.use('/registrationRequests', registrationRequestRoutes);
 apiRouter.use(authMiddleware);
 
 // Rota de Upload (Protegida)
-// ATENÇÃO: A rota /api/upload (esta linha) pode estar em conflito com /api/vehicles/:id/upload-image
-// Se o upload de veículos parar de funcionar, comente a linha abaixo.
 apiRouter.use('/upload', uploadRoutes);
 
 // Rotas Protegidas
-apiRouter.use('/vehicles', vehicleRoutes); // Esta rota já lida com upload de veículos
+apiRouter.use('/vehicles', vehicleRoutes);
 apiRouter.use('/obras', obraRoutes);
 apiRouter.use('/employees', employeeRoutes);
 apiRouter.use('/partners', partnerRoutes);
