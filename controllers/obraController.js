@@ -102,6 +102,10 @@ const createObra = async (req, res) => {
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
+    
+    // --- SANITIZAÇÃO DE LATITUDE/LONGITUDE ---
+    if (data.latitude === '') data.latitude = null;
+    if (data.longitude === '') data.longitude = null;
 
     // Define o status padrão no backend
     data.status = 'ativa';
@@ -131,6 +135,10 @@ const updateObra = async (req, res) => {
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
+
+    // --- SANITIZAÇÃO DE LATITUDE/LONGITUDE ---
+    if (data.latitude === '') data.latitude = null;
+    if (data.longitude === '') data.longitude = null;
 
     const fields = Object.keys(data);
     const values = Object.values(data);
