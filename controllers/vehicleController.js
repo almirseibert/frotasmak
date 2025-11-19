@@ -4,10 +4,10 @@ const { randomUUID } = require('crypto');
 const fs = require('fs'); // File System para deletar imagem antiga se houver
 const path = require('path'); // Importar o Path
 
-// ... (parseJsonSafe está correto, sem mudanças) ...
+// ... (parseJsonSafe mantido para segurança)
 const parseJsonSafe = (field, key, defaultValue = null) => {
     if (field === null || typeof field === 'undefined') return defaultValue;
-    if (typeof field === 'object') return field; // Já é um objeto
+    if (typeof field === 'object') return field; 
     
     if (typeof field === 'string' && (field.startsWith('{') || field.startsWith('['))) {
         try {
@@ -26,7 +26,6 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
     return defaultValue;
 };
 
-// ... (parseVehicleJsonFields está correto, sem mudanças) ...
 const parseVehicleJsonFields = (vehicle) => {
     if (!vehicle) return null;
     const newVehicle = { ...vehicle };
@@ -39,7 +38,6 @@ const parseVehicleJsonFields = (vehicle) => {
     return newVehicle;
 };
 
-// ... (getAllVehicles está correto, sem mudanças) ...
 const getAllVehicles = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles');
@@ -63,7 +61,6 @@ const getAllVehicles = async (req, res) => {
     }
 };
 
-// ... (getVehicleById está correto, sem mudanças) ...
 const getVehicleById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles WHERE id = ?', [req.params.id]);
@@ -86,7 +83,6 @@ const getVehicleById = async (req, res) => {
     }
 };
 
-// ... (createVehicle está correto, sem mudanças) ...
 const createVehicle = async (req, res) => {
     const data = req.body;
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
@@ -109,7 +105,6 @@ const createVehicle = async (req, res) => {
     }
 };
 
-// ... (updateVehicle está correto, sem mudanças) ...
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -134,33 +129,26 @@ const updateVehicle = async (req, res) => {
     }
 };
 
-// --- NOVA FUNÇÃO: Upload de Imagem ---
 const uploadVehicleImage = async (req, res) => {
-    const { id } = req.params; // ID do veículo
+    const { id } = req.params; 
     
     if (!req.file) {
         return res.status(400).json({ error: 'Nenhum arquivo de imagem enviado.' });
     }
 
-    // O multer salvou o arquivo em 'public/uploads'
-    // O nome do arquivo é req.file.filename
-    // Precisamos salvar o *caminho do URL* no banco
-    const fotoURL = `/uploads/${req.file.filename}`; // Ex: /uploads/vehicle-123456789.jpg
+    const fotoURL = `/uploads/${req.file.filename}`; 
 
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
-        // 1. (Opcional) Busca a foto antiga para deletar do servidor
         const [rows] = await connection.execute('SELECT fotoURL FROM vehicles WHERE id = ?', [id]);
         
         if (rows.length > 0 && rows[0].fotoURL) {
-            const oldFotoURL = rows[0].fotoURL; // Ex: /uploads/old-image.jpg
+            const oldFotoURL = rows[0].fotoURL; 
             
-            // --- CORREÇÃO DE PATH ---
-            // Usa process.cwd() para garantir o caminho absoluto a partir da raiz do projeto
+            // CORREÇÃO CRÍTICA PARA ARQUITETURA DOCKER/EASYPANEL
             const oldLocalPath = path.resolve(process.cwd(), 'public', oldFotoURL.substring(1)); 
-            // --- FIM DA CORREÇÃO ---
 
             try {
                 if (fs.existsSync(oldLocalPath)) {
@@ -172,12 +160,10 @@ const uploadVehicleImage = async (req, res) => {
             }
         }
 
-        // 2. Atualiza o banco com o novo URL
         await connection.execute('UPDATE vehicles SET fotoURL = ? WHERE id = ?', [fotoURL, id]);
         
         await connection.commit();
         
-        // Retorna o novo URL para o frontend atualizar o estado
         res.json({ message: 'Upload bem-sucedido!', fotoURL: fotoURL });
 
     } catch (error) {
@@ -189,8 +175,6 @@ const uploadVehicleImage = async (req, res) => {
     }
 };
 
-
-// ... (deleteVehicle está correto, sem mudanças) ...
 const deleteVehicle = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -215,9 +199,8 @@ const deleteVehicle = async (req, res) => {
     }
 };
 
-// ... (allocateToObra está correto, sem mudanças) ...
 const allocateToObra = async (req, res) => {
-    const { id } = req.params; // vehicleId
+    const { id } = req.params; 
     const { obraId, employeeId, dataEntrada, readingType, readingValue } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -233,7 +216,6 @@ const allocateToObra = async (req, res) => {
             throw new Error("Dados de obra ou funcionário inválidos.");
         }
         
-        // 1. 'vehicle_history'
         const newHistoryEntry = {
             vehicleId: id,
             historyType: 'obra',
@@ -257,7 +239,6 @@ const allocateToObra = async (req, res) => {
             historyValues
         );
         
-        // 2. 'vehicles'
         const vehicleUpdateData = {
             obraAtualId: obraId,
             status: 'Em Obra',
@@ -281,15 +262,13 @@ const allocateToObra = async (req, res) => {
             [...updateValues, id]
         );
         
-        // 3. 'employees'
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
 
-        // 4. 'obras_historico_veiculos'
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
         const vehicle = vehicleRows[0];
         
         const newObraHistoryEntryData = {
-            id: randomUUID(), // Correto
+            id: randomUUID(),
             obraId: obraId,
             veiculoId: vehicle.id,
             tipo: vehicle.tipo,
@@ -326,9 +305,8 @@ const allocateToObra = async (req, res) => {
     }
 };
 
-// ... (deallocateFromObra está correto, sem mudanças) ...
 const deallocateFromObra = async (req, res) => {
-    const { id } = req.params; // vehicleId
+    const { id } = req.params; 
     const { dataSaida, readingType, readingValue, location, shouldFinalizeObra, dataFimObra } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -336,7 +314,6 @@ const deallocateFromObra = async (req, res) => {
     try {
         const exitTimestamp = new Date(dataSaida);
 
-        // 1. 'vehicle_history'
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'obra']
@@ -366,7 +343,6 @@ const deallocateFromObra = async (req, res) => {
             [exitTimestamp, JSON.stringify(newDetails), activeHistory.id]
         );
 
-        // 2. 'vehicles'
         const vehicleUpdateData = {
             obraAtualId: null, 
             status: 'Disponível', 
@@ -384,12 +360,10 @@ const deallocateFromObra = async (req, res) => {
             [...updateValues, id]
         );
 
-        // 3. 'employees'
         if (employeeIdFromHistory) {
              await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdFromHistory]);
         }
         
-        // 4. 'obras_historico_veiculos'
         const obraHistoryUpdateFields = ['dataSaida = ?'];
         const obraHistoryUpdateValues = [exitTimestamp];
 
@@ -411,7 +385,6 @@ const deallocateFromObra = async (req, res) => {
             obraHistoryUpdateValues
         );
         
-        // 5. 'obras'
         if (shouldFinalizeObra) {
             const obraUpdate = { 
                 status: 'finalizada', 
@@ -439,7 +412,6 @@ const deallocateFromObra = async (req, res) => {
     }
 };
 
-// ... (assignToOperational está correto, sem mudanças) ...
 const assignToOperational = async (req, res) => {
     const { id } = req.params; 
     const { subGroup, employeeId, observacoes } = req.body;
@@ -453,7 +425,6 @@ const assignToOperational = async (req, res) => {
 
         const now = new Date();
         
-        // 1. Finaliza histórico anterior
         await connection.execute(
             'UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND endDate IS NULL',
             [now, id]
@@ -462,12 +433,10 @@ const assignToOperational = async (req, res) => {
         const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
         
         if (!selectedEmployeeRows || selectedEmployeeRows.length === 0) {
-            console.error(`Falha ao alocar: Funcionário com ID ${employeeId} não encontrado.`);
             throw new Error('Funcionário selecionado não encontrado no banco de dados.');
         }
         const employeeName = selectedEmployeeRows[0]?.nome;
         
-        // 2. 'vehicle_history'
         const newHistoryEntry = {
             vehicleId: id,
             historyType: 'operacional',
@@ -490,7 +459,6 @@ const assignToOperational = async (req, res) => {
             historyValues
         );
         
-        // 3. 'vehicles' (operationalAssignment)
         const operationalAssignment = { 
             subGroup, 
             employeeId, 
@@ -498,7 +466,6 @@ const assignToOperational = async (req, res) => {
             startDate: now 
         };
 
-        // 4. 'vehicles' (status)
         const vehicleUpdateData = {
             operationalAssignment: JSON.stringify(operationalAssignment),
             status: 'Em Operação',
@@ -520,7 +487,6 @@ const assignToOperational = async (req, res) => {
             [...updateValues, id]
         );
         
-        // 5. 'employees'
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeId]);
 
         await connection.commit();
@@ -534,9 +500,8 @@ const assignToOperational = async (req, res) => {
     }
 };
 
-// ... (unassignFromOperational está correto, sem mudanças) ...
 const unassignFromOperational = async (req, res) => {
-    const { id } = req.params; // vehicleId
+    const { id } = req.params; 
     const { location } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -544,7 +509,6 @@ const unassignFromOperational = async (req, res) => {
     try {
         const now = new Date();
 
-        // 1. 'vehicle_history'
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'operacional']
@@ -558,7 +522,6 @@ const unassignFromOperational = async (req, res) => {
             );
         }
 
-        // 2. 'vehicles'
         const vehicleUpdateData = { 
             operationalAssignment: null, 
             status: 'Disponível', 
@@ -575,7 +538,6 @@ const unassignFromOperational = async (req, res) => {
             [...updateValues, id]
         );
 
-        // 3. 'employees'
         if (activeHistory?.details) {
              const details = parseJsonSafe(activeHistory.details, 'history.details'); 
              if (details?.employeeId) {
@@ -594,9 +556,8 @@ const unassignFromOperational = async (req, res) => {
     }
 };
 
-// ... (startMaintenance está correto, sem mudanças) ...
 const startMaintenance = async (req, res) => {
-    const { id } = req.params; // vehicleId
+    const { id } = req.params; 
     const { status, location } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -604,13 +565,11 @@ const startMaintenance = async (req, res) => {
     try {
         const now = new Date();
         
-        // 1. Finaliza histórico anterior
         await connection.execute(
             'UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND endDate IS NULL',
             [now, id]
         );
 
-        // 2. 'vehicle_history'
         const newHistoryEntry = {
             vehicleId: id,
             historyType: 'manutencao',
@@ -631,13 +590,11 @@ const startMaintenance = async (req, res) => {
             historyValues
         );
         
-        // 3. 'vehicles' (maintenanceLocation)
         const maintenanceLocation = {
             type: location === 'Pátio MAK Lajeado' || location === 'Pátio MAK Santa Maria' ? 'Pátio' : 'Outros',
             details: location,
         };
 
-        // 4. 'vehicles' (status)
         const vehicleUpdateData = {
             status: status,
             maintenanceLocation: JSON.stringify(maintenanceLocation),
@@ -670,9 +627,8 @@ const startMaintenance = async (req, res) => {
     }
 };
 
-// ... (endMaintenance está correto, sem mudanças) ...
 const endMaintenance = async (req, res) => {
-    const { id } = req.params; // vehicleId
+    const { id } = req.params; 
     const { location } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -680,13 +636,11 @@ const endMaintenance = async (req, res) => {
     try {
         const now = new Date();
         
-        // 1. 'vehicle_history'
         await connection.execute(
             'UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [now, id, 'manutencao']
         );
 
-        // 2. 'vehicles'
         const vehicleUpdateData = {
             status: 'Disponível',
             maintenanceLocation: null,
@@ -713,7 +667,6 @@ const endMaintenance = async (req, res) => {
         connection.release();
     }
 };
-
 
 module.exports = {
     getAllVehicles,
