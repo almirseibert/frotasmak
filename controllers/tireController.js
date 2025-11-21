@@ -34,9 +34,18 @@ const createTire = async (req, res) => {
     `;
     
     try {
+        // Garante que valores opcionais sejam null se não enviados
         await db.execute(query, [
-            id, data.fireNumber, data.brand, data.model, data.size, 
-            data.tireCondition, status, data.purchaseDate, data.price, 'Almoxarifado'
+            id, 
+            data.fireNumber, 
+            data.brand, 
+            data.model || null, 
+            data.size, 
+            data.tireCondition || 'Novo', 
+            status, 
+            data.purchaseDate || null, 
+            data.price || null, 
+            'Almoxarifado'
         ]);
         res.status(201).json({ message: 'Pneu cadastrado com sucesso!' });
     } catch (error) {
@@ -70,17 +79,16 @@ const updateTire = async (req, res) => {
 
 // POST: Movimentação (Instalar/Remover/Transferir)
 const registerTransaction = async (req, res) => {
-    // Define valores padrão como NULL para evitar erro de 'undefined'
+    // VALORES PADRÃO PARA EVITAR "UNDEFINED" NO SQL (Correção do Erro 500)
     const { 
         tireId, 
         vehicleId = null, 
         type, 
         position = null, 
-        date, 
+        date = new Date(), // Se não vier data, usa hoje
         odometer = null, 
         horimeter = null, 
         observation = '',
-        // Campos extras para Step Reserva
         employeeName = null, 
         obraName = null 
     } = req.body;
@@ -92,7 +100,7 @@ const registerTransaction = async (req, res) => {
         if (type === 'install') {
             if (!vehicleId || !position) throw new Error("Veículo e Posição são obrigatórios para instalação.");
 
-            // 1. Verifica se a posição já está ocupada
+            // 1. Verifica ocupação
             const [occupied] = await connection.execute(
                 'SELECT id FROM tires WHERE currentVehicleId = ? AND position = ?', 
                 [vehicleId, position]
@@ -116,21 +124,24 @@ const registerTransaction = async (req, res) => {
         
         } else if (type === 'transfer_responsibility') {
             // 1. Atualiza Pneu para Sob Responsabilidade (Step Reserva)
-            const locationDesc = `Obra: ${obraName} / Resp: ${employeeName}`;
+            // Garante strings padrão se nomes não vierem
+            const locDesc = `Obra: ${obraName || 'N/A'} / Resp: ${employeeName || 'N/A'}`;
             await connection.execute(
                 `UPDATE tires SET status = 'Em Uso', currentVehicleId = NULL, position = NULL, location = ? WHERE id = ?`,
-                [locationDesc, tireId]
+                [locDesc, tireId]
             );
         }
 
         // 3. Registra Transação
         const transId = uuidv4();
         
-        // Tratamento final para observação no caso de transferência
-        let finalObservation = observation;
+        let finalObservation = observation || '';
         if (type === 'transfer_responsibility') {
-            finalObservation = `Enviado para ${obraName} (Resp: ${employeeName}). Obs: ${observation}`;
+            finalObservation = `Enviado para ${obraName || 'N/A'} (Resp: ${employeeName || 'N/A'}). Obs: ${observation || ''}`;
         }
+
+        // Tratamento seguro de data
+        const transactionDate = date ? new Date(date) : new Date();
 
         await connection.execute(
             `INSERT INTO tire_transactions (id, tireId, vehicleId, type, position, date, odometer, horimeter, observation)
@@ -138,23 +149,23 @@ const registerTransaction = async (req, res) => {
             [
                 transId, 
                 tireId, 
-                vehicleId, // Pode ser NULL agora
+                vehicleId || null, // Garante null se for undefined/falso
                 type, 
-                position, 
-                date, 
+                position || null, 
+                transactionDate, 
                 odometer || null, 
                 horimeter || null, 
                 finalObservation
             ]
         );
 
-        // 4. ATUALIZAR O VEÍCULO (Apenas se houver vehicleId e leitura)
+        // 4. ATUALIZAR O VEÍCULO (Apenas se houver vehicleId e leitura válida)
         if (vehicleId) {
-            if (odometer) {
-                await connection.execute('UPDATE vehicles SET odometro = GREATEST(odometro, ?) WHERE id = ?', [odometer, vehicleId]);
+            if (odometer && !isNaN(parseFloat(odometer))) {
+                await connection.execute('UPDATE vehicles SET odometro = GREATEST(IFNULL(odometro, 0), ?) WHERE id = ?', [odometer, vehicleId]);
             }
-            if (horimeter) {
-                await connection.execute('UPDATE vehicles SET horimetro = GREATEST(horimetro, ?) WHERE id = ?', [horimeter, vehicleId]);
+            if (horimeter && !isNaN(parseFloat(horimeter))) {
+                await connection.execute('UPDATE vehicles SET horimetro = GREATEST(IFNULL(horimetro, 0), ?) WHERE id = ?', [horimeter, vehicleId]);
             }
         }
 
@@ -164,7 +175,8 @@ const registerTransaction = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('Erro na transação de pneu:', error);
-        res.status(500).json({ error: error.message || 'Erro ao registrar movimentação.' });
+        // Retorna erro amigável
+        res.status(500).json({ error: error.message || 'Erro interno ao registrar movimentação.' });
     } finally {
         connection.release();
     }
