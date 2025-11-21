@@ -10,5 +10,7 @@ router.post('/', tireController.createTire);
 router.put('/:id', tireController.updateTire);
 router.post('/transaction', tireController.registerTransaction);
 router.get('/:id/history', tireController.getTireHistory);
+// Nova rota para histórico do VEÍCULO
+router.get('/vehicle/:vehicleId/history', tireController.getVehicleTireHistory);
 
 module.exports = router;

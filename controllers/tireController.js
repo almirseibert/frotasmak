@@ -96,8 +96,7 @@ const registerTransaction = async (req, res) => {
             );
 
         } else if (type === 'remove') {
-            // 1. Atualiza Pneu para Estoque (ou Sucata, se definido no frontend, mas vamos padronizar Estoque por enquanto)
-            // Se o usuário marcou como "Sucata" na obs, depois ele edita o pneu.
+            // 1. Atualiza Pneu para Estoque
             await connection.execute(
                 `UPDATE tires SET status = 'Estoque', currentVehicleId = NULL, position = NULL, location = 'Almoxarifado' WHERE id = ?`,
                 [tireId]
@@ -112,6 +111,15 @@ const registerTransaction = async (req, res) => {
             [transId, tireId, vehicleId, type, position, date, odometer, horimeter, observation]
         );
 
+        // 4. ATUALIZAR O VEÍCULO (Odometro/Horimetro)
+        // Atualiza a leitura do veículo com o valor informado na troca, se for maior que o atual
+        if (odometer) {
+             await connection.execute('UPDATE vehicles SET odometro = GREATEST(odometro, ?) WHERE id = ?', [odometer, vehicleId]);
+        }
+        if (horimeter) {
+             await connection.execute('UPDATE vehicles SET horimetro = GREATEST(horimetro, ?) WHERE id = ?', [horimeter, vehicleId]);
+        }
+
         await connection.commit();
         res.json({ message: 'Movimentação registrada com sucesso!' });
 
@@ -124,7 +132,7 @@ const registerTransaction = async (req, res) => {
     }
 };
 
-// GET: Histórico de um Pneu
+// GET: Histórico de um Pneu (Específico)
 const getTireHistory = async (req, res) => {
     const { id } = req.params;
     try {
@@ -142,10 +150,30 @@ const getTireHistory = async (req, res) => {
     }
 };
 
+// GET: Histórico de Pneus de um VEÍCULO (NOVO)
+const getVehicleTireHistory = async (req, res) => {
+    const { vehicleId } = req.params;
+    try {
+        const query = `
+            SELECT tt.*, t.fireNumber, t.brand, t.model, t.size
+            FROM tire_transactions tt
+            JOIN tires t ON tt.tireId = t.id
+            WHERE tt.vehicleId = ?
+            ORDER BY tt.date DESC, tt.createdAt DESC
+        `;
+        const [rows] = await db.query(query, [vehicleId]);
+        res.json(rows);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Erro ao buscar histórico do veículo.' });
+    }
+};
+
 module.exports = {
     getAllTires,
     createTire,
     updateTire,
     registerTransaction,
-    getTireHistory
+    getTireHistory,
+    getVehicleTireHistory // Novo export
 };
