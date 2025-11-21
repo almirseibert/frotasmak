@@ -81,7 +81,7 @@ const registerTransaction = async (req, res) => {
     const { 
         tireId, 
         vehicleId = null, 
-        type, // Agora esperamos 'install', 'remove' ou 'transfer'
+        type, // Espera: 'install', 'remove' ou 'transfer'
         position = null, 
         date = new Date(), 
         odometer = null, 
@@ -120,7 +120,7 @@ const registerTransaction = async (req, res) => {
                 [tireId]
             );
         
-        } else if (type === 'transfer') { // MUDANÇA: 'transfer' ao invés de 'transfer_responsibility'
+        } else if (type === 'transfer') { 
             // 1. Atualiza Pneu para Sob Responsabilidade (Step Reserva)
             const locDesc = `Obra: ${obraName || 'N/A'} / Resp: ${employeeName || 'N/A'}`;
             await connection.execute(
