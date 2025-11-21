@@ -85,9 +85,63 @@ apiRouter.use('/tires', tireRoutes);
 
 app.use('/api', apiRouter);
 
+// --- INICIALIZAÇÃO DO BANCO DE DADOS ---
+const initTireTables = async (connection) => {
+    console.log('Verificando tabelas de pneus...');
+    try {
+        // Tabela de Pneus
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS tires (
+                id VARCHAR(36) PRIMARY KEY,
+                fireNumber VARCHAR(50) NOT NULL UNIQUE,
+                brand VARCHAR(50) NOT NULL,
+                model VARCHAR(50),
+                size VARCHAR(20) NOT NULL,
+                status ENUM('Estoque', 'Em Uso', 'Sucata', 'Recapagem') DEFAULT 'Estoque',
+                tireCondition ENUM('Novo', 'Usado', 'Recapado') DEFAULT 'Novo',
+                purchaseDate DATE,
+                price DECIMAL(10, 2),
+                location VARCHAR(100) DEFAULT 'Almoxarifado',
+                currentVehicleId VARCHAR(36),
+                position VARCHAR(50),
+                createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_fireNumber (fireNumber),
+                INDEX idx_status (status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+        
+        // Tabela de Transações
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS tire_transactions (
+                id VARCHAR(36) PRIMARY KEY,
+                tireId VARCHAR(36) NOT NULL,
+                vehicleId VARCHAR(36) NOT NULL,
+                type ENUM('install', 'remove') NOT NULL,
+                position VARCHAR(50),
+                date DATE NOT NULL,
+                odometer DECIMAL(10, 1),
+                horimeter DECIMAL(10, 1),
+                observation TEXT,
+                createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT fk_transaction_tire FOREIGN KEY (tireId) REFERENCES tires(id) ON DELETE CASCADE,
+                INDEX idx_tireId (tireId),
+                INDEX idx_vehicleId (vehicleId)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        `);
+        console.log('Tabelas de Pneus (tires, tire_transactions) verificadas/criadas com sucesso.');
+    } catch (error) {
+        console.error('ERRO CRÍTICO ao inicializar tabelas de pneus:', error);
+    }
+};
+
 db.getConnection()
-    .then(connection => {
+    .then(async connection => {
         console.log('Conexão com o banco de dados estabelecida com sucesso!');
+        
+        // Executa a criação das tabelas automaticamente
+        await initTireTables(connection);
+        
         connection.release();
     })
     .catch(err => {
