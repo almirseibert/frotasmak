@@ -34,7 +34,6 @@ const createTire = async (req, res) => {
     `;
     
     try {
-        // Garante que valores opcionais sejam null se não enviados
         await db.execute(query, [
             id, 
             data.fireNumber, 
@@ -79,13 +78,12 @@ const updateTire = async (req, res) => {
 
 // POST: Movimentação (Instalar/Remover/Transferir)
 const registerTransaction = async (req, res) => {
-    // VALORES PADRÃO PARA EVITAR "UNDEFINED" NO SQL (Correção do Erro 500)
     const { 
         tireId, 
         vehicleId = null, 
-        type, 
+        type, // Agora esperamos 'install', 'remove' ou 'transfer'
         position = null, 
-        date = new Date(), // Se não vier data, usa hoje
+        date = new Date(), 
         odometer = null, 
         horimeter = null, 
         observation = '',
@@ -122,9 +120,8 @@ const registerTransaction = async (req, res) => {
                 [tireId]
             );
         
-        } else if (type === 'transfer_responsibility') {
+        } else if (type === 'transfer') { // MUDANÇA: 'transfer' ao invés de 'transfer_responsibility'
             // 1. Atualiza Pneu para Sob Responsabilidade (Step Reserva)
-            // Garante strings padrão se nomes não vierem
             const locDesc = `Obra: ${obraName || 'N/A'} / Resp: ${employeeName || 'N/A'}`;
             await connection.execute(
                 `UPDATE tires SET status = 'Em Uso', currentVehicleId = NULL, position = NULL, location = ? WHERE id = ?`,
@@ -134,13 +131,12 @@ const registerTransaction = async (req, res) => {
 
         // 3. Registra Transação
         const transId = uuidv4();
-        
         let finalObservation = observation || '';
-        if (type === 'transfer_responsibility') {
+        
+        if (type === 'transfer') {
             finalObservation = `Enviado para ${obraName || 'N/A'} (Resp: ${employeeName || 'N/A'}). Obs: ${observation || ''}`;
         }
 
-        // Tratamento seguro de data
         const transactionDate = date ? new Date(date) : new Date();
 
         await connection.execute(
@@ -149,8 +145,8 @@ const registerTransaction = async (req, res) => {
             [
                 transId, 
                 tireId, 
-                vehicleId || null, // Garante null se for undefined/falso
-                type, 
+                vehicleId || null, 
+                type, // 'install', 'remove' ou 'transfer'
                 position || null, 
                 transactionDate, 
                 odometer || null, 
@@ -159,13 +155,19 @@ const registerTransaction = async (req, res) => {
             ]
         );
 
-        // 4. ATUALIZAR O VEÍCULO (Apenas se houver vehicleId e leitura válida)
+        // 4. ATUALIZAR O VEÍCULO (Atualiza Km ou Horímetro se o valor novo for MAIOR)
         if (vehicleId) {
-            if (odometer && !isNaN(parseFloat(odometer))) {
-                await connection.execute('UPDATE vehicles SET odometro = GREATEST(IFNULL(odometro, 0), ?) WHERE id = ?', [odometer, vehicleId]);
+            if (odometer && !isNaN(parseFloat(odometer)) && parseFloat(odometer) > 0) {
+                await connection.execute(
+                    'UPDATE vehicles SET odometro = GREATEST(IFNULL(odometro, 0), ?) WHERE id = ?', 
+                    [odometer, vehicleId]
+                );
             }
-            if (horimeter && !isNaN(parseFloat(horimeter))) {
-                await connection.execute('UPDATE vehicles SET horimetro = GREATEST(IFNULL(horimetro, 0), ?) WHERE id = ?', [horimeter, vehicleId]);
+            if (horimeter && !isNaN(parseFloat(horimeter)) && parseFloat(horimeter) > 0) {
+                await connection.execute(
+                    'UPDATE vehicles SET horimetro = GREATEST(IFNULL(horimetro, 0), ?) WHERE id = ?', 
+                    [horimeter, vehicleId]
+                );
             }
         }
 
@@ -175,7 +177,6 @@ const registerTransaction = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('Erro na transação de pneu:', error);
-        // Retorna erro amigável
         res.status(500).json({ error: error.message || 'Erro interno ao registrar movimentação.' });
     } finally {
         connection.release();
