@@ -16,8 +16,7 @@ const parseJsonSafe = (field, key) => {
 };
 
 
-// --- GET: Obter todos os planos de revisão (CORRIGIDO) ---
-// Normaliza os dados legados (Firebase) e novos (MySQL)
+// --- GET: Obter todos os planos de revisão ---
 const getAllRevisionPlans = async (req, res) => {
     try {
         const [plans] = await db.query('SELECT * FROM revisions');
@@ -26,26 +25,19 @@ const getAllRevisionPlans = async (req, res) => {
         const revisions = plans.map(plan => {
             const ultimaAlteracao = parseJsonSafe(plan.ultimaAlteracao, 'ultimaAlteracao');
 
-            // --- CORREÇÃO (Normalização de Dados Legados) ---
-            // 1. Define o vehicleId correto
-            // Se plan.vehicleId for nulo/vazio (dado legado), usa plan.id como vehicleId.
             const isImported = !plan.vehicleId;
             const effectiveVehicleId = isImported ? plan.id : plan.vehicleId;
 
-            // 2. Renomeia 'tipo' (DB) para 'descricao' (Frontend)
             const { tipo, ...restOfPlan } = plan;
-
-            // 3. Encontra o histórico (o revisionId no histórico SEMPRE aponta para o plan.id)
             const historico = historyRows.filter(h => h.revisionId === plan.id);
             
             return {
                 ...restOfPlan,
-                vehicleId: effectiveVehicleId, // Envia o vehicleId normalizado
-                descricao: tipo, // Renomeia 'tipo' para 'descricao'
+                vehicleId: effectiveVehicleId,
+                descricao: tipo, 
                 ultimaAlteracao: ultimaAlteracao,
                 historico: historico,
             };
-            // --- Fim da Correção ---
         });
         
         res.json(revisions);
@@ -55,19 +47,15 @@ const getAllRevisionPlans = async (req, res) => {
     }
 };
 
-// ... (createRevisionPlan se mantém igual, pois ele só cria dados NOVOS) ...
+// --- POST: Criar Plano ---
 const createRevisionPlan = async (req, res) => {
-    // Esta função não é chamada pelo RevisionsPage, mas corrigida por precaução
     const { descricao, ...restOfBody } = req.body;
     const data = { 
         ...restOfBody, 
-        tipo: descricao // Mapeia 'descricao' para 'tipo'
+        tipo: descricao 
     };
     
-    // Adiciona o ID gerado (já que é varchar)
     if (!data.id) data.id = uuidv4();
-    
-    // Remove 'historico' se ele foi enviado acidentalmente
     delete data.historico; 
     
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
@@ -87,15 +75,13 @@ const createRevisionPlan = async (req, res) => {
 };
 
 
-// --- PUT: Atualizar um plano de revisão (CORRIGIDO) ---
-// Acha o registro legado (por ID) ou novo (por VehicleID)
+// --- PUT: Atualizar Plano ---
 const updateRevisionPlan = async (req, res) => {
-    // O ID da rota é o vehicleId (vindo do frontend)
     const { id: vehicleId } = req.params; 
     const { descricao, ...restOfBody } = req.body;
     const data = {
         ...restOfBody,
-        tipo: descricao // Renomeia 'descricao' (frontend) para 'tipo' (DB)
+        tipo: descricao 
     };
 
     const ultimaAlteracao = JSON.stringify({
@@ -108,17 +94,13 @@ const updateRevisionPlan = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- CORREÇÃO (Achar registro legado OU novo) ---
-        // Tenta encontrar o registro pelo vehicleId (novo) OU pelo id (legado)
         const [rows] = await connection.execute(
             'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
             [vehicleId, vehicleId]
         );
-        // --- Fim da Correção ---
         
         if (rows.length > 0) {
-            // 2. SE EXISTE: Atualiza o plano existente
-            const revisionId = rows[0].id; // Este é o PK (seja o uuid ou o id legado)
+            const revisionId = rows[0].id;
             
             delete data.id;
             delete data.vehicleId;
@@ -132,13 +114,12 @@ const updateRevisionPlan = async (req, res) => {
 
             await connection.execute(query, [...values, revisionId]);
         } else {
-            // 3. SE NÃO EXISTE (ex: primeiro agendamento): Cria um novo plano
             const newRevisionId = uuidv4(); 
             
             const newPlan = {
                 id: newRevisionId,
                 vehicleId: vehicleId,
-                ...data, // tipo, proximaRevisaoData, etc.
+                ...data, 
                 ultimaAlteracao: ultimaAlteracao
             };
             
@@ -164,10 +145,9 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// ... (deleteRevisionPlan se mantém igual) ...
+// --- DELETE: Deletar Plano ---
 const deleteRevisionPlan = async (req, res) => {
     try {
-        // Assume que o ID aqui é o REVISION ID, não o vehicleId
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
         res.status(204).end();
     } catch (error) {
@@ -176,7 +156,7 @@ const deleteRevisionPlan = async (req, res) => {
     }
 };
 
-// ... (getConsolidatedRevisionPlan se mantém igual) ...
+// --- GET: Consolidado ---
 const getConsolidatedRevisionPlan = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM revisions WHERE proximaRevisaoData IS NOT NULL');
@@ -188,36 +168,28 @@ const getConsolidatedRevisionPlan = async (req, res) => {
 };
 
 
-// --- GET: Obter o histórico de um veículo (CORRIGIDO) ---
-// Acha o histórico legado OU novo
+// --- GET: Histórico ---
 const getRevisionHistoryByVehicle = async (req, res) => {
     const { vehicleId } = req.params;
     if (!vehicleId) {
         return res.status(400).json({ error: 'vehicleId é obrigatório.' });
     }
     try {
-        // --- CORREÇÃO (Achar histórico legado OU novo) ---
-        // 1. Encontra o ID da revisão (seja legado ou novo)
         const [planRows] = await db.execute(
             'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
             [vehicleId, vehicleId]
         );
 
         if (planRows.length === 0) {
-             // Se não há plano, não pode haver histórico (baseado no FK)
-             // No entanto, os dados legados podem não ter o plano, mas ter o histórico
-             // Vamos checar o histórico DIRETAMENTE com o vehicleId (que era o revisionId legado)
              const [historyRowsLegacy] = await db.query('SELECT * FROM revisions_history WHERE revisionId = ? ORDER BY data DESC', [vehicleId]);
              if (historyRowsLegacy.length > 0) {
                 return res.json(historyRowsLegacy);
              }
-             return res.json([]); // Nenhum plano e nenhum histórico legado encontrado
+             return res.json([]); 
         }
 
-        const revisionId = planRows[0].id; // Este é o PK da tabela revisions
+        const revisionId = planRows[0].id; 
 
-        // 2. Busca o histórico usando o PK (revisionId)
-        // O .sql mostra que `revisions_history.revisionId` aponta para `revisions.id`
         const query = `
             SELECT h.* FROM revisions_history h
             WHERE h.revisionId = ? 
@@ -225,15 +197,13 @@ const getRevisionHistoryByVehicle = async (req, res) => {
         `;
         const [rows] = await db.query(query, [revisionId]);
         res.json(rows);
-        // --- Fim da Correção ---
     } catch (error) {
         console.error(`Erro ao buscar histórico do veículo ${vehicleId}:`, error);
         res.status(500).json({ error: 'Erro ao buscar histórico de revisões' });
     }
 };
 
-// --- POST: Concluir uma revisão (CORRIGIDO) ---
-// Acha o registro legado (por ID) ou novo (por VehicleID)
+// --- POST: Concluir uma revisão (ATUALIZADO COM UPDATE DO VEÍCULO) ---
 const completeRevision = async (req, res) => {
     const { vehicleId, isHourBased, ...historyEntry } = req.body;
     
@@ -245,19 +215,16 @@ const completeRevision = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- CORREÇÃO (Achar registro legado OU novo) ---
-        // 1. Encontrar o 'revisionId' (PK da tabela 'revisions') usando o 'vehicleId'
+        // 1. Encontrar o 'revisionId'
         const [rows] = await connection.execute(
             'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
             [vehicleId, vehicleId]
         );
-        // --- Fim da Correção ---
         
         let revisionId;
         
         if (rows.length === 0) {
-            // Se não houver plano, cria um (padrão novo)
-            console.warn(`Nenhum plano de revisão encontrado para vehicleId: ${vehicleId}. Criando um novo plano para registrar o histórico.`);
+            console.warn(`Nenhum plano de revisão encontrado para vehicleId: ${vehicleId}. Criando um novo plano.`);
             revisionId = uuidv4();
             const newPlanQuery = `INSERT INTO revisions (id, vehicleId, ultimaAlteracao) VALUES (?, ?, ?)`;
             const ultimaAlteracao = JSON.stringify({
@@ -268,10 +235,10 @@ const completeRevision = async (req, res) => {
             });
             await connection.execute(newPlanQuery, [revisionId, vehicleId, ultimaAlteracao]);
         } else {
-             revisionId = rows[0].id; // Usa o PK encontrado
+             revisionId = rows[0].id;
         }
 
-        // 2. Adicionar o registro ao histórico (lógica mantida, estava correta)
+        // 2. Adicionar o registro ao histórico
         const historyQuery = `
             INSERT INTO revisions_history (
                 revisionId, data, descricao, realizadaEm, realizadaPor, 
@@ -280,27 +247,22 @@ const completeRevision = async (req, res) => {
             VALUES (?, ?, ?, ?, ?, ?, ?)
         `;
         
-        const odometroValue = !isHourBased ? (historyEntry.leituraRealizada || null) : null;
-        const horimetroValue = isHourBased ? (historyEntry.leituraRealizada || null) : null;
-
-        // --- CORREÇÃO ---
-        // Converte a string ISO 'realizadaEm' (vinda do frontend) em um objeto Date.
-        // O driver mysql2 lida melhor com objetos Date para colunas TIMESTAMP.
-        // Isso evita falhas de tipo de dado que causam o Erro 500.
+        const leituraValue = historyEntry.leituraRealizada || 0;
+        const odometroValue = !isHourBased ? leituraValue : null;
+        const horimetroValue = isHourBased ? leituraValue : null;
         const dataRevisao = new Date(historyEntry.realizadaEm);
 
         await connection.execute(historyQuery, [
             revisionId,
-            dataRevisao,              // param 2 (data) - Agora é um objeto Date
+            dataRevisao,              
             historyEntry.descricao,   
-            dataRevisao,              // param 4 (realizadaEm) - Agora é um objeto Date
+            dataRevisao,              
             historyEntry.realizadaPor,
             odometroValue,
             horimetroValue
         ]);
-        // --- Fim da Correção ---
 
-        // 3. Limpar (resetar) o plano de revisão (lógica mantida, 'tipo' estava correto)
+        // 3. Limpar (resetar) o plano de revisão
         const resetQuery = `
             UPDATE revisions 
             SET 
@@ -321,8 +283,20 @@ const completeRevision = async (req, res) => {
         });
         await connection.execute(resetQuery, [ultimaAlteracaoReset, revisionId]);
 
+        // 4. ATUALIZAR O VEÍCULO COM A NOVA LEITURA (NOVO!)
+        // Atualiza o campo correto (horimetro ou odometro) com a leitura realizada na revisão.
+        // Assume-se que a validação de consistência (se é menor ou maior) já foi feita no frontend (Modal com Senha).
+        let updateVehicleQuery = '';
+        if (isHourBased) {
+            updateVehicleQuery = 'UPDATE vehicles SET horimetro = ? WHERE id = ?';
+        } else {
+            updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
+        }
+        
+        await connection.execute(updateVehicleQuery, [leituraValue, vehicleId]);
+
         await connection.commit();
-        res.status(200).json({ message: 'Revisão concluída com sucesso!' });
+        res.status(200).json({ message: 'Revisão concluída e veículo atualizado com sucesso!' });
     } catch (error) {
         await connection.rollback();
         console.error("Erro ao concluir revisão:", error);
@@ -332,7 +306,6 @@ const completeRevision = async (req, res) => {
     }
 };
 
-// --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllRevisionPlans,
     createRevisionPlan,
