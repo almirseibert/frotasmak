@@ -11,7 +11,7 @@ const multer = require('multer');
 // Middlewares
 const authMiddleware = require('./middlewares/authMiddleware');
 
-// Rotas
+// Rotas Existentes
 const authRoutes = require('./routes/authRoutes');
 const vehicleRoutes = require('./routes/vehicleRoutes');
 const obraRoutes = require('./routes/obraRoutes');
@@ -30,41 +30,36 @@ const adminRoutes = require('./routes/adminRoutes');
 const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
-
-// Importa as novas rotas de upload
 const uploadRoutes = require('./routes/uploadRoutes');
 
+// --- NOVA ROTA DE PNEUS ---
+const tireRoutes = require('./routes/tireRoutes');
 
 const app = express();
 const port = process.env.PORT || 3001;
 
 // --- CORREÇÃO CRÍTICA DE MIDDLEWARE ---
-// Estas linhas DEVEM vir antes de QUALQUER rota para garantir que o req.body seja lido.
 app.use(cors());
 app.use(express.json()); 
 // --- FIM CORREÇÃO CRÍTICA ---
 
-
-// O caminho deve corresponder ao local onde o multer salva (public/uploads)
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
-
 
 // --- ROTAS DA API ---
 const apiRouter = express.Router();
 
-// Rota de teste
 apiRouter.get('/', (req, res) => {
     res.send('API Frotas MAK está no ar!');
 });
 
-// Rotas Públicas (não exigem token)
+// Rotas Públicas
 apiRouter.use('/auth', authRoutes);
 apiRouter.use('/registrationRequests', registrationRequestRoutes);
 
-// Aplica o middleware de autenticação para as rotas protegidas
+// Middleware de Autenticação
 apiRouter.use(authMiddleware);
 
-// Rota de Upload (Protegida)
+// Rota de Upload
 apiRouter.use('/upload', uploadRoutes);
 
 // Rotas Protegidas
@@ -85,11 +80,11 @@ apiRouter.use('/expenses', expensesRoutes);
 apiRouter.use('/users', userRoutes);
 apiRouter.use('/updates', updateRoutes);
 
-// Usa o roteador da API com o prefixo /api
+// --- REGISTRO DA ROTA DE PNEUS ---
+apiRouter.use('/tires', tireRoutes);
+
 app.use('/api', apiRouter);
 
-
-// Verifica a conexão com o banco de dados ao iniciar
 db.getConnection()
     .then(connection => {
         console.log('Conexão com o banco de dados estabelecida com sucesso!');
@@ -99,7 +94,6 @@ db.getConnection()
         console.error('Erro ao conectar ao banco de dados:', err.stack);
     });
 
-// Inicia o servidor
 app.listen(port, () => {
     console.log(`Servidor rodando na porta ${port}`);
 });
