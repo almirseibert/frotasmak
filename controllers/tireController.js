@@ -58,10 +58,12 @@ const updateTire = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
     
+    // Remove campos que não devem ser editados diretamente via PUT simples
     delete data.id;
     delete data.currentVehicleId;
     delete data.position;
-
+    // O status geralmente é controlado por transação, mas permitimos edição se necessário (cuidado)
+    
     const fields = Object.keys(data);
     const values = Object.values(data);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
@@ -76,19 +78,20 @@ const updateTire = async (req, res) => {
     }
 };
 
-// POST: Movimentação (Instalar/Remover/Transferir)
+// POST: Movimentação (Instalar/Remover/Transferir/Manutenção/Sucata)
 const registerTransaction = async (req, res) => {
     const { 
         tireId, 
         vehicleId = null, 
-        type, // Espera: 'install', 'remove' ou 'transfer'
+        type, // 'install', 'remove', 'transfer', 'maintenance', 'scrap', 'restock'
         position = null, 
         date = new Date(), 
         odometer = null, 
         horimeter = null, 
         observation = '',
         employeeName = null, 
-        obraName = null 
+        obraName = null,
+        vendorName = null // Para recapagem
     } = req.body;
 
     const connection = await db.getConnection();
@@ -97,8 +100,8 @@ const registerTransaction = async (req, res) => {
 
         if (type === 'install') {
             if (!vehicleId || !position) throw new Error("Veículo e Posição são obrigatórios para instalação.");
-
-            // 1. Verifica ocupação
+            
+            // Verifica ocupação
             const [occupied] = await connection.execute(
                 'SELECT id FROM tires WHERE currentVehicleId = ? AND position = ?', 
                 [vehicleId, position]
@@ -107,35 +110,55 @@ const registerTransaction = async (req, res) => {
                 throw new Error(`A posição ${position} já possui um pneu instalado. Remova-o antes.`);
             }
 
-            // 2. Atualiza Pneu
             await connection.execute(
                 `UPDATE tires SET status = 'Em Uso', currentVehicleId = ?, position = ?, location = 'Veículo' WHERE id = ?`,
                 [vehicleId, position, tireId]
             );
 
         } else if (type === 'remove') {
-            // 1. Atualiza Pneu para Estoque
             await connection.execute(
                 `UPDATE tires SET status = 'Estoque', currentVehicleId = NULL, position = NULL, location = 'Almoxarifado' WHERE id = ?`,
                 [tireId]
             );
         
         } else if (type === 'transfer') { 
-            // 1. Atualiza Pneu para Sob Responsabilidade (Step Reserva)
+            // Envio para Step/Reserva
             const locDesc = `Obra: ${obraName || 'N/A'} / Resp: ${employeeName || 'N/A'}`;
             await connection.execute(
-                `UPDATE tires SET status = 'Em Uso', currentVehicleId = NULL, position = NULL, location = ? WHERE id = ?`,
+                `UPDATE tires SET status = 'Step/Reserva', currentVehicleId = NULL, position = NULL, location = ? WHERE id = ?`,
                 [locDesc, tireId]
+            );
+
+        } else if (type === 'maintenance') {
+            // Envio para Recapagem
+            const locDesc = `Fornecedor: ${vendorName || 'Externo'}`;
+            await connection.execute(
+                `UPDATE tires SET status = 'Recapagem', currentVehicleId = NULL, position = NULL, location = ?, tireCondition = 'Recapado' WHERE id = ?`,
+                [locDesc, tireId]
+            );
+
+        } else if (type === 'scrap') {
+            // Descarte / Sucata
+            await connection.execute(
+                `UPDATE tires SET status = 'Sucata', currentVehicleId = NULL, position = NULL, location = 'Descarte' WHERE id = ?`,
+                [tireId]
+            );
+
+        } else if (type === 'restock') {
+            // Retorno ao Estoque (vindo de Step, Recapagem, etc)
+            await connection.execute(
+                `UPDATE tires SET status = 'Estoque', currentVehicleId = NULL, position = NULL, location = 'Almoxarifado' WHERE id = ?`,
+                [tireId]
             );
         }
 
-        // 3. Registra Transação
+        // Registra Histórico
         const transId = uuidv4();
         let finalObservation = observation || '';
         
-        if (type === 'transfer') {
-            finalObservation = `Enviado para ${obraName || 'N/A'} (Resp: ${employeeName || 'N/A'}). Obs: ${observation || ''}`;
-        }
+        if (type === 'transfer') finalObservation = `Enviado para ${obraName} (Resp: ${employeeName}). ${observation}`;
+        if (type === 'maintenance') finalObservation = `Enviado para Recapagem: ${vendorName}. ${observation}`;
+        if (type === 'scrap') finalObservation = `Enviado para Sucata. ${observation}`;
 
         const transactionDate = date ? new Date(date) : new Date();
 
@@ -146,7 +169,7 @@ const registerTransaction = async (req, res) => {
                 transId, 
                 tireId, 
                 vehicleId || null, 
-                type, // 'install', 'remove' ou 'transfer'
+                type, 
                 position || null, 
                 transactionDate, 
                 odometer || null, 
@@ -155,19 +178,13 @@ const registerTransaction = async (req, res) => {
             ]
         );
 
-        // 4. ATUALIZAR O VEÍCULO (Atualiza Km ou Horímetro se o valor novo for MAIOR)
+        // Atualiza Leitura do Veículo (se aplicável)
         if (vehicleId) {
             if (odometer && !isNaN(parseFloat(odometer)) && parseFloat(odometer) > 0) {
-                await connection.execute(
-                    'UPDATE vehicles SET odometro = GREATEST(IFNULL(odometro, 0), ?) WHERE id = ?', 
-                    [odometer, vehicleId]
-                );
+                await connection.execute('UPDATE vehicles SET odometro = GREATEST(IFNULL(odometro, 0), ?) WHERE id = ?', [odometer, vehicleId]);
             }
             if (horimeter && !isNaN(parseFloat(horimeter)) && parseFloat(horimeter) > 0) {
-                await connection.execute(
-                    'UPDATE vehicles SET horimetro = GREATEST(IFNULL(horimetro, 0), ?) WHERE id = ?', 
-                    [horimeter, vehicleId]
-                );
+                await connection.execute('UPDATE vehicles SET horimetro = GREATEST(IFNULL(horimetro, 0), ?) WHERE id = ?', [horimeter, vehicleId]);
             }
         }
 
