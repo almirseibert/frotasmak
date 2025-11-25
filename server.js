@@ -31,9 +31,10 @@ const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
-
-// --- NOVA ROTA DE PNEUS ---
 const tireRoutes = require('./routes/tireRoutes');
+
+// --- NOVA ROTA DE FATURAMENTO ---
+const billingRoutes = require('./routes/billingRoutes');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -77,9 +78,10 @@ apiRouter.use('/admin', adminRoutes);
 apiRouter.use('/expenses', expensesRoutes);
 apiRouter.use('/users', userRoutes);
 apiRouter.use('/updates', updateRoutes);
-
-// --- REGISTRO DA ROTA DE PNEUS ---
 apiRouter.use('/tires', tireRoutes);
+
+// --- REGISTRO DA ROTA DE FATURAMENTO ---
+apiRouter.use('/billing', billingRoutes);
 
 app.use('/api', apiRouter);
 
