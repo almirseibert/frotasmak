@@ -6,11 +6,13 @@ const getDailyLogs = async (req, res) => {
     const { obraId } = req.params;
     const { startDate, endDate, vehicleId } = req.query;
 
+    // *** CORREÇÃO CRÍTICA AQUI ***
+    // Alterado de 'e.employeeId' para 'e.id' (que é a chave primária correta da tabela employees)
     let query = `
         SELECT l.*, v.modelo, v.registroInterno, v.tipo, e.nome as employeeName 
         FROM daily_work_logs l
         JOIN vehicles v ON l.vehicleId = v.id
-        LEFT JOIN employees e ON l.employeeId = e.employeeId
+        LEFT JOIN employees e ON l.employeeId = e.id 
         WHERE l.obraId = ?
     `;
     
