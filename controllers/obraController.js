@@ -1,12 +1,12 @@
 const db = require('../database');
-const { v4: uuidv4 } = require('uuid'); // <-- 1. IMPORTAR O UUID
+const { v4: uuidv4 } = require('uuid');
 
 // ===================================================================================
-// FUNÇÃO AUXILIAR DE PARSE SEGURO (Apenas para campos da tabela 'obras')
+// FUNÇÃO AUXILIAR DE PARSE SEGURO
 // ===================================================================================
 const parseJsonSafe = (field, key, defaultValue = null) => {
     if (field === null || typeof field === 'undefined') return defaultValue;
-    if (typeof field === 'object') return field; // Já é um objeto
+    if (typeof field === 'object') return field;
     if (typeof field !== 'string' || (!field.startsWith('{') && !field.startsWith('['))) {
         return defaultValue; 
     }
@@ -19,14 +19,10 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
         return defaultValue;
     }
 };
-// ===================================================================================
 
-
-// --- Função Auxiliar para Conversão de JSON nos campos da Obra ---
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
-    // Campos JSON da tabela 'obras'
     const fieldsToParse = ['horasContratadasPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
     fieldsToParse.forEach(field => {
         if (obra.hasOwnProperty(field)) {
@@ -36,21 +32,38 @@ const parseObraJsonFields = (obra) => {
     return newObra;
 };
 
-// ... (getAllObras - sem mudanças) ...
+// --- GET ALL OBRAS (Com Soma de Horas do Faturamento) ---
 const getAllObras = async (req, res) => {
     try {
+        // Busca obras básicas
         const [rows] = await db.query('SELECT * FROM obras');
         
-        // Busca todo o histórico de obras de uma vez
+        // Busca histórico de alocação (mantido para contagem de veículos ativos)
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
+
+        // NOVA LÓGICA: Busca soma de horas apontadas no Faturamento (daily_work_logs) agrupadas por Obra
+        const [billingRows] = await db.query(`
+            SELECT obraId, SUM(totalHours) as totalHorasRealizadas 
+            FROM daily_work_logs 
+            GROUP BY obraId
+        `);
+
+        // Mapa para acesso rápido ao faturamento
+        const billingMap = {};
+        billingRows.forEach(row => {
+            billingMap[row.obraId] = parseFloat(row.totalHorasRealizadas) || 0;
+        });
 
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
             
-            // Anexa o histórico "plano" (flat) como o frontend espera
-            parsedObra.historicoVeiculos = historyRows // Usa 'historyRows' diretamente
+            // Anexa histórico
+            parsedObra.historicoVeiculos = historyRows
                 .filter(h => h.obraId === parsedObra.id)
-                .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada)); // Ordena
+                .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada));
+            
+            // Anexa total realizado via Faturamento
+            parsedObra.totalHorasRealizadas = billingMap[parsedObra.id] || 0;
                 
             return parsedObra;
         });
@@ -62,7 +75,7 @@ const getAllObras = async (req, res) => {
     }
 };
 
-// ... (getObraById - sem mudanças) ...
+// --- GET OBRA BY ID (Com Detalhamento por Tipo do Faturamento) ---
 const getObraById = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras WHERE id = ?', [req.params.id]);
@@ -74,12 +87,33 @@ const getObraById = async (req, res) => {
             'SELECT * FROM obras_historico_veiculos WHERE obraId = ? ORDER BY dataEntrada DESC', 
             [req.params.id]
         );
+
+        // NOVA LÓGICA: Busca horas realizadas agrupadas por TIPO DE VEÍCULO (Join com vehicles)
+        // Isso alimenta as barras de progresso detalhadas
+        const [billingByTypeRows] = await db.query(`
+            SELECT v.tipo, SUM(l.totalHours) as totalHoras
+            FROM daily_work_logs l
+            JOIN vehicles v ON l.vehicleId = v.id
+            WHERE l.obraId = ?
+            GROUP BY v.tipo
+        `, [req.params.id]);
+
+        const realizadoPorTipo = {};
+        let totalRealizadoGeral = 0;
+
+        billingByTypeRows.forEach(row => {
+            realizadoPorTipo[row.tipo] = parseFloat(row.totalHoras) || 0;
+            totalRealizadoGeral += parseFloat(row.totalHoras) || 0;
+        });
         
         const obra = parseObraJsonFields(rows[0]);
         
-        // Retorna o histórico "plano" (flat) como o ObrasPage.js espera
         obra.historicoVeiculos = historyRows; 
         
+        // Novos campos injetados para o Frontend usar no modal de detalhes
+        obra.realizadoPorTipo = realizadoPorTipo; 
+        obra.totalHorasRealizadas = totalRealizadoGeral;
+
         res.json(obra);
     } catch (error) {
         console.error('Erro ao buscar obra por ID:', error);
@@ -87,27 +121,23 @@ const getObraById = async (req, res) => {
     }
 };
 
-// --- POST: Criar uma nova obra ---
+// --- CREATE OBRA ---
 const createObra = async (req, res) => {
     const data = { ...req.body };
-
-    // --- CORREÇÃO DE BUG ---
-    // Adiciona o ID que está faltando para a tabela 'obras'
     data.id = uuidv4();
-    // --- FIM DA CORREÇÃO ---
 
     delete data.historicoVeiculos; 
+    delete data.realizadoPorTipo; // Remove campos calculados se vierem por engano
+    delete data.totalHorasRealizadas;
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
     
-    // --- SANITIZAÇÃO DE LATITUDE/LONGITUDE ---
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
 
-    // Define o status padrão no backend
     data.status = 'ativa';
 
     const fields = Object.keys(data);
@@ -124,19 +154,22 @@ const createObra = async (req, res) => {
     }
 };
 
-// ... (updateObra - sem mudanças) ...
+// --- UPDATE OBRA ---
 const updateObra = async (req, res) => {
     const { id } = req.params;
     const data = { ...req.body };
-    delete data.historicoVeiculos; // O histórico é atualizado por outra rota
-    delete data.id; // Não atualiza a chave primária
+    
+    // Limpeza de campos que não existem na tabela ou são somente leitura/calculados
+    delete data.historicoVeiculos;
+    delete data.realizadoPorTipo;
+    delete data.totalHorasRealizadas;
+    delete data.id;
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
 
-    // --- SANITIZAÇÃO DE LATITUDE/LONGITUDE ---
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
 
@@ -144,7 +177,6 @@ const updateObra = async (req, res) => {
     const values = Object.values(data);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
     
-    // Evita query vazia se só enviar o ID
     if(fields.length === 0){
         return res.status(400).json({ error: 'Nenhum dado para atualizar.' });
     }
@@ -160,7 +192,7 @@ const updateObra = async (req, res) => {
     }
 };
 
-// ... (deleteObra - sem mudanças) ...
+// --- DELETE OBRA ---
 const deleteObra = async (req, res) => {
     try {
         await db.execute('DELETE FROM obras WHERE id = ?', [req.params.id]);
@@ -171,11 +203,11 @@ const deleteObra = async (req, res) => {
     }
 };
 
-// ... (finishObra - sem mudanças) ...
+// --- FINISH OBRA ---
 const finishObra = async (req, res) => {
     const { id } = req.params;
-    const { dataFim } = req.body; // Pega a dataFim do frontend
-    const finalDate = dataFim ? new Date(dataFim) : new Date(); // Usa data do frontend ou data atual
+    const { dataFim } = req.body;
+    const finalDate = dataFim ? new Date(dataFim) : new Date();
 
     try {
         const [result] = await db.execute(
@@ -193,39 +225,27 @@ const finishObra = async (req, res) => {
     }
 };
 
-// ... (updateObraHistoryEntry - sem mudanças) ...
+// --- UPDATE HISTORICO (Mantido para correções de apontamento de alocação se necessário) ---
 const updateObraHistoryEntry = async (req, res) => {
-    const { historyId } = req.params; // PK da tabela obras_historico_veiculos
-    // O frontend enviará os dados "planos", sem 'details'
+    const { historyId } = req.params;
     const { dataEntrada, dataSaida, employeeId, leituraEntrada, leituraSaida } = req.body;
 
-    // Busca o nome do funcionário
     let employeeName = null;
     if (employeeId) {
         try {
             const [empRows] = await db.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
-            if (empRows.length > 0) {
-                employeeName = empRows[0].nome;
-            }
-        } catch (e) {
-            console.warn("Não foi possível buscar nome do funcionário durante a atualização do histórico.");
-        }
+            if (empRows.length > 0) employeeName = empRows[0].nome;
+        } catch (e) { console.warn("Erro ao buscar nome funcionário"); }
     }
 
-    let odometroEntrada = null;
-    let horimetroEntrada = null;
-    let odometroSaida = null;
-    let horimetroSaida = null;
+    let odometroEntrada = null, horimetroEntrada = null, odometroSaida = null, horimetroSaida = null;
 
     try {
         const [currentHistory] = await db.execute('SELECT * FROM obras_historico_veiculos WHERE id = ?', [historyId]);
-        if (currentHistory.length === 0) {
-            return res.status(404).json({ error: 'Registro de histórico não encontrado.' });
-        }
+        if (currentHistory.length === 0) return res.status(404).json({ error: 'Histórico não encontrado.' });
 
         const history = currentHistory[0];
         
-        // Mantém o tipo de leitura original
         if (history.odometroEntrada !== null) {
             odometroEntrada = parseFloat(leituraEntrada) || null;
             odometroSaida = parseFloat(leituraSaida) || null;
@@ -234,44 +254,21 @@ const updateObraHistoryEntry = async (req, res) => {
             horimetroSaida = parseFloat(leituraSaida) || null;
         }
 
-        // *** CORREÇÃO: Atualiza os campos planos do banco ***
         const query = `
             UPDATE obras_historico_veiculos 
-            SET 
-                dataEntrada = ?, 
-                dataSaida = ?, 
-                employeeId = ?, 
-                employeeName = ?,
-                odometroEntrada = ?,
-                odometroSaida = ?,
-                horimetroEntrada = ?,
-                horimetroSaida = ?
-            WHERE id = ?
+            SET dataEntrada=?, dataSaida=?, employeeId=?, employeeName=?, odometroEntrada=?, odometroSaida=?, horimetroEntrada=?, horimetroSaida=?
+            WHERE id=?
         `;
         
-        const values = [
-            dataEntrada || null,
-            dataSaida || null,
-            employeeId || null,
-            employeeName,
-            odometroEntrada,
-            odometroSaida,
-            horimetroEntrada,
-            horimetroSaida,
-            historyId
-        ];
-
-        await db.execute(query, values);
-        res.json({ message: 'Histórico da obra atualizado com sucesso.' });
+        await db.execute(query, [dataEntrada || null, dataSaida || null, employeeId || null, employeeName, odometroEntrada, odometroSaida, horimetroEntrada, horimetroSaida, historyId]);
+        res.json({ message: 'Histórico atualizado com sucesso.' });
 
     } catch (error) {
-        console.error('Erro ao atualizar histórico da obra:', error);
-        res.status(500).json({ error: 'Erro ao atualizar histórico da obra.' });
+        console.error('Erro ao atualizar histórico:', error);
+        res.status(500).json({ error: 'Erro ao atualizar histórico.' });
     }
 };
 
-
-// --- EXPORTAÇÃO DE TODAS AS FUNÇÕES ---
 module.exports = {
     getAllObras,
     getObraById,
