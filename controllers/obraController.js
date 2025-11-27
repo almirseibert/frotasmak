@@ -23,7 +23,8 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
-    const fieldsToParse = ['horasContratadasPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
+    // Adicionado 'valoresPorTipo' na lista de campos para parsear na leitura
+    const fieldsToParse = ['horasContratadasPorTipo', 'valoresPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
     fieldsToParse.forEach(field => {
         if (obra.hasOwnProperty(field)) {
             newObra[field] = parseJsonSafe(obra[field], field);
@@ -35,20 +36,16 @@ const parseObraJsonFields = (obra) => {
 // --- GET ALL OBRAS (Com Soma de Horas do Faturamento) ---
 const getAllObras = async (req, res) => {
     try {
-        // Busca obras básicas
         const [rows] = await db.query('SELECT * FROM obras');
-        
-        // Busca histórico de alocação (mantido para contagem de veículos ativos)
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
 
-        // NOVA LÓGICA: Busca soma de horas apontadas no Faturamento (daily_work_logs) agrupadas por Obra
+        // Busca soma de horas apontadas no Faturamento
         const [billingRows] = await db.query(`
             SELECT obraId, SUM(totalHours) as totalHorasRealizadas 
             FROM daily_work_logs 
             GROUP BY obraId
         `);
 
-        // Mapa para acesso rápido ao faturamento
         const billingMap = {};
         billingRows.forEach(row => {
             billingMap[row.obraId] = parseFloat(row.totalHorasRealizadas) || 0;
@@ -57,12 +54,10 @@ const getAllObras = async (req, res) => {
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
             
-            // Anexa histórico
             parsedObra.historicoVeiculos = historyRows
                 .filter(h => h.obraId === parsedObra.id)
                 .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada));
             
-            // Anexa total realizado via Faturamento
             parsedObra.totalHorasRealizadas = billingMap[parsedObra.id] || 0;
                 
             return parsedObra;
@@ -88,8 +83,7 @@ const getObraById = async (req, res) => {
             [req.params.id]
         );
 
-        // NOVA LÓGICA: Busca horas realizadas agrupadas por TIPO DE VEÍCULO (Join com vehicles)
-        // Isso alimenta as barras de progresso detalhadas
+        // Busca horas realizadas agrupadas por TIPO DE VEÍCULO
         const [billingByTypeRows] = await db.query(`
             SELECT v.tipo, SUM(l.totalHours) as totalHoras
             FROM daily_work_logs l
@@ -109,8 +103,6 @@ const getObraById = async (req, res) => {
         const obra = parseObraJsonFields(rows[0]);
         
         obra.historicoVeiculos = historyRows; 
-        
-        // Novos campos injetados para o Frontend usar no modal de detalhes
         obra.realizadoPorTipo = realizadoPorTipo; 
         obra.totalHorasRealizadas = totalRealizadoGeral;
 
@@ -126,17 +118,25 @@ const createObra = async (req, res) => {
     const data = { ...req.body };
     data.id = uuidv4();
 
+    // Limpeza de campos calculados/auxiliares
     delete data.historicoVeiculos; 
-    delete data.realizadoPorTipo; // Remove campos calculados se vierem por engano
+    delete data.realizadoPorTipo;
     delete data.totalHorasRealizadas;
 
+    // Stringify de campos JSON
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
+    if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo); // <--- CORREÇÃO: Stringify do novo campo
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
     
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
+
+    // Garante que valores numéricos vazios virem 0 ou null
+    if (data.kmContratadoPrancha === '') data.kmContratadoPrancha = 0;
+    if (data.valorKmPrancha === '') data.valorKmPrancha = 0;
+    if (data.valorTotalContrato === '') data.valorTotalContrato = 0;
 
     data.status = 'ativa';
 
@@ -150,7 +150,8 @@ const createObra = async (req, res) => {
         res.status(201).json({ message: 'Obra criada com sucesso' });
     } catch (error) {
         console.error('Erro ao criar obra:', error);
-        res.status(500).json({ error: 'Erro ao criar obra' });
+        // Retorna mensagem mais detalhada em dev para ajudar a debugar colunas faltando
+        res.status(500).json({ error: 'Erro ao criar obra. Verifique se todas as colunas existem no banco.', details: error.message });
     }
 };
 
@@ -159,13 +160,14 @@ const updateObra = async (req, res) => {
     const { id } = req.params;
     const data = { ...req.body };
     
-    // Limpeza de campos que não existem na tabela ou são somente leitura/calculados
     delete data.historicoVeiculos;
     delete data.realizadoPorTipo;
     delete data.totalHorasRealizadas;
     delete data.id;
 
+    // Stringify de campos JSON
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
+    if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo); // <--- CORREÇÃO
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
@@ -225,7 +227,7 @@ const finishObra = async (req, res) => {
     }
 };
 
-// --- UPDATE HISTORICO (Mantido para correções de apontamento de alocação se necessário) ---
+// --- UPDATE HISTORICO ---
 const updateObraHistoryEntry = async (req, res) => {
     const { historyId } = req.params;
     const { dataEntrada, dataSaida, employeeId, leituraEntrada, leituraSaida } = req.body;
