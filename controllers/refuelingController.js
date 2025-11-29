@@ -6,25 +6,17 @@ const { parseVehicleJsonFields } = require('./vehicleController');
 // --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
-    
-    // Se já for um objeto/array (por exemplo, se o driver do MySQL já parseou a coluna JSON)
     if (typeof field === 'object') return field; 
-    
-    // Garante que é uma string antes de tentar o parse
     if (typeof field !== 'string') return field;
 
     try {
-        // Tenta fazer o parse da string
         const parsed = JSON.parse(field);
-        
-        // Verifica se o resultado do parse é um objeto/array válido
         if (typeof parsed === 'object' && parsed !== null) {
             return parsed;
         }
         return null; 
     } catch (e) {
         console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
-        // Retorna null em caso de erro, impedindo a quebra da aplicação.
         return null; 
     }
 };
@@ -34,7 +26,6 @@ const parseRefuelingJsonFields = (refueling) => {
     if (!refueling) return null;
     const newRefueling = { ...refueling };
     
-    // Aplicação da função segura:
     newRefueling.createdBy = parseJsonSafe(newRefueling.createdBy, 'createdBy');
     newRefueling.confirmedBy = parseJsonSafe(newRefueling.confirmedBy, 'confirmedBy');
     newRefueling.editedBy = parseJsonSafe(newRefueling.editedBy, 'editedBy');
@@ -77,6 +68,7 @@ const createRefuelingOrder = async (req, res) => {
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
         const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
 
+        // Prepara objeto para inserção
         const refuelingData = {
             ...data,
             authNumber: newAuthNumber,
@@ -84,22 +76,44 @@ const createRefuelingOrder = async (req, res) => {
             createdBy: JSON.stringify(data.createdBy),
             confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
             editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
+            // Garante campos numéricos
+            odometro: data.odometro || null,
+            horimetro: data.horimetro || null,
+            horimetroDigital: data.horimetroDigital || null,
+            horimetroAnalogico: data.horimetroAnalogico || null,
         };
+
         await connection.execute('INSERT INTO refuelings SET ?', [refuelingData]);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
+        // Se já nascer concluída (cenário raro, mas possível via API direta)
         if (refuelingData.status === 'Concluída') {
             const vehicleUpdateData = {};
+            // Atualiza leitura do veículo
             if (refuelingData.odometro) vehicleUpdateData.odometro = refuelingData.odometro;
             if (refuelingData.horimetro) vehicleUpdateData.horimetro = refuelingData.horimetro;
             if (refuelingData.horimetroDigital) vehicleUpdateData.horimetroDigital = refuelingData.horimetroDigital;
             if (refuelingData.horimetroAnalogico) vehicleUpdateData.horimetroAnalogico = refuelingData.horimetroAnalogico;
-            await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, refuelingData.vehicleId]);
-            await createOrUpdateWeeklyFuelExpense({ connection, obraId: refuelingData.obraId, date: refuelingData.data, fuelType: refuelingData.fuelType, partnerName: refuelingData.partnerName, valueChange: refuelingData.litrosAbastecidos * 1 });
+            
+            if (Object.keys(vehicleUpdateData).length > 0) {
+                await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, refuelingData.vehicleId]);
+            }
+
+            // Gera despesa
+            // Nota: Se não tiver preço, assume valor 0 ou lógica de preço médio
+            const valorTotal = (refuelingData.litrosAbastecidos || 0) * (refuelingData.pricePerLiter || 0);
+            await createOrUpdateWeeklyFuelExpense({ 
+                connection, 
+                obraId: refuelingData.obraId, 
+                date: refuelingData.data, 
+                fuelType: refuelingData.fuelType, 
+                partnerName: refuelingData.partnerName, // Pode não ter partnerName aqui se vier só ID, idealmente buscar parceiro
+                valueChange: valorTotal 
+            });
         }
         
         await connection.commit();
-        res.status(201).json({ id: newAuthNumber, message: 'Ordem emitida com sucesso.' });
+        res.status(201).json({ id: newAuthNumber, message: 'Ordem emitida com sucesso.', authNumber: newAuthNumber, status: 'Aberta' });
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao criar ordem de abastecimento:', error);
@@ -118,24 +132,28 @@ const updateRefuelingOrder = async (req, res) => {
 
     try {
         const [originalRefuelingRows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
-        const originalRefueling = parseRefuelingJsonFields(originalRefuelingRows[0]);
-        const newStatus = data.status;
+        if (originalRefuelingRows.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Ordem não encontrada.' });
+        }
+        
+        // Remove campos que não devem ser atualizados diretamente via update simples se a ordem já estiver fechada
+        // (Lógica de segurança simplificada)
 
         const refuelingUpdateData = {
             ...data,
-            data: new Date(data.data),
-            confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
-            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
+            data: data.data ? new Date(data.data) : undefined,
+            confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : undefined,
+            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : undefined,
         };
-        await connection.execute('UPDATE refuelings SET ? WHERE id = ?', [refuelingUpdateData, id]);
+        
+        // Remove undefined keys
+        Object.keys(refuelingUpdateData).forEach(key => refuelingUpdateData[key] === undefined && delete refuelingUpdateData[key]);
 
-        if (originalRefueling.status === 'Concluída' && newStatus === 'Concluída') {
-            await createOrUpdateWeeklyFuelExpense({ connection, obraId: originalRefueling.obraId, date: originalRefueling.data, fuelType: originalRefueling.fuelType, partnerName: originalRefueling.partnerName, valueChange: -originalRefueling.litrosAbastecidos * 1 });
-            await createOrUpdateWeeklyFuelExpense({ connection, obraId: refuelingUpdateData.obraId, date: refuelingUpdateData.data, fuelType: refuelingUpdateData.fuelType, partnerName: refuelingUpdateData.partnerName, valueChange: refuelingUpdateData.litrosAbastecidos * 1 });
-        }
+        await connection.execute('UPDATE refuelings SET ? WHERE id = ?', [refuelingUpdateData, id]);
         
         await connection.commit();
-        res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
+        res.status(200).json({ message: 'Ordem atualizada com sucesso.', authNumber: originalRefuelingRows[0].authNumber });
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao atualizar ordem:', error);
@@ -146,14 +164,15 @@ const updateRefuelingOrder = async (req, res) => {
 };
 
 
-// --- ROTA: Confirmar um abastecimento em aberto ---
+// --- ROTA: Confirmar um abastecimento em aberto (CRÍTICO: ATUALIZA VEÍCULO E PREÇO) ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
-    const { litrosAbastecidos, litrosAbastecidosArla, confirmedBy } = req.body;
+    const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
+        // 1. Busca a Ordem
         const [orderRows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
         const order = parseRefuelingJsonFields(orderRows[0]);
 
@@ -166,24 +185,78 @@ const confirmRefuelingOrder = async (req, res) => {
             return res.status(400).json({ error: 'Ordem já foi confirmada.' });
         }
 
-        await connection.execute('UPDATE refuelings SET status = ?, litrosAbastecidos = ?, litrosAbastecidosArla = ?, confirmedBy = ? WHERE id = ?', [
+        // 2. Busca o Veículo para saber qual campo atualizar (Regra 5)
+        const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [order.vehicleId]);
+        const vehicle = vehicleRows[0];
+        
+        // Define qual campo de leitura atualizar no veículo e na ordem (se não foi preenchido na emissão)
+        const vehicleUpdateData = {};
+        const orderUpdateData = {};
+
+        // Se o usuário informou uma leitura confirmada no modal
+        if (confirmedReading) {
+            // Lógica para decidir qual campo atualizar baseada no veículo
+            // Prioridade: Digital > Analógico > Horímetro Genérico > Odômetro
+            if (vehicle.possuiHorimetroDigital) {
+                vehicleUpdateData.horimetroDigital = confirmedReading;
+                orderUpdateData.horimetroDigital = confirmedReading;
+            } else if (vehicle.possuiHorimetroAnalogico) {
+                vehicleUpdateData.horimetroAnalogico = confirmedReading;
+                orderUpdateData.horimetroAnalogico = confirmedReading;
+            } else if (vehicle.tipo === 'Caminhão' || vehicle.tipo.includes('Caminhão')) { // Ajuste conforme seus tipos exatos
+                 // Caminhões podem ter horimetro ou odometro. Se a leitura for pequena (< 200000 e vehicle for caminhao pesado), assume horimetro? 
+                 // Melhor: Seguir o que foi preenchido na ordem ou o padrão do veículo.
+                 // Simplificação: Se veio confirmedReading, e o veículo usa horímetro, atualiza horímetro.
+                 if (order.horimetro || (!order.odometro && !order.horimetro)) { // Se ordem tinha horímetro ou nada
+                     vehicleUpdateData.horimetro = confirmedReading;
+                     orderUpdateData.horimetro = confirmedReading;
+                 } else {
+                     vehicleUpdateData.odometro = confirmedReading;
+                     orderUpdateData.odometro = confirmedReading;
+                 }
+            } else {
+                // Padrão (Leves, Trecho)
+                vehicleUpdateData.odometro = confirmedReading;
+                orderUpdateData.odometro = confirmedReading;
+            }
+        }
+
+        // 3. Atualiza a Ordem
+        await connection.execute('UPDATE refuelings SET status = ?, litrosAbastecidos = ?, litrosAbastecidosArla = ?, pricePerLiter = ?, confirmedBy = ?, ? WHERE id = ?', [
             'Concluída',
             litrosAbastecidos,
             litrosAbastecidosArla,
+            pricePerLiter || null,
             JSON.stringify(confirmedBy),
+            orderUpdateData, // Espalha campos de leitura atualizados
             id
         ]);
         
-        await createOrUpdateWeeklyFuelExpense({ connection, obraId: order.obraId, date: order.data, fuelType: order.fuelType, partnerName: order.partnerName, valueChange: litrosAbastecidos * 1 });
+        // 4. Atualiza o Veículo
+        if (Object.keys(vehicleUpdateData).length > 0) {
+            await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, order.vehicleId]);
+        }
 
-        const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [order.vehicleId]);
-        const vehicle = parseVehicleJsonFields(vehicleRows[0]);
-        const vehicleUpdateData = {};
-        if (order.odometro) vehicleUpdateData.odometro = order.odometro;
-        if (order.horimetro) vehicleUpdateData.horimetro = order.horimetro;
-        if (order.horimetroDigital) vehicleUpdateData.horimetroDigital = order.horimetroDigital;
-        if (order.horimetroAnalogico) vehicleUpdateData.horimetroAnalogico = order.horimetroAnalogico;
-        await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, order.vehicleId]);
+        // 5. Gera Despesa (Financeiro)
+        // Busca nome do parceiro para registro na despesa (se não estiver na ordem)
+        let partnerName = order.partnerName;
+        if (!partnerName) {
+            const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [order.partnerId]);
+            if (pRows.length > 0) partnerName = pRows[0].razaoSocial;
+        }
+
+        const valorTotal = (parseFloat(litrosAbastecidos) * parseFloat(pricePerLiter || 0));
+        
+        if (valorTotal > 0 && order.obraId) {
+             await createOrUpdateWeeklyFuelExpense({ 
+                 connection, 
+                 obraId: order.obraId, 
+                 date: order.data, 
+                 fuelType: order.fuelType, 
+                 partnerName: partnerName || 'Posto Desconhecido', 
+                 valueChange: valorTotal 
+             });
+        }
         
         await connection.commit();
         res.status(200).json({ message: 'Abastecimento confirmado com sucesso.' });
@@ -204,9 +277,27 @@ const deleteRefuelingOrder = async (req, res) => {
 
     try {
         const [refuelingRows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
+        if (refuelingRows.length === 0) {
+             await connection.rollback();
+             return res.status(404).json({ error: 'Ordem não encontrada' });
+        }
+        
         const refueling = parseRefuelingJsonFields(refuelingRows[0]);
+        
+        // Estorno da Despesa se já foi concluída
         if (refueling.status === 'Concluída') {
-            await createOrUpdateWeeklyFuelExpense({ connection, obraId: refueling.obraId, date: refueling.data, fuelType: refueling.fuelType, partnerName: refueling.partnerName, valueChange: -refueling.litrosAbastecidos * 1 });
+            const valorTotal = (parseFloat(refueling.litrosAbastecidos) * parseFloat(refueling.pricePerLiter || 0));
+            if (valorTotal > 0 && refueling.obraId) {
+                // Passa valor negativo para subtrair
+                await createOrUpdateWeeklyFuelExpense({ 
+                    connection, 
+                    obraId: refueling.obraId, 
+                    date: refueling.data, 
+                    fuelType: refueling.fuelType, 
+                    partnerName: refueling.partnerName || 'Posto', 
+                    valueChange: -valorTotal 
+                });
+            }
         }
         await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
         await connection.commit();
