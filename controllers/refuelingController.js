@@ -164,7 +164,7 @@ const updateRefuelingOrder = async (req, res) => {
 };
 
 
-// --- ROTA: Confirmar um abastecimento em aberto (CRÍTICO: ATUALIZA VEÍCULO E PREÇO) ---
+// --- CONFIRMAR ABASTECIMENTO (CRÍTICO: ATUALIZA VEÍCULO) ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
     const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy } = req.body;
@@ -174,75 +174,83 @@ const confirmRefuelingOrder = async (req, res) => {
     try {
         // 1. Busca a Ordem
         const [orderRows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
-        const order = parseRefuelingJsonFields(orderRows[0]);
+        if (orderRows.length === 0) throw new Error('Ordem não encontrada.');
+        const order = orderRows[0];
 
-        if (!order) {
-            await connection.rollback();
-            return res.status(404).json({ error: 'Ordem de abastecimento não encontrada.' });
-        }
-        if (order.status !== 'Aberta') {
-            await connection.rollback();
-            return res.status(400).json({ error: 'Ordem já foi confirmada.' });
-        }
-
-        // 2. Busca o Veículo para saber qual campo atualizar (Regra 5)
+        // 2. Busca o Veículo para determinar qual campo atualizar
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [order.vehicleId]);
         const vehicle = vehicleRows[0];
         
-        // Define qual campo de leitura atualizar no veículo e na ordem (se não foi preenchido na emissão)
         const vehicleUpdateData = {};
         const orderUpdateData = {};
 
-        // Se o usuário informou uma leitura confirmada no modal
+        // Regra 5: Atualização Inteligente de Leitura
         if (confirmedReading) {
-            // Lógica para decidir qual campo atualizar baseada no veículo
-            // Prioridade: Digital > Analógico > Horímetro Genérico > Odômetro
+            // Se for máquina com horímetro digital
             if (vehicle.possuiHorimetroDigital) {
                 vehicleUpdateData.horimetroDigital = confirmedReading;
+                // Atualiza também o horímetro genérico para cálculos simplificados
+                vehicleUpdateData.horimetro = confirmedReading; 
                 orderUpdateData.horimetroDigital = confirmedReading;
-            } else if (vehicle.possuiHorimetroAnalogico) {
+            } 
+            // Se for máquina com analógico apenas
+            else if (vehicle.possuiHorimetroAnalogico) {
                 vehicleUpdateData.horimetroAnalogico = confirmedReading;
+                vehicleUpdateData.horimetro = confirmedReading;
                 orderUpdateData.horimetroAnalogico = confirmedReading;
-            } else if (vehicle.tipo === 'Caminhão' || vehicle.tipo.includes('Caminhão')) { // Ajuste conforme seus tipos exatos
-                 // Caminhões podem ter horimetro ou odometro. Se a leitura for pequena (< 200000 e vehicle for caminhao pesado), assume horimetro? 
-                 // Melhor: Seguir o que foi preenchido na ordem ou o padrão do veículo.
-                 // Simplificação: Se veio confirmedReading, e o veículo usa horímetro, atualiza horímetro.
-                 if (order.horimetro || (!order.odometro && !order.horimetro)) { // Se ordem tinha horímetro ou nada
+            } 
+            // Se for caminhão (geralmente prioriza Odômetro, mas a regra do usuário pediu distinção)
+            else if (vehicle.tipo === 'Caminhão' || vehicle.mediaCalculo === 'horimetro') {
+                if(vehicle.mediaCalculo === 'horimetro') {
                      vehicleUpdateData.horimetro = confirmedReading;
                      orderUpdateData.horimetro = confirmedReading;
-                 } else {
+                } else {
                      vehicleUpdateData.odometro = confirmedReading;
                      orderUpdateData.odometro = confirmedReading;
-                 }
-            } else {
-                // Padrão (Leves, Trecho)
+                }
+            } 
+            // Veículos Leves / Trecho (Padrão Odômetro)
+            else {
                 vehicleUpdateData.odometro = confirmedReading;
                 orderUpdateData.odometro = confirmedReading;
             }
         }
 
         // 3. Atualiza a Ordem
-        await connection.execute('UPDATE refuelings SET status = ?, litrosAbastecidos = ?, litrosAbastecidosArla = ?, pricePerLiter = ?, confirmedBy = ?, ? WHERE id = ?', [
-            'Concluída',
+        await connection.execute(`
+            UPDATE refuelings SET 
+                status = 'Concluída', 
+                litrosAbastecidos = ?, 
+                litrosAbastecidosArla = ?, 
+                pricePerLiter = ?, 
+                confirmedBy = ?,
+                odometro = COALESCE(?, odometro),
+                horimetro = COALESCE(?, horimetro),
+                horimetroDigital = COALESCE(?, horimetroDigital),
+                horimetroAnalogico = COALESCE(?, horimetroAnalogico)
+            WHERE id = ?
+        `, [
             litrosAbastecidos,
-            litrosAbastecidosArla,
+            litrosAbastecidosArla || 0,
             pricePerLiter || null,
             JSON.stringify(confirmedBy),
-            orderUpdateData, // Espalha campos de leitura atualizados
+            orderUpdateData.odometro || null,
+            orderUpdateData.horimetro || null,
+            orderUpdateData.horimetroDigital || null,
+            orderUpdateData.horimetroAnalogico || null,
             id
         ]);
         
         // 4. Atualiza o Veículo
         if (Object.keys(vehicleUpdateData).length > 0) {
-            await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, order.vehicleId]);
+            await connection.query('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, order.vehicleId]);
         }
 
-        // 5. Gera Despesa (Financeiro)
-        // Busca nome do parceiro para registro na despesa (se não estiver na ordem)
+        // 5. Gera Despesa Financeira
         let partnerName = order.partnerName;
         if (!partnerName) {
-            const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [order.partnerId]);
-            if (pRows.length > 0) partnerName = pRows[0].razaoSocial;
+            const [p] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [order.partnerId]);
+            if (p.length) partnerName = p[0].razaoSocial;
         }
 
         const valorTotal = (parseFloat(litrosAbastecidos) * parseFloat(pricePerLiter || 0));
@@ -253,7 +261,7 @@ const confirmRefuelingOrder = async (req, res) => {
                  obraId: order.obraId, 
                  date: order.data, 
                  fuelType: order.fuelType, 
-                 partnerName: partnerName || 'Posto Desconhecido', 
+                 partnerName: partnerName || 'Posto Externo', 
                  valueChange: valorTotal 
              });
         }
@@ -262,8 +270,8 @@ const confirmRefuelingOrder = async (req, res) => {
         res.status(200).json({ message: 'Abastecimento confirmado com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao confirmar abastecimento:', error);
-        res.status(500).json({ error: 'Falha ao confirmar o abastecimento.' });
+        console.error('Erro ao confirmar:', error);
+        res.status(500).json({ error: error.message });
     } finally {
         connection.release();
     }
