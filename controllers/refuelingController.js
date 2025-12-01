@@ -1,132 +1,150 @@
 // controllers/refuelingController.js
 const db = require('../database');
 const { createOrUpdateWeeklyFuelExpense } = require('./expenseController');
-const { parseVehicleJsonFields } = require('./vehicleController');
 
-// --- Função Auxiliar para Conversão de JSON com Tratamento de Erro (parseJsonSafe) ---
-const parseJsonSafe = (field, key) => {
-    if (field === null || typeof field === 'undefined') return null;
-    if (typeof field === 'object') return field; 
-    if (typeof field !== 'string') return field;
+// --- HELPER: Conversão Numérica Segura para MySQL ---
+// O MySQL Strict Mode rejeita '' para campos Decimal/Int. Isso converte '' ou NaN para null ou 0.
+const safeNum = (val, returnZero = false) => {
+    if (val === null || typeof val === 'undefined' || val === '') {
+        return returnZero ? 0 : null;
+    }
+    const num = parseFloat(val);
+    return isNaN(num) ? (returnZero ? 0 : null) : num;
+};
 
+// --- HELPER: Parse JSON Seguro ---
+const parseJsonSafe = (field) => {
+    if (!field) return null;
+    if (typeof field === 'object') return field;
     try {
-        const parsed = JSON.parse(field);
-        if (typeof parsed === 'object' && parsed !== null) {
-            return parsed;
-        }
-        return null; 
+        return JSON.parse(field);
     } catch (e) {
-        console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'. Valor problemático:`, field);
-        return null; 
+        return null;
     }
 };
 
-// --- Função Auxiliar para Conversão de JSON ---
-const parseRefuelingJsonFields = (refueling) => {
-    if (!refueling) return null;
-    const newRefueling = { ...refueling };
-    
-    newRefueling.createdBy = parseJsonSafe(newRefueling.createdBy, 'createdBy');
-    newRefueling.confirmedBy = parseJsonSafe(newRefueling.confirmedBy, 'confirmedBy');
-    newRefueling.editedBy = parseJsonSafe(newRefueling.editedBy, 'editedBy');
-
-    return newRefueling;
+// --- HELPER: Formatação de Resposta ---
+const parseRefuelingRows = (rows) => {
+    return rows.map(row => ({
+        ...row,
+        createdBy: parseJsonSafe(row.createdBy),
+        confirmedBy: parseJsonSafe(row.confirmedBy),
+        editedBy: parseJsonSafe(row.editedBy),
+        // Garante que números venham como números do banco (driver mysql2 às vezes devolve string para decimal)
+        litrosAbastecidos: row.litrosAbastecidos ? parseFloat(row.litrosAbastecidos) : 0,
+        pricePerLiter: row.pricePerLiter ? parseFloat(row.pricePerLiter) : 0,
+        outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
+    }));
 };
 
-// --- READ: Obter todas as ordens de abastecimento ---
+// --- READ: Obter todas as ordens ---
 const getAllRefuelings = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM refuelings');
-        res.json(rows.map(parseRefuelingJsonFields));
+        const [rows] = await db.execute('SELECT * FROM refuelings ORDER BY id DESC');
+        res.json(parseRefuelingRows(rows));
     } catch (error) {
         console.error('Erro ao buscar abastecimentos:', error);
         res.status(500).json({ error: 'Erro ao buscar abastecimentos' });
     }
 };
 
-// --- READ: Obter uma única ordem por ID ---
+// --- READ: Obter por ID ---
 const getRefuelingById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM refuelings WHERE id = ?', [req.params.id]);
-        if (rows.length === 0) {
-            return res.status(404).json({ error: 'Abastecimento não encontrado' });
-        }
-        res.json(parseRefuelingJsonFields(rows[0]));
+        if (rows.length === 0) return res.status(404).json({ error: 'Abastecimento não encontrado' });
+        res.json(parseRefuelingRows(rows)[0]);
     } catch (error) {
         console.error('Erro ao buscar abastecimento:', error);
         res.status(500).json({ error: 'Erro ao buscar abastecimento' });
     }
 };
 
-// --- CREATE: Criar uma nova ordem de abastecimento ---
+// --- CREATE: Criar Ordem ---
 const createRefuelingOrder = async (req, res) => {
     const data = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
+        // Gerador de Número de Autorização Sequencial
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
         const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
 
-        // Prepara objeto para inserção
+        // Sanitização de Data: Garante ISO 8601
+        let dataAbastecimento = new Date();
+        if (data.date) {
+             // Corrige datas strings legadas se necessário
+             const dateStr = data.date.toString().includes('T') ? data.date : `${data.date}T12:00:00`;
+             dataAbastecimento = new Date(dateStr);
+        }
+
         const refuelingData = {
-            ...data,
             authNumber: newAuthNumber,
-            data: new Date(data.data),
-            createdBy: JSON.stringify(data.createdBy),
+            vehicleId: data.vehicleId,
+            partnerId: data.partnerId,
+            partnerName: data.partnerName, // Fallback se não tiver ID
+            employeeId: data.employeeId,
+            obraId: safeNum(data.obraId) ? data.obraId : null, // Se for string vazia, null
+            fuelType: data.fuelType,
+            data: dataAbastecimento,
+            status: data.status || 'Aberta',
+            
+            // Flags Booleanas (MySQL usa 1/0)
+            isFillUp: data.isFillUp ? 1 : 0,
+            needsArla: data.needsArla ? 1 : 0,
+            isFillUpArla: data.isFillUpArla ? 1 : 0,
+            outrosGeraValor: data.outrosGeraValor ? 1 : 0,
+            
+            // Campos Numéricos Sanitizados (Evita erro 500 por string vazia)
+            litrosLiberados: safeNum(data.litrosLiberados, true),
+            litrosLiberadosArla: safeNum(data.litrosLiberadosArla, true),
+            odometro: safeNum(data.odometro),
+            horimetro: safeNum(data.horimetro),
+            horimetroDigital: safeNum(data.horimetroDigital),
+            horimetroAnalogico: safeNum(data.horimetroAnalogico),
+            outrosValor: safeNum(data.outrosValor, true),
+            
+            // Campos de Texto/JSON
+            outros: data.outros || null,
+            createdBy: JSON.stringify(data.createdBy || {}),
             confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
-            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
-            // Garante campos numéricos
-            odometro: data.odometro || null,
-            horimetro: data.horimetro || null,
-            horimetroDigital: data.horimetroDigital || null,
-            horimetroAnalogico: data.horimetroAnalogico || null,
-            // Novos campos
-            outrosValor: data.outrosValor || 0,
-            outrosGeraValor: data.outrosGeraValor ? 1 : 0 // MySQL boolean
+            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null
         };
 
-        await connection.execute('INSERT INTO refuelings SET ?', [refuelingData]);
+        // Query Dinâmica Segura
+        const fields = Object.keys(refuelingData);
+        const values = Object.values(refuelingData);
+        const placeholders = fields.map(() => '?').join(', ');
+        
+        await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
-        // Se já nascer concluída (cenário raro, mas possível via API direta)
+        // Lógica para ordens já nascidas "Concluídas" (Raro, mas possível)
         if (refuelingData.status === 'Concluída') {
-            const vehicleUpdateData = {};
-            // Atualiza leitura do veículo
-            if (refuelingData.odometro) vehicleUpdateData.odometro = refuelingData.odometro;
-            if (refuelingData.horimetro) vehicleUpdateData.horimetro = refuelingData.horimetro;
-            if (refuelingData.horimetroDigital) vehicleUpdateData.horimetroDigital = refuelingData.horimetroDigital;
-            if (refuelingData.horimetroAnalogico) vehicleUpdateData.horimetroAnalogico = refuelingData.horimetroAnalogico;
+            const vehicleUpdate = {};
+            if (refuelingData.odometro) vehicleUpdate.odometro = refuelingData.odometro;
+            if (refuelingData.horimetro) vehicleUpdate.horimetro = refuelingData.horimetro;
+            if (refuelingData.horimetroDigital) vehicleUpdate.horimetroDigital = refuelingData.horimetroDigital;
             
-            if (Object.keys(vehicleUpdateData).length > 0) {
-                await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, refuelingData.vehicleId]);
+            if (Object.keys(vehicleUpdate).length > 0) {
+                const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
+                await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), refuelingData.vehicleId]);
             }
-
-            // Gera despesa incluindo Outros Valor
-            const valorTotal = (refuelingData.litrosAbastecidos || 0) * (refuelingData.pricePerLiter || 0) + (parseFloat(refuelingData.outrosValor) || 0);
-            
-            await createOrUpdateWeeklyFuelExpense({ 
-                connection, 
-                obraId: refuelingData.obraId, 
-                date: refuelingData.data, 
-                fuelType: refuelingData.fuelType, 
-                partnerName: refuelingData.partnerName, 
-                valueChange: valorTotal 
-            });
         }
-        
+
         await connection.commit();
-        res.status(201).json({ id: newAuthNumber, message: 'Ordem emitida com sucesso.', authNumber: newAuthNumber, status: 'Aberta' });
+        res.status(201).json({ id: newAuthNumber, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao criar ordem de abastecimento:', error);
-        res.status(500).json({ error: 'Falha ao criar ordem de abastecimento.' });
+        console.error('Erro CREATE refueling:', error);
+        res.status(500).json({ error: 'Falha ao criar ordem: ' + error.message });
     } finally {
         connection.release();
     }
 };
 
-// --- UPDATE: Atualizar uma ordem existente ---
+// --- UPDATE: Atualizar Ordem ---
 const updateRefuelingOrder = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -134,202 +152,183 @@ const updateRefuelingOrder = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        const [originalRefuelingRows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
-        if (originalRefuelingRows.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ error: 'Ordem não encontrada.' });
-        }
+        // Sanitização parcial (Update dinâmico)
+        const updateData = {};
         
-        const refuelingUpdateData = {
-            ...data,
-            data: data.data ? new Date(data.data) : undefined,
-            confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : undefined,
-            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : undefined,
-            outrosGeraValor: data.outrosGeraValor ? 1 : 0
-        };
+        if (data.date) updateData.data = new Date(data.date.toString().replace(' ', 'T'));
+        if (data.editedBy) updateData.editedBy = JSON.stringify(data.editedBy);
+        if (data.status) updateData.status = data.status;
         
-        // Remove undefined keys
-        Object.keys(refuelingUpdateData).forEach(key => refuelingUpdateData[key] === undefined && delete refuelingUpdateData[key]);
+        // Numéricos
+        if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
+        if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
+        if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
+        
+        // Remove chaves undefined
+        Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
 
-        await connection.execute('UPDATE refuelings SET ? WHERE id = ?', [refuelingUpdateData, id]);
-        
+        if (Object.keys(updateData).length > 0) {
+            const setClause = Object.keys(updateData).map(k => `${k} = ?`).join(', ');
+            await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
+        }
+
         await connection.commit();
-        res.status(200).json({ message: 'Ordem atualizada com sucesso.', authNumber: originalRefuelingRows[0].authNumber });
+        res.json({ message: 'Ordem atualizada.' });
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao atualizar ordem:', error);
-        res.status(500).json({ error: 'Falha ao atualizar a ordem.' });
+        console.error('Erro UPDATE refueling:', error);
+        res.status(500).json({ error: 'Falha ao atualizar ordem.' });
     } finally {
         connection.release();
     }
 };
 
-
-// --- ROTA: Confirmar um abastecimento em aberto (CRÍTICO: ATUALIZA VEÍCULO, PREÇO E PARCEIRO) ---
+// --- CONFIRM: Confirmar Abastecimento (CRÍTICO: PREÇOS E INTEGRIDADE) ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
-    const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy, outrosValor } = req.body; 
+    const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy, outrosValor } = req.body;
+    
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        // 1. Busca a Ordem
-        const [orderRows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
-        const order = parseRefuelingJsonFields(orderRows[0]);
-
-        if (!order) {
+        // 1. Busca Ordem e Lock
+        const [orders] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
+        if (orders.length === 0) {
             await connection.rollback();
-            return res.status(404).json({ error: 'Ordem de abastecimento não encontrada.' });
+            return res.status(404).json({ error: 'Ordem não encontrada.' });
         }
-        if (order.status !== 'Aberta') {
-            await connection.rollback();
-            return res.status(400).json({ error: 'Ordem já foi confirmada.' });
-        }
+        const order = orders[0];
 
-        // 2. Busca o Veículo
-        const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [order.vehicleId]);
-        const vehicle = vehicleRows[0];
+        // 2. Determina atualização do Veículo
+        const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
+        const vehicle = vehicles[0];
         
-        // 3. Atualiza o Veículo (Leituras)
-        const vehicleUpdateData = {};
-        const orderUpdateData = {};
+        const vehicleUpdate = {};
+        const readingVal = safeNum(confirmedReading);
 
-        if (confirmedReading) {
+        if (readingVal) {
             if (vehicle.possuiHorimetroDigital) {
-                vehicleUpdateData.horimetroDigital = confirmedReading;
-                vehicleUpdateData.horimetro = confirmedReading; 
-                orderUpdateData.horimetroDigital = confirmedReading;
+                vehicleUpdate.horimetroDigital = readingVal;
+                vehicleUpdate.horimetro = readingVal; // Mantém sincrono
             } else if (vehicle.possuiHorimetroAnalogico) {
-                vehicleUpdateData.horimetroAnalogico = confirmedReading;
-                vehicleUpdateData.horimetro = confirmedReading;
-                orderUpdateData.horimetroAnalogico = confirmedReading;
-            } else if (vehicle.tipo === 'Caminhão' || vehicle.mediaCalculo === 'horimetro') { 
-                 if (order.horimetro || (!order.odometro && !order.horimetro)) { 
-                     vehicleUpdateData.horimetro = confirmedReading;
-                     orderUpdateData.horimetro = confirmedReading;
-                 } else {
-                     vehicleUpdateData.odometro = confirmedReading;
-                     orderUpdateData.odometro = confirmedReading;
-                 }
-            } else {
-                vehicleUpdateData.odometro = confirmedReading;
-                orderUpdateData.odometro = confirmedReading;
-            }
-        }
-
-        // 4. Atualiza a Ordem
-        await connection.execute('UPDATE refuelings SET status = ?, litrosAbastecidos = ?, litrosAbastecidosArla = ?, pricePerLiter = ?, confirmedBy = ?, outrosValor = ?, ? WHERE id = ?', [
-            'Concluída',
-            litrosAbastecidos,
-            litrosAbastecidosArla,
-            pricePerLiter || null,
-            JSON.stringify(confirmedBy),
-            outrosValor || 0,
-            orderUpdateData, 
-            id
-        ]);
-        
-        if (Object.keys(vehicleUpdateData).length > 0) {
-            await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, order.vehicleId]);
-        }
-
-        // 5. ATUALIZAR PREÇO DO COMBUSTÍVEL NO PARCEIRO (NOVO)
-        if (order.partnerId && pricePerLiter > 0 && order.fuelType) {
-            // Busca o parceiro atual
-            const [partnerRows] = await connection.execute('SELECT fuel_prices FROM partners WHERE id = ?', [order.partnerId]);
-            
-            if (partnerRows.length > 0) {
-                let currentPrices = {};
-                try {
-                    // Tenta parsear o JSON existente, se não, cria objeto vazio
-                    currentPrices = typeof partnerRows[0].fuel_prices === 'string' 
-                        ? JSON.parse(partnerRows[0].fuel_prices) 
-                        : (partnerRows[0].fuel_prices || {});
-                } catch (e) {
-                    currentPrices = {};
+                vehicleUpdate.horimetroAnalogico = readingVal;
+                vehicleUpdate.horimetro = readingVal;
+            } else if (vehicle.tipo === 'Caminhão' || vehicle.mediaCalculo === 'horimetro') {
+                // Caminhões: Usa horimetro se a ordem foi pedida em horimetro ou se o veículo usa hr
+                if (order.horimetro || (!order.odometro && !order.horimetro)) {
+                     vehicleUpdate.horimetro = readingVal;
+                } else {
+                     vehicleUpdate.odometro = readingVal;
                 }
-
-                // Atualiza o preço apenas do combustível específico
-                currentPrices[order.fuelType] = parseFloat(pricePerLiter);
-
-                // Salva de volta no banco
-                await connection.execute('UPDATE partners SET fuel_prices = ? WHERE id = ?', [
-                    JSON.stringify(currentPrices),
-                    order.partnerId
-                ]);
+            } else {
+                vehicleUpdate.odometro = readingVal;
             }
         }
 
-        // 6. Gera Despesa (Financeiro)
-        let partnerName = order.partnerName;
-        if (!partnerName) {
-            const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [order.partnerId]);
-            if (pRows.length > 0) partnerName = pRows[0].razaoSocial;
+        // 3. Atualiza Veículo
+        if (Object.keys(vehicleUpdate).length > 0) {
+            const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
+            await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), order.vehicleId]);
         }
 
-        const valorCombustivel = (parseFloat(litrosAbastecidos) * parseFloat(pricePerLiter || 0));
-        const valorExtra = parseFloat(outrosValor || 0);
-        const valorTotal = valorCombustivel + valorExtra;
-        
+        // 4. Atualiza Tabela de Preços do Parceiro (CORREÇÃO DA MIGRAÇÃO)
+        // Usa INSERT ON DUPLICATE KEY UPDATE na tabela relacional 'partner_fuel_prices'
+        const safePrice = safeNum(pricePerLiter, true);
+        if (order.partnerId && safePrice > 0 && order.fuelType) {
+            const priceQuery = `
+                INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
+                VALUES (?, ?, ?) 
+                ON DUPLICATE KEY UPDATE price = VALUES(price)
+            `;
+            await connection.execute(priceQuery, [order.partnerId, order.fuelType, safePrice]);
+        }
+
+        // 5. Atualiza a Ordem para Concluída
+        // Atualizamos também a leitura na ordem para ficar igual à confirmada (histórico imutável)
+        const orderUpdate = {
+            status: 'Concluída',
+            litrosAbastecidos: safeNum(litrosAbastecidos, true),
+            litrosAbastecidosArla: safeNum(litrosAbastecidosArla, true),
+            pricePerLiter: safePrice,
+            confirmedBy: JSON.stringify(confirmedBy),
+            outrosValor: safeNum(outrosValor, true),
+            // Salva a leitura confirmada no campo correto da ordem para relatórios futuros
+            ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
+            ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
+            ...(vehicleUpdate.horimetroDigital ? { horimetroDigital: vehicleUpdate.horimetroDigital } : {}),
+        };
+
+        const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
+        await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
+
+        // 6. Lança Despesa Financeira
+        const valorTotal = (orderUpdate.litrosAbastecidos * orderUpdate.pricePerLiter) + orderUpdate.outrosValor;
         if (valorTotal > 0 && order.obraId) {
-             await createOrUpdateWeeklyFuelExpense({ 
-                 connection, 
-                 obraId: order.obraId, 
-                 date: order.data, 
-                 fuelType: order.fuelType, 
-                 partnerName: partnerName || 'Posto Desconhecido', 
-                 valueChange: valorTotal 
+             let pName = order.partnerName;
+             if (!pName && order.partnerId) {
+                 const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [order.partnerId]);
+                 if (pRows[0]) pName = pRows[0].razaoSocial;
+             }
+             
+             await createOrUpdateWeeklyFuelExpense({
+                 connection,
+                 obraId: order.obraId,
+                 date: order.data, // Data da ordem
+                 fuelType: order.fuelType,
+                 partnerName: pName || 'Posto Externo',
+                 valueChange: valorTotal
              });
         }
-        
+
         await connection.commit();
-        res.status(200).json({ message: 'Abastecimento confirmado com sucesso.' });
+        res.json({ message: 'Abastecimento confirmado com sucesso.' });
+
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao confirmar abastecimento:', error);
-        res.status(500).json({ error: 'Falha ao confirmar o abastecimento.' });
+        console.error('Erro CONFIRM refueling:', error);
+        res.status(500).json({ error: 'Erro ao confirmar: ' + error.message });
     } finally {
         connection.release();
     }
 };
 
-// --- DELETE: Deletar uma ordem de abastecimento ---
+// --- DELETE ---
 const deleteRefuelingOrder = async (req, res) => {
     const { id } = req.params;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        const [refuelingRows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
-        if (refuelingRows.length === 0) {
+        const [rows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
+        if (rows.length === 0) {
              await connection.rollback();
              return res.status(404).json({ error: 'Ordem não encontrada' });
         }
-        
-        const refueling = parseRefuelingJsonFields(refuelingRows[0]);
-        
-        // Estorno da Despesa se já foi concluída
-        if (refueling.status === 'Concluída') {
-            const valorTotal = (parseFloat(refueling.litrosAbastecidos) * parseFloat(refueling.pricePerLiter || 0)) + (parseFloat(refueling.outrosValor) || 0);
-            if (valorTotal > 0 && refueling.obraId) {
-                // Passa valor negativo para subtrair
-                await createOrUpdateWeeklyFuelExpense({ 
-                    connection, 
-                    obraId: refueling.obraId, 
-                    date: refueling.data, 
-                    fuelType: refueling.fuelType, 
-                    partnerName: refueling.partnerName || 'Posto', 
-                    valueChange: -valorTotal 
-                });
+        const ref = rows[0];
+
+        // Estorno Financeiro
+        if (ref.status === 'Concluída' && ref.obraId) {
+            const valor = (parseFloat(ref.litrosAbastecidos || 0) * parseFloat(ref.pricePerLiter || 0)) + parseFloat(ref.outrosValor || 0);
+            if (valor > 0) {
+                 await createOrUpdateWeeklyFuelExpense({
+                     connection,
+                     obraId: ref.obraId,
+                     date: ref.data,
+                     fuelType: ref.fuelType,
+                     partnerName: ref.partnerName || 'Posto',
+                     valueChange: -valor // Negativo para estornar
+                 });
             }
         }
+
         await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
         await connection.commit();
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao deletar ordem de abastecimento:', error);
-        res.status(500).json({ error: 'Erro ao deletar ordem de abastecimento' });
+        console.error('Erro DELETE refueling:', error);
+        res.status(500).json({ error: 'Erro ao deletar ordem.' });
     } finally {
         connection.release();
     }
