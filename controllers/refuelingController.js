@@ -165,10 +165,10 @@ const updateRefuelingOrder = async (req, res) => {
 };
 
 
-// --- ROTA: Confirmar um abastecimento em aberto (CRÍTICO: ATUALIZA VEÍCULO E PREÇO) ---
+// --- ROTA: Confirmar um abastecimento em aberto (CRÍTICO: ATUALIZA VEÍCULO, PREÇO E PARCEIRO) ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
-    const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy, outrosValor } = req.body; // Add outrosValor
+    const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy, outrosValor } = req.body; 
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
@@ -186,19 +186,17 @@ const confirmRefuelingOrder = async (req, res) => {
             return res.status(400).json({ error: 'Ordem já foi confirmada.' });
         }
 
-        // 2. Busca o Veículo para saber qual campo atualizar (Regra 5)
+        // 2. Busca o Veículo
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [order.vehicleId]);
         const vehicle = vehicleRows[0];
         
-        // Define qual campo de leitura atualizar no veículo e na ordem (se não foi preenchido na emissão)
+        // 3. Atualiza o Veículo (Leituras)
         const vehicleUpdateData = {};
         const orderUpdateData = {};
 
-        // Se o usuário informou uma leitura confirmada no modal
         if (confirmedReading) {
             if (vehicle.possuiHorimetroDigital) {
                 vehicleUpdateData.horimetroDigital = confirmedReading;
-                // Atualiza também o horímetro genérico para cálculos simplificados de média se necessário
                 vehicleUpdateData.horimetro = confirmedReading; 
                 orderUpdateData.horimetroDigital = confirmedReading;
             } else if (vehicle.possuiHorimetroAnalogico) {
@@ -219,31 +217,56 @@ const confirmRefuelingOrder = async (req, res) => {
             }
         }
 
-        // 3. Atualiza a Ordem
+        // 4. Atualiza a Ordem
         await connection.execute('UPDATE refuelings SET status = ?, litrosAbastecidos = ?, litrosAbastecidosArla = ?, pricePerLiter = ?, confirmedBy = ?, outrosValor = ?, ? WHERE id = ?', [
             'Concluída',
             litrosAbastecidos,
             litrosAbastecidosArla,
             pricePerLiter || null,
             JSON.stringify(confirmedBy),
-            outrosValor || 0, // Salva o valor extra
+            outrosValor || 0,
             orderUpdateData, 
             id
         ]);
         
-        // 4. Atualiza o Veículo
         if (Object.keys(vehicleUpdateData).length > 0) {
             await connection.execute('UPDATE vehicles SET ? WHERE id = ?', [vehicleUpdateData, order.vehicleId]);
         }
 
-        // 5. Gera Despesa (Financeiro)
+        // 5. ATUALIZAR PREÇO DO COMBUSTÍVEL NO PARCEIRO (NOVO)
+        if (order.partnerId && pricePerLiter > 0 && order.fuelType) {
+            // Busca o parceiro atual
+            const [partnerRows] = await connection.execute('SELECT fuel_prices FROM partners WHERE id = ?', [order.partnerId]);
+            
+            if (partnerRows.length > 0) {
+                let currentPrices = {};
+                try {
+                    // Tenta parsear o JSON existente, se não, cria objeto vazio
+                    currentPrices = typeof partnerRows[0].fuel_prices === 'string' 
+                        ? JSON.parse(partnerRows[0].fuel_prices) 
+                        : (partnerRows[0].fuel_prices || {});
+                } catch (e) {
+                    currentPrices = {};
+                }
+
+                // Atualiza o preço apenas do combustível específico
+                currentPrices[order.fuelType] = parseFloat(pricePerLiter);
+
+                // Salva de volta no banco
+                await connection.execute('UPDATE partners SET fuel_prices = ? WHERE id = ?', [
+                    JSON.stringify(currentPrices),
+                    order.partnerId
+                ]);
+            }
+        }
+
+        // 6. Gera Despesa (Financeiro)
         let partnerName = order.partnerName;
         if (!partnerName) {
             const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [order.partnerId]);
             if (pRows.length > 0) partnerName = pRows[0].razaoSocial;
         }
 
-        // Soma combustível + valor extra
         const valorCombustivel = (parseFloat(litrosAbastecidos) * parseFloat(pricePerLiter || 0));
         const valorExtra = parseFloat(outrosValor || 0);
         const valorTotal = valorCombustivel + valorExtra;
