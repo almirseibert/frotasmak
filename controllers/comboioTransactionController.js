@@ -2,6 +2,10 @@
 const db = require('../database');
 const { createOrUpdateWeeklyFuelExpense } = require('./expenseController');
 const { parseJsonSafe } = require('../utils/parseJsonSafe');
+const crypto = require('crypto'); // Para gerar UUIDs se necessário
+
+// Função auxiliar para garantir que undefined vire null (para o MySQL)
+const sanitize = (value) => (value === undefined ? null : value);
 
 const getAllComboioTransactions = async (req, res) => {
     try {
@@ -45,7 +49,7 @@ const deleteTransaction = async (req, res) => {
                 'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
                 [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
             );
-            // Reverte despesa (valor negativo)
+            // Reverte a despesa (valor negativo)
             await createOrUpdateWeeklyFuelExpense({
                 connection,
                 obraId: transaction.obraId,
@@ -102,7 +106,7 @@ const createEntradaTransaction = async (req, res) => {
         const partnerName = partnerRows[0]?.razaoSocial || 'Parceiro Desconhecido';
 
         const transactionData = {
-            id: req.body.id,
+            id: req.body.id || crypto.randomUUID(), // Gera ID se não vier no body
             type: 'entrada',
             date: new Date(date),
             comboioVehicleId,
@@ -112,10 +116,10 @@ const createEntradaTransaction = async (req, res) => {
             liters: parseFloat(liters),
             fuelType,
             valorTotal,
-            responsibleUserEmail: createdBy?.userEmail, // Uso seguro de createdBy
-            odometro,
-            horimetro,
-            employeeId,
+            responsibleUserEmail: sanitize(createdBy?.userEmail),
+            odometro: sanitize(odometro),
+            horimetro: sanitize(horimetro),
+            employeeId: sanitize(employeeId),
         };
         
         const fields = Object.keys(transactionData);
@@ -130,7 +134,7 @@ const createEntradaTransaction = async (req, res) => {
         );
         
         if(odometro || horimetro) {
-            await connection.execute('UPDATE vehicles SET odometro = ?, horimetro = ? WHERE id = ?', [odometro, horimetro, comboioVehicleId]);
+            await connection.execute('UPDATE vehicles SET odometro = ?, horimetro = ? WHERE id = ?', [sanitize(odometro), sanitize(horimetro), comboioVehicleId]);
         }
         
         if (price > 0) {
@@ -138,7 +142,7 @@ const createEntradaTransaction = async (req, res) => {
         }
 
         await connection.commit();
-        res.status(201).json({ message: 'Entrada registrada com sucesso.', refuelingOrder: { authNumber: 0, litrosAbastecidos: liters } }); // Mock de retorno para PDF
+        res.status(201).json({ message: 'Entrada registrada com sucesso.', refuelingOrder: { authNumber: 0, litrosAbastecidos: liters } });
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao registrar entrada:', error);
@@ -155,22 +159,22 @@ const createSaidaTransaction = async (req, res) => {
 
     try {
         const [comboioRows] = await connection.execute('SELECT fuelLevels FROM vehicles WHERE id = ?', [comboioVehicleId]);
-        // Lógica de verificação de saldo pode ser relaxada se o frontend já valida
+        // Verificação de saldo opcional aqui, já que o frontend valida, mas bom manter try/catch
         
         const transactionData = {
-            id: req.body.id,
+            id: req.body.id || crypto.randomUUID(), // Gera ID se necessário
             type: 'saida',
             date: new Date(date),
             comboioVehicleId,
             receivingVehicleId,
             obraId,
-            employeeId,
+            employeeId: sanitize(employeeId),
             liters: parseFloat(liters),
             fuelType,
-            responsibleUserEmail: createdBy?.userEmail,
-            odometro, 
-            horimetro,
-            horimetroDigital
+            responsibleUserEmail: sanitize(createdBy?.userEmail),
+            odometro: sanitize(odometro), 
+            horimetro: sanitize(horimetro),
+            horimetroDigital: sanitize(horimetroDigital)
         };
         
         const fields = Object.keys(transactionData);
@@ -185,9 +189,9 @@ const createSaidaTransaction = async (req, res) => {
         );
         
         const vehicleUpdateData = {};
-        if (odometro) vehicleUpdateData.odometro = parseFloat(odometro);
-        if (horimetro) vehicleUpdateData.horimetro = parseFloat(horimetro);
-        if (horimetroDigital) vehicleUpdateData.horimetroDigital = parseFloat(horimetroDigital);
+        if (odometro !== undefined) vehicleUpdateData.odometro = parseFloat(odometro);
+        if (horimetro !== undefined) vehicleUpdateData.horimetro = parseFloat(horimetro);
+        if (horimetroDigital !== undefined) vehicleUpdateData.horimetroDigital = parseFloat(horimetroDigital);
 
         if (Object.keys(vehicleUpdateData).length > 0) {
             const setClause = Object.keys(vehicleUpdateData).map(key => `${key} = ?`).join(', ');
@@ -213,15 +217,15 @@ const createDrenagemTransaction = async (req, res) => {
 
     try {
         const transactionData = {
-            id: req.body.id,
+            id: req.body.id || crypto.randomUUID(), // Gera ID se necessário
             type: 'drenagem',
             date: new Date(date),
             comboioVehicleId,
             drainingVehicleId,
             liters: parseFloat(liters),
             fuelType,
-            reason,
-            responsibleUserEmail: createdBy?.userEmail,
+            reason: sanitize(reason),
+            responsibleUserEmail: sanitize(createdBy?.userEmail),
         };
 
         const fields = Object.keys(transactionData);
@@ -264,32 +268,55 @@ const updateTransaction = async (req, res) => {
         if (oldRows.length === 0) throw new Error("Transação não encontrada");
         const oldData = oldRows[0];
 
-        // 2. Reverte efeito da antiga
+        // 2. Reverte efeito da antiga (Simplificado para litros apenas)
+        // Para uma implementação completa, deveríamos reverter despesas também se mudou algo crítico
+        
+        // Reverte Entrada
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
-        } else if (oldData.type === 'saida') {
+        } 
+        // Reverte Saída
+        else if (oldData.type === 'saida') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
-        } else if (oldData.type === 'drenagem') {
-            // Reverte drenagem (tira do comboio, devolve ao veículo)
+        } 
+        // Reverte Drenagem
+        else if (oldData.type === 'drenagem') {
+            // Tira do comboio (que recebeu), devolve ao veículo (que drenou)
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.drainingVehicleId]);
         }
 
         // 3. Aplica efeito da nova
         const newLiters = parseFloat(newData.liters);
+        // Aplica Entrada Nova
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
-        } else if (oldData.type === 'saida') {
+        } 
+        // Aplica Saída Nova
+        else if (oldData.type === 'saida') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
-        } else if (oldData.type === 'drenagem') {
+        } 
+        // Aplica Drenagem Nova
+        else if (oldData.type === 'drenagem') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.drainingVehicleId]);
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
         }
 
-        // 4. Atualiza registro
+        // 4. Atualiza registro na tabela
+        // Nota: partnerId ou oldData.partnerId garante que se newData não trouxer o campo, mantemos o antigo
         await connection.execute(
             'UPDATE comboio_transactions SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, odometro = ?, horimetro = ? WHERE id = ?',
-            [newLiters, new Date(newData.date), newData.fuelType, newData.partnerId || oldData.partnerId, newData.employeeId || oldData.employeeId, newData.obraId || oldData.obraId, newData.odometro, newData.horimetro, id]
+            [
+                newLiters, 
+                new Date(newData.date), 
+                newData.fuelType, 
+                sanitize(newData.partnerId) || oldData.partnerId, 
+                sanitize(newData.employeeId) || oldData.employeeId, 
+                sanitize(newData.obraId) || oldData.obraId, 
+                sanitize(newData.odometro) || oldData.odometro, 
+                sanitize(newData.horimetro) || oldData.horimetro, 
+                id
+            ]
         );
 
         await connection.commit();
@@ -310,5 +337,5 @@ module.exports = {
     createEntradaTransaction,
     createSaidaTransaction,
     createDrenagemTransaction,
-    updateTransaction // Adicionado
+    updateTransaction
 };
