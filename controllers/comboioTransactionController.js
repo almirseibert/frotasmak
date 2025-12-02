@@ -4,8 +4,15 @@ const { createOrUpdateWeeklyFuelExpense } = require('./expenseController');
 const { parseJsonSafe } = require('../utils/parseJsonSafe');
 const crypto = require('crypto'); // Para gerar UUIDs se necessário
 
-// Função auxiliar para garantir que undefined vire null (para o MySQL)
-const sanitize = (value) => (value === undefined ? null : value);
+// Função auxiliar para strings/IDs: converte undefined ou string vazia para NULL
+const sanitize = (value) => (value === undefined || value === '' ? null : value);
+
+// Função auxiliar para números: converte undefined, string vazia ou inválidos para NULL
+const sanitizeNumber = (value) => {
+    if (value === undefined || value === null || value === '') return null;
+    const number = parseFloat(value);
+    return isNaN(number) ? null : number;
+};
 
 const getAllComboioTransactions = async (req, res) => {
     try {
@@ -100,25 +107,26 @@ const createEntradaTransaction = async (req, res) => {
         );
 
         const price = (priceRows.length > 0 && priceRows[0].price) ? parseFloat(priceRows[0].price) : 0;
-        const valorTotal = parseFloat(liters) * price;
+        const safeLiters = sanitizeNumber(liters) || 0;
+        const valorTotal = safeLiters * price;
 
         const [partnerRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
         const partnerName = partnerRows[0]?.razaoSocial || 'Parceiro Desconhecido';
 
         const transactionData = {
-            id: req.body.id || crypto.randomUUID(), // Gera ID se não vier no body
+            id: req.body.id || crypto.randomUUID(),
             type: 'entrada',
             date: new Date(date),
             comboioVehicleId,
             partnerId,
             partnerName,
             obraId,
-            liters: parseFloat(liters),
+            liters: safeLiters,
             fuelType,
             valorTotal,
             responsibleUserEmail: sanitize(createdBy?.userEmail),
-            odometro: sanitize(odometro),
-            horimetro: sanitize(horimetro),
+            odometro: sanitizeNumber(odometro),
+            horimetro: sanitizeNumber(horimetro),
             employeeId: sanitize(employeeId),
         };
         
@@ -130,11 +138,23 @@ const createEntradaTransaction = async (req, res) => {
         
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
-            [`$.${fuelType}`, `$.${fuelType}`, parseFloat(liters), comboioVehicleId]
+            [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
         
-        if(odometro || horimetro) {
-            await connection.execute('UPDATE vehicles SET odometro = ?, horimetro = ? WHERE id = ?', [sanitize(odometro), sanitize(horimetro), comboioVehicleId]);
+        // Atualiza leituras do comboio apenas se informadas
+        const odo = sanitizeNumber(odometro);
+        const hor = sanitizeNumber(horimetro);
+        if(odo !== null || hor !== null) {
+            // Constrói query dinâmica para atualizar apenas o que foi passado
+            let updateQuery = 'UPDATE vehicles SET ';
+            const updateParams = [];
+            if (odo !== null) { updateQuery += 'odometro = ?, '; updateParams.push(odo); }
+            if (hor !== null) { updateQuery += 'horimetro = ?, '; updateParams.push(hor); }
+            
+            updateQuery = updateQuery.slice(0, -2) + ' WHERE id = ?'; // Remove última vírgula
+            updateParams.push(comboioVehicleId);
+            
+            await connection.execute(updateQuery, updateParams);
         }
         
         if (price > 0) {
@@ -142,7 +162,7 @@ const createEntradaTransaction = async (req, res) => {
         }
 
         await connection.commit();
-        res.status(201).json({ message: 'Entrada registrada com sucesso.', refuelingOrder: { authNumber: 0, litrosAbastecidos: liters } });
+        res.status(201).json({ message: 'Entrada registrada com sucesso.', refuelingOrder: { authNumber: 0, litrosAbastecidos: safeLiters } });
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao registrar entrada:', error);
@@ -159,22 +179,23 @@ const createSaidaTransaction = async (req, res) => {
 
     try {
         const [comboioRows] = await connection.execute('SELECT fuelLevels FROM vehicles WHERE id = ?', [comboioVehicleId]);
-        // Verificação de saldo opcional aqui, já que o frontend valida, mas bom manter try/catch
         
+        const safeLiters = sanitizeNumber(liters) || 0;
+
         const transactionData = {
-            id: req.body.id || crypto.randomUUID(), // Gera ID se necessário
+            id: req.body.id || crypto.randomUUID(),
             type: 'saida',
             date: new Date(date),
             comboioVehicleId,
             receivingVehicleId,
             obraId,
             employeeId: sanitize(employeeId),
-            liters: parseFloat(liters),
+            liters: safeLiters,
             fuelType,
             responsibleUserEmail: sanitize(createdBy?.userEmail),
-            odometro: sanitize(odometro), 
-            horimetro: sanitize(horimetro),
-            horimetroDigital: sanitize(horimetroDigital)
+            odometro: sanitizeNumber(odometro), 
+            horimetro: sanitizeNumber(horimetro),
+            horimetroDigital: sanitizeNumber(horimetroDigital)
         };
         
         const fields = Object.keys(transactionData);
@@ -185,13 +206,18 @@ const createSaidaTransaction = async (req, res) => {
 
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
-            [`$.${fuelType}`, `$.${fuelType}`, parseFloat(liters), comboioVehicleId]
+            [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
         
+        // Atualiza leituras do veículo recebedor
         const vehicleUpdateData = {};
-        if (odometro !== undefined) vehicleUpdateData.odometro = parseFloat(odometro);
-        if (horimetro !== undefined) vehicleUpdateData.horimetro = parseFloat(horimetro);
-        if (horimetroDigital !== undefined) vehicleUpdateData.horimetroDigital = parseFloat(horimetroDigital);
+        const safeOdo = sanitizeNumber(odometro);
+        const safeHor = sanitizeNumber(horimetro);
+        const safeHorDig = sanitizeNumber(horimetroDigital);
+
+        if (safeOdo !== null) vehicleUpdateData.odometro = safeOdo;
+        if (safeHor !== null) vehicleUpdateData.horimetro = safeHor;
+        if (safeHorDig !== null) vehicleUpdateData.horimetroDigital = safeHorDig;
 
         if (Object.keys(vehicleUpdateData).length > 0) {
             const setClause = Object.keys(vehicleUpdateData).map(key => `${key} = ?`).join(', ');
@@ -200,7 +226,7 @@ const createSaidaTransaction = async (req, res) => {
         }
         
         await connection.commit();
-        res.status(201).json({ message: 'Saída registrada com sucesso.', refuelingOrder: { authNumber: 0, litrosAbastecidos: liters } });
+        res.status(201).json({ message: 'Saída registrada com sucesso.', refuelingOrder: { authNumber: 0, litrosAbastecidos: safeLiters } });
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao registrar saída:', error);
@@ -216,13 +242,15 @@ const createDrenagemTransaction = async (req, res) => {
     await connection.beginTransaction();
 
     try {
+        const safeLiters = sanitizeNumber(liters) || 0;
+
         const transactionData = {
-            id: req.body.id || crypto.randomUUID(), // Gera ID se necessário
+            id: req.body.id || crypto.randomUUID(),
             type: 'drenagem',
             date: new Date(date),
             comboioVehicleId,
             drainingVehicleId,
-            liters: parseFloat(liters),
+            liters: safeLiters,
             fuelType,
             reason: sanitize(reason),
             responsibleUserEmail: sanitize(createdBy?.userEmail),
@@ -236,12 +264,12 @@ const createDrenagemTransaction = async (req, res) => {
 
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
-            [`$.${fuelType}`, `$.${fuelType}`, parseFloat(liters), drainingVehicleId]
+            [`$.${fuelType}`, `$.${fuelType}`, safeLiters, drainingVehicleId]
         );
         
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
-            [`$.${fuelType}`, `$.${fuelType}`, parseFloat(liters), comboioVehicleId]
+            [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
 
         await connection.commit();
@@ -263,47 +291,32 @@ const updateTransaction = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        // 1. Busca transação antiga
         const [oldRows] = await connection.execute('SELECT * FROM comboio_transactions WHERE id = ?', [id]);
         if (oldRows.length === 0) throw new Error("Transação não encontrada");
         const oldData = oldRows[0];
 
-        // 2. Reverte efeito da antiga (Simplificado para litros apenas)
-        // Para uma implementação completa, deveríamos reverter despesas também se mudou algo crítico
-        
-        // Reverte Entrada
+        // Reverte efeito da antiga
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
-        } 
-        // Reverte Saída
-        else if (oldData.type === 'saida') {
+        } else if (oldData.type === 'saida') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
-        } 
-        // Reverte Drenagem
-        else if (oldData.type === 'drenagem') {
-            // Tira do comboio (que recebeu), devolve ao veículo (que drenou)
+        } else if (oldData.type === 'drenagem') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.drainingVehicleId]);
         }
 
-        // 3. Aplica efeito da nova
-        const newLiters = parseFloat(newData.liters);
-        // Aplica Entrada Nova
+        // Aplica efeito da nova
+        const newLiters = sanitizeNumber(newData.liters) || 0;
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
-        } 
-        // Aplica Saída Nova
-        else if (oldData.type === 'saida') {
+        } else if (oldData.type === 'saida') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
-        } 
-        // Aplica Drenagem Nova
-        else if (oldData.type === 'drenagem') {
+        } else if (oldData.type === 'drenagem') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.drainingVehicleId]);
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
         }
 
-        // 4. Atualiza registro na tabela
-        // Nota: partnerId ou oldData.partnerId garante que se newData não trouxer o campo, mantemos o antigo
+        // Atualiza registro
         await connection.execute(
             'UPDATE comboio_transactions SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, odometro = ?, horimetro = ? WHERE id = ?',
             [
@@ -313,8 +326,8 @@ const updateTransaction = async (req, res) => {
                 sanitize(newData.partnerId) || oldData.partnerId, 
                 sanitize(newData.employeeId) || oldData.employeeId, 
                 sanitize(newData.obraId) || oldData.obraId, 
-                sanitize(newData.odometro) || oldData.odometro, 
-                sanitize(newData.horimetro) || oldData.horimetro, 
+                sanitizeNumber(newData.odometro) || oldData.odometro, 
+                sanitizeNumber(newData.horimetro) || oldData.horimetro, 
                 id
             ]
         );
