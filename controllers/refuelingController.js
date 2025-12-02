@@ -1,6 +1,7 @@
 // controllers/refuelingController.js
 const db = require('../database');
 const { createOrUpdateWeeklyFuelExpense } = require('./expenseController');
+const crypto = require('crypto'); // Necessário para gerar o ID
 
 // --- HELPER: Conversão Numérica Segura para MySQL ---
 // O MySQL Strict Mode rejeita '' para campos Decimal/Int. Isso converte '' ou NaN para null ou 0.
@@ -69,11 +70,14 @@ const createRefuelingOrder = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        // Gerador de Número de Autorização Sequencial
+        // 1. Gera ID Único (UUID) pois o banco não é Auto Increment no ID
+        const id = crypto.randomUUID();
+
+        // 2. Gerador de Número de Autorização Sequencial
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
         const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
 
-        // Sanitização de Data: Garante ISO 8601 (Fix Safari/Legacy)
+        // 3. Sanitização de Data
         let dataAbastecimento = new Date();
         if (data.date) {
              const dateStr = data.date.toString().includes('T') ? data.date : `${data.date}T12:00:00`;
@@ -81,6 +85,7 @@ const createRefuelingOrder = async (req, res) => {
         }
 
         const refuelingData = {
+            id: id, // Adicionado o ID gerado
             authNumber: newAuthNumber,
             vehicleId: data.vehicleId,
             partnerId: data.partnerId,
@@ -95,7 +100,7 @@ const createRefuelingOrder = async (req, res) => {
             isFillUp: data.isFillUp ? 1 : 0,
             needsArla: data.needsArla ? 1 : 0,
             isFillUpArla: data.isFillUpArla ? 1 : 0,
-            // HABILITADO: Agora salva a flag corretamente
+            // HABILITADO: Coluna existe no SQL enviado
             outrosGeraValor: data.outrosGeraValor ? 1 : 0,
             
             // Campos Numéricos Sanitizados
@@ -122,7 +127,8 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
         await connection.commit();
-        res.status(201).json({ id: newAuthNumber, message: 'Ordem emitida.', authNumber: newAuthNumber });
+        // Retorna o ID real (UUID) e o número de autorização
+        res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
         console.error('Erro CREATE refueling:', error);
@@ -259,7 +265,6 @@ const confirmRefuelingOrder = async (req, res) => {
         await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
 
         // 6. Lança Despesa Financeira
-        // Soma o valor de combustível + o valor de "Outros" (se houver)
         const valorTotal = (orderUpdate.litrosAbastecidos * orderUpdate.pricePerLiter) + orderUpdate.outrosValor;
         if (valorTotal > 0 && order.obraId) {
              let pName = order.partnerName;
