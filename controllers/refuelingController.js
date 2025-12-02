@@ -30,7 +30,7 @@ const parseRefuelingRows = (rows) => {
         createdBy: parseJsonSafe(row.createdBy),
         confirmedBy: parseJsonSafe(row.confirmedBy),
         editedBy: parseJsonSafe(row.editedBy),
-        // Garante que números venham como números do banco (driver mysql2 às vezes devolve string para decimal)
+        // Garante que números venham como números do banco
         litrosAbastecidos: row.litrosAbastecidos ? parseFloat(row.litrosAbastecidos) : 0,
         pricePerLiter: row.pricePerLiter ? parseFloat(row.pricePerLiter) : 0,
         outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
@@ -71,10 +71,10 @@ const createRefuelingOrder = async (req, res) => {
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
         const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
 
-        // Sanitização de Data: Garante ISO 8601
+        // Sanitização de Data: Garante ISO 8601 (Fix Safari/Legacy)
         let dataAbastecimento = new Date();
         if (data.date) {
-             // Corrige datas strings legadas se necessário
+             // Se vier apenas data (YYYY-MM-DD), adiciona hora fixa para evitar flutuação de timezone
              const dateStr = data.date.toString().includes('T') ? data.date : `${data.date}T12:00:00`;
              dataAbastecimento = new Date(dateStr);
         }
@@ -83,9 +83,9 @@ const createRefuelingOrder = async (req, res) => {
             authNumber: newAuthNumber,
             vehicleId: data.vehicleId,
             partnerId: data.partnerId,
-            partnerName: data.partnerName, // Fallback se não tiver ID
+            partnerName: data.partnerName,
             employeeId: data.employeeId,
-            obraId: safeNum(data.obraId) ? data.obraId : null, // Se for string vazia, null
+            obraId: safeNum(data.obraId) ? data.obraId : null,
             fuelType: data.fuelType,
             data: dataAbastecimento,
             status: data.status || 'Aberta',
@@ -112,7 +112,6 @@ const createRefuelingOrder = async (req, res) => {
             editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null
         };
 
-        // Query Dinâmica Segura
         const fields = Object.keys(refuelingData);
         const values = Object.values(refuelingData);
         const placeholders = fields.map(() => '?').join(', ');
@@ -120,7 +119,7 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
-        // Lógica para ordens já nascidas "Concluídas" (Raro, mas possível)
+        // Lógica para ordens já nascidas "Concluídas" (se houver necessidade futura)
         if (refuelingData.status === 'Concluída') {
             const vehicleUpdate = {};
             if (refuelingData.odometro) vehicleUpdate.odometro = refuelingData.odometro;
@@ -152,19 +151,25 @@ const updateRefuelingOrder = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        // Sanitização parcial (Update dinâmico)
         const updateData = {};
         
-        if (data.date) updateData.data = new Date(data.date.toString().replace(' ', 'T'));
+        // Sanitização Data
+        if (data.date) {
+            const dateStr = data.date.toString().replace(' ', 'T');
+            updateData.data = new Date(dateStr);
+        }
         if (data.editedBy) updateData.editedBy = JSON.stringify(data.editedBy);
         if (data.status) updateData.status = data.status;
         
-        // Numéricos
+        // Numéricos Seguros
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
         if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
         if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
-        
-        // Remove chaves undefined
+        if (data.horimetroDigital !== undefined) updateData.horimetroDigital = safeNum(data.horimetroDigital);
+        if (data.horimetroAnalogico !== undefined) updateData.horimetroAnalogico = safeNum(data.horimetroAnalogico);
+        if (data.outrosValor !== undefined) updateData.outrosValor = safeNum(data.outrosValor, true);
+
+        // Remove undefined
         Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
 
         if (Object.keys(updateData).length > 0) {
@@ -210,12 +215,11 @@ const confirmRefuelingOrder = async (req, res) => {
         if (readingVal) {
             if (vehicle.possuiHorimetroDigital) {
                 vehicleUpdate.horimetroDigital = readingVal;
-                vehicleUpdate.horimetro = readingVal; // Mantém sincrono
+                vehicleUpdate.horimetro = readingVal; // Sync
             } else if (vehicle.possuiHorimetroAnalogico) {
                 vehicleUpdate.horimetroAnalogico = readingVal;
                 vehicleUpdate.horimetro = readingVal;
             } else if (vehicle.tipo === 'Caminhão' || vehicle.mediaCalculo === 'horimetro') {
-                // Caminhões: Usa horimetro se a ordem foi pedida em horimetro ou se o veículo usa hr
                 if (order.horimetro || (!order.odometro && !order.horimetro)) {
                      vehicleUpdate.horimetro = readingVal;
                 } else {
@@ -233,7 +237,6 @@ const confirmRefuelingOrder = async (req, res) => {
         }
 
         // 4. Atualiza Tabela de Preços do Parceiro (CORREÇÃO DA MIGRAÇÃO)
-        // Usa INSERT ON DUPLICATE KEY UPDATE na tabela relacional 'partner_fuel_prices'
         const safePrice = safeNum(pricePerLiter, true);
         if (order.partnerId && safePrice > 0 && order.fuelType) {
             const priceQuery = `
@@ -245,7 +248,6 @@ const confirmRefuelingOrder = async (req, res) => {
         }
 
         // 5. Atualiza a Ordem para Concluída
-        // Atualizamos também a leitura na ordem para ficar igual à confirmada (histórico imutável)
         const orderUpdate = {
             status: 'Concluída',
             litrosAbastecidos: safeNum(litrosAbastecidos, true),
@@ -253,7 +255,7 @@ const confirmRefuelingOrder = async (req, res) => {
             pricePerLiter: safePrice,
             confirmedBy: JSON.stringify(confirmedBy),
             outrosValor: safeNum(outrosValor, true),
-            // Salva a leitura confirmada no campo correto da ordem para relatórios futuros
+            // Salva a leitura confirmada no histórico da ordem para garantir cálculo de média
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
             ...(vehicleUpdate.horimetroDigital ? { horimetroDigital: vehicleUpdate.horimetroDigital } : {}),
@@ -274,7 +276,7 @@ const confirmRefuelingOrder = async (req, res) => {
              await createOrUpdateWeeklyFuelExpense({
                  connection,
                  obraId: order.obraId,
-                 date: order.data, // Data da ordem
+                 date: order.data,
                  fuelType: order.fuelType,
                  partnerName: pName || 'Posto Externo',
                  valueChange: valorTotal
