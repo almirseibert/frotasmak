@@ -34,6 +34,8 @@ const parseRefuelingRows = (rows) => {
         litrosAbastecidos: row.litrosAbastecidos ? parseFloat(row.litrosAbastecidos) : 0,
         pricePerLiter: row.pricePerLiter ? parseFloat(row.pricePerLiter) : 0,
         outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
+        // Garante booleano para o checkbox
+        outrosGeraValor: !!row.outrosGeraValor 
     }));
 };
 
@@ -74,7 +76,6 @@ const createRefuelingOrder = async (req, res) => {
         // Sanitização de Data: Garante ISO 8601 (Fix Safari/Legacy)
         let dataAbastecimento = new Date();
         if (data.date) {
-             // Se vier apenas data (YYYY-MM-DD), adiciona hora fixa para evitar flutuação de timezone
              const dateStr = data.date.toString().includes('T') ? data.date : `${data.date}T12:00:00`;
              dataAbastecimento = new Date(dateStr);
         }
@@ -83,10 +84,10 @@ const createRefuelingOrder = async (req, res) => {
             authNumber: newAuthNumber,
             vehicleId: data.vehicleId,
             partnerId: data.partnerId,
-            partnerName: data.partnerName,
-            employeeId: data.employeeId,
+            partnerName: data.partnerName || null,
+            employeeId: data.employeeId || null,
             obraId: safeNum(data.obraId) ? data.obraId : null,
-            fuelType: data.fuelType,
+            fuelType: data.fuelType || null,
             data: dataAbastecimento,
             status: data.status || 'Aberta',
             
@@ -94,9 +95,10 @@ const createRefuelingOrder = async (req, res) => {
             isFillUp: data.isFillUp ? 1 : 0,
             needsArla: data.needsArla ? 1 : 0,
             isFillUpArla: data.isFillUpArla ? 1 : 0,
+            // HABILITADO: Agora salva a flag corretamente
             outrosGeraValor: data.outrosGeraValor ? 1 : 0,
             
-            // Campos Numéricos Sanitizados (Evita erro 500 por string vazia)
+            // Campos Numéricos Sanitizados
             litrosLiberados: safeNum(data.litrosLiberados, true),
             litrosLiberadosArla: safeNum(data.litrosLiberadosArla, true),
             odometro: safeNum(data.odometro),
@@ -118,19 +120,6 @@ const createRefuelingOrder = async (req, res) => {
         
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
-
-        // Lógica para ordens já nascidas "Concluídas" (se houver necessidade futura)
-        if (refuelingData.status === 'Concluída') {
-            const vehicleUpdate = {};
-            if (refuelingData.odometro) vehicleUpdate.odometro = refuelingData.odometro;
-            if (refuelingData.horimetro) vehicleUpdate.horimetro = refuelingData.horimetro;
-            if (refuelingData.horimetroDigital) vehicleUpdate.horimetroDigital = refuelingData.horimetroDigital;
-            
-            if (Object.keys(vehicleUpdate).length > 0) {
-                const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
-                await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), refuelingData.vehicleId]);
-            }
-        }
 
         await connection.commit();
         res.status(201).json({ id: newAuthNumber, message: 'Ordem emitida.', authNumber: newAuthNumber });
@@ -168,6 +157,12 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.horimetroDigital !== undefined) updateData.horimetroDigital = safeNum(data.horimetroDigital);
         if (data.horimetroAnalogico !== undefined) updateData.horimetroAnalogico = safeNum(data.horimetroAnalogico);
         if (data.outrosValor !== undefined) updateData.outrosValor = safeNum(data.outrosValor, true);
+        
+        // Proteção contra undefined em campos string e booleanos
+        if (data.partnerName !== undefined) updateData.partnerName = data.partnerName || null;
+        if (data.fuelType !== undefined) updateData.fuelType = data.fuelType || null;
+        if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
+        if (data.outros !== undefined) updateData.outros = data.outros || null;
 
         // Remove undefined
         Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
@@ -188,7 +183,7 @@ const updateRefuelingOrder = async (req, res) => {
     }
 };
 
-// --- CONFIRM: Confirmar Abastecimento (CRÍTICO: PREÇOS E INTEGRIDADE) ---
+// --- CONFIRM: Confirmar Abastecimento ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
     const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy, outrosValor } = req.body;
@@ -236,7 +231,7 @@ const confirmRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), order.vehicleId]);
         }
 
-        // 4. Atualiza Tabela de Preços do Parceiro (CORREÇÃO DA MIGRAÇÃO)
+        // 4. Atualiza Tabela de Preços do Parceiro
         const safePrice = safeNum(pricePerLiter, true);
         if (order.partnerId && safePrice > 0 && order.fuelType) {
             const priceQuery = `
@@ -255,7 +250,6 @@ const confirmRefuelingOrder = async (req, res) => {
             pricePerLiter: safePrice,
             confirmedBy: JSON.stringify(confirmedBy),
             outrosValor: safeNum(outrosValor, true),
-            // Salva a leitura confirmada no histórico da ordem para garantir cálculo de média
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
             ...(vehicleUpdate.horimetroDigital ? { horimetroDigital: vehicleUpdate.horimetroDigital } : {}),
@@ -265,6 +259,7 @@ const confirmRefuelingOrder = async (req, res) => {
         await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
 
         // 6. Lança Despesa Financeira
+        // Soma o valor de combustível + o valor de "Outros" (se houver)
         const valorTotal = (orderUpdate.litrosAbastecidos * orderUpdate.pricePerLiter) + orderUpdate.outrosValor;
         if (valorTotal > 0 && order.obraId) {
              let pName = order.partnerName;
@@ -319,7 +314,7 @@ const deleteRefuelingOrder = async (req, res) => {
                      date: ref.data,
                      fuelType: ref.fuelType,
                      partnerName: ref.partnerName || 'Posto',
-                     valueChange: -valor // Negativo para estornar
+                     valueChange: -valor 
                  });
             }
         }
