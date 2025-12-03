@@ -13,21 +13,26 @@ const sanitizeNumber = (value) => {
 };
 
 // --- FUNÇÃO AUXILIAR: Gerenciar Despesa Mensal Agrupada ---
-// Verifica se existe despesa no mês para a obra/combustível e soma o valor, senão cria.
-const manageMonthlyExpense = async ({ connection, obraId, date, fuelType, valueChange }) => {
+const manageMonthlyExpense = async ({ connection, obraId, obraName, date, fuelType, valueChange }) => {
     if (!obraId || !fuelType || valueChange === 0) return;
 
     const expenseDate = new Date(date);
-    const month = expenseDate.getMonth() + 1; // 1-12
+    const month = expenseDate.getMonth() + 1;
     const year = expenseDate.getFullYear();
-    const formattedDate = expenseDate.toISOString().slice(0, 10); // YYYY-MM-DD para salvar data de referência
+    // Data de referência: dia 1º do mês para facilitar agrupamento
+    const referenceDate = new Date(year, month - 1, 1).toISOString().slice(0, 10); 
+    
+    const mesExtenso = expenseDate.toLocaleString('pt-BR', { month: 'long' });
+    const capitalizedMonth = mesExtenso.charAt(0).toUpperCase() + mesExtenso.slice(1);
+    const formattedFuel = fuelType === 'dieselS10' ? 'Diesel S10' : (fuelType === 'dieselComum' ? 'Diesel Comum' : fuelType);
 
-    // Tenta encontrar despesa existente para este Mês, Ano, Obra e Combustível
+    // Tenta encontrar despesa existente para este Mês, Ano, Obra e Combustível (Agrupado)
     const [existingExpenses] = await connection.execute(
         `SELECT id, amount FROM expenses 
          WHERE obraId = ? 
          AND fuelType = ? 
          AND category = 'Combustível' 
+         AND expenseType = 'Automático'
          AND MONTH(createdAt) = ? 
          AND YEAR(createdAt) = ? 
          LIMIT 1`,
@@ -35,7 +40,7 @@ const manageMonthlyExpense = async ({ connection, obraId, date, fuelType, valueC
     );
 
     if (existingExpenses.length > 0) {
-        // Atualiza existente
+        // Atualiza soma
         const expense = existingExpenses[0];
         const newAmount = parseFloat(expense.amount) + valueChange;
         
@@ -44,20 +49,20 @@ const manageMonthlyExpense = async ({ connection, obraId, date, fuelType, valueC
             [newAmount, expense.id]
         );
     } else {
-        // Cria nova despesa mensal agrupada
-        const description = `Abastecimentos Comboio - ${fuelType} - ${month.toString().padStart(2, '0')}/${year}`;
+        // Cria novo agrupamento
+        // Descrição conforme solicitado: Combustível: {Tipo} - Comboio - {Obra} ({Mês}/{Ano})
+        const description = `Combustível: ${formattedFuel} - Comboio - ${obraName || 'Obra'} (${capitalizedMonth}/${year})`;
         const newId = crypto.randomUUID();
         
         await connection.execute(
             `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, fuelType, expenseType) 
              VALUES (?, ?, ?, ?, 'Combustível', ?, ?, 'Automático')`,
-            [newId, obraId, description, valueChange, formattedDate, fuelType]
+            [newId, obraId, description, valueChange, referenceDate, fuelType]
         );
     }
 };
 
 // --- FUNÇÃO AUXILIAR: Obter Preço Médio ---
-// Calcula o preço médio do combustível baseando-se nos preços cadastrados nos parceiros
 const getAverageFuelPrice = async (connection, fuelType) => {
     const [rows] = await connection.execute(
         'SELECT AVG(price) as avgPrice FROM partner_fuel_prices WHERE fuelType = ? AND price > 0',
@@ -66,6 +71,7 @@ const getAverageFuelPrice = async (connection, fuelType) => {
     return rows[0].avgPrice ? parseFloat(rows[0].avgPrice) : 0;
 };
 
+// --- CRUD ---
 
 const getAllComboioTransactions = async (req, res) => {
     try {
@@ -102,14 +108,12 @@ const deleteTransaction = async (req, res) => {
 
         // Reverte Estoque e Despesas
         if (transaction.type === 'entrada') {
-            // Tira do comboio
             await connection.execute(
                 'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
                 [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
             );
             // Reverte despesa de entrada (pagamento ao posto)
-            if (transaction.valorTotal) {
-                // Usa a lógica original de despesa semanal/diária para entradas de posto externo
+            if (transaction.valorTotal > 0) {
                 await createOrUpdateWeeklyFuelExpense({
                     connection,
                     obraId: transaction.obraId,
@@ -120,28 +124,26 @@ const deleteTransaction = async (req, res) => {
                 });
             }
         } else if (transaction.type === 'saida') {
-            // Devolve ao comboio
             await connection.execute(
                 'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
                 [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
             );
             
-            // Reverte despesa da OBRA (Saída gera custo para obra)
-            // Precisamos calcular quanto valia na época ou usar o valor médio atual para estorno
+            // Reverte despesa da OBRA (Estorno do valor)
             const avgPrice = await getAverageFuelPrice(connection, transaction.fuelType);
             const valueToRevert = transaction.liters * avgPrice;
             
-            // Subtrai da despesa mensal da obra
             await manageMonthlyExpense({
                 connection,
                 obraId: transaction.obraId,
+                // Passa nome vazio ou genérico, pois se o registro já existe, o nome não é atualizado, só o valor
+                obraName: transaction.obraName, 
                 date: new Date(transaction.date),
                 fuelType: transaction.fuelType,
                 valueChange: -valueToRevert 
             });
 
         } else if (transaction.type === 'drenagem') {
-            // Devolve ao veículo, Tira do comboio
             await connection.execute(
                 'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
                 [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.drainingVehicleId]
@@ -182,6 +184,14 @@ const createEntradaTransaction = async (req, res) => {
         const [partnerRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
         const partnerName = partnerRows[0]?.razaoSocial || 'Parceiro Desconhecido';
 
+        // Busca nome da obra para registro
+        let obraName = 'Obra Desconhecida';
+        if (obraId) {
+            const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraId]);
+            if (obraRows.length > 0) obraName = obraRows[0].nome;
+            else if (['Administração', 'Oficina', 'Pátio', 'Rampa', 'Diversos'].includes(obraId)) obraName = obraId;
+        }
+
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
             type: 'entrada',
@@ -190,11 +200,12 @@ const createEntradaTransaction = async (req, res) => {
             partnerId,
             partnerName,
             obraId,
+            obraName, // Salva o nome da obra na transação para histórico
             liters: safeLiters,
             fuelType,
             valorTotal,
             responsibleUserEmail: sanitize(createdBy?.userEmail),
-            odometro: sanitizeNumber(odometro), // Pode vir null do front agora
+            odometro: sanitizeNumber(odometro),
             horimetro: sanitizeNumber(horimetro),
             employeeId: sanitize(employeeId),
         };
@@ -210,13 +221,7 @@ const createEntradaTransaction = async (req, res) => {
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
         
-        // Atualiza leituras se fornecidas (o front pode não mandar mais, mas mantemos suporte)
-        if(odometro || horimetro) {
-            await connection.execute('UPDATE vehicles SET odometro = ?, horimetro = ? WHERE id = ?', [sanitizeNumber(odometro), sanitizeNumber(horimetro), comboioVehicleId]);
-        }
-        
         if (price > 0) {
-            // Entrada gera despesa de pagamento ao posto (Lógica original mantida)
             await createOrUpdateWeeklyFuelExpense({ connection, obraId, date: new Date(date), fuelType, partnerName: partnerName, valueChange: valorTotal });
         }
 
@@ -239,13 +244,30 @@ const createSaidaTransaction = async (req, res) => {
     try {
         const safeLiters = sanitizeNumber(liters) || 0;
 
+        // Busca nome da obra para registro e despesa
+        let obraName = 'Obra Desconhecida';
+        if (obraId) {
+            const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraId]);
+            if (obraRows.length > 0) obraName = obraRows[0].nome;
+            else if (['Administração', 'Oficina', 'Pátio', 'Rampa', 'Diversos'].includes(obraId)) obraName = obraId;
+        }
+
+        // Busca nome do veículo recebedor para histórico
+        let receivingVehicleName = null;
+        if (receivingVehicleId) {
+            const [vRows] = await connection.execute('SELECT registroInterno FROM vehicles WHERE id = ?', [receivingVehicleId]);
+            if (vRows.length > 0) receivingVehicleName = vRows[0].registroInterno;
+        }
+
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
             type: 'saida',
             date: new Date(date),
             comboioVehicleId,
             receivingVehicleId,
+            receivingVehicleName, // Salva para histórico
             obraId,
+            obraName, // Salva para histórico
             employeeId: sanitize(employeeId),
             liters: safeLiters,
             fuelType,
@@ -261,7 +283,6 @@ const createSaidaTransaction = async (req, res) => {
         
         await connection.execute(`INSERT INTO comboio_transactions (${fields.join(', ')}) VALUES (${placeholders})`, values);
 
-        // Subtrai do Comboio
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
@@ -283,8 +304,7 @@ const createSaidaTransaction = async (req, res) => {
             await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...setValues, receivingVehicleId]);
         }
 
-        // --- GERAÇÃO DE DESPESA PARA A OBRA (NOVA LÓGICA) ---
-        // Calcula valor baseado no preço médio
+        // --- GERA DESPESA PARA A OBRA (Valor Médio) ---
         const avgPrice = await getAverageFuelPrice(connection, fuelType);
         const expenseValue = safeLiters * avgPrice;
 
@@ -292,6 +312,7 @@ const createSaidaTransaction = async (req, res) => {
             await manageMonthlyExpense({
                 connection,
                 obraId,
+                obraName,
                 date: new Date(date),
                 fuelType,
                 valueChange: expenseValue
@@ -310,12 +331,18 @@ const createSaidaTransaction = async (req, res) => {
 };
 
 const createDrenagemTransaction = async (req, res) => {
-    // Mesma lógica anterior, mas garantindo commit
     const { comboioVehicleId, drainingVehicleId, liters, date, fuelType, reason, createdBy } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
+        // Busca nome do veículo drenado
+        let drainingVehicleName = null;
+        if (drainingVehicleId) {
+            const [vRows] = await connection.execute('SELECT registroInterno FROM vehicles WHERE id = ?', [drainingVehicleId]);
+            if (vRows.length > 0) drainingVehicleName = vRows[0].registroInterno;
+        }
+
         const safeLiters = sanitizeNumber(liters) || 0;
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
@@ -323,6 +350,7 @@ const createDrenagemTransaction = async (req, res) => {
             date: new Date(date),
             comboioVehicleId,
             drainingVehicleId,
+            drainingVehicleName, // Salva para histórico
             liters: safeLiters,
             fuelType,
             reason: sanitize(reason),
@@ -366,28 +394,28 @@ const updateTransaction = async (req, res) => {
         if (oldRows.length === 0) throw new Error("Transação não encontrada");
         const oldData = oldRows[0];
 
-        // 1. Reversão dos Litros (Estoque)
-        // Se Entrada: Remove do comboio. Se Saída: Devolve ao comboio.
+        // 1. Reversão Estoque
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
         } else if (oldData.type === 'saida') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
         }
 
-        // 2. Reversão da Despesa (Apenas para Saída no momento, Entrada tem lógica diferente)
+        // 2. Reversão Despesa (Saída)
         if (oldData.type === 'saida') {
             const avgPriceOld = await getAverageFuelPrice(connection, oldData.fuelType);
             const valueToRevert = oldData.liters * avgPriceOld;
             await manageMonthlyExpense({
                 connection,
                 obraId: oldData.obraId,
+                // Não precisa passar nome para reversão
                 date: new Date(oldData.date),
                 fuelType: oldData.fuelType,
-                valueChange: -valueToRevert // Remove valor antigo
+                valueChange: -valueToRevert 
             });
         }
 
-        // 3. Aplicação dos Novos Litros (Estoque)
+        // 3. Aplicação Novo Estoque
         const newLiters = sanitizeNumber(newData.liters) || 0;
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
@@ -395,22 +423,31 @@ const updateTransaction = async (req, res) => {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
         }
 
-        // 4. Aplicação da Nova Despesa (Saída)
+        // 4. Aplicação Nova Despesa (Saída)
+        // Precisamos buscar o nome da nova obra se o ID mudou, para garantir descrição correta se for criado um novo registro
+        let newObraName = oldData.obraName;
+        if (newData.obraId && newData.obraId !== oldData.obraId) {
+             const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [newData.obraId]);
+             if (obraRows.length > 0) newObraName = obraRows[0].nome;
+             else if (['Administração', 'Oficina', 'Pátio', 'Rampa', 'Diversos'].includes(newData.obraId)) newObraName = newData.obraId;
+        }
+
         if (oldData.type === 'saida') {
             const avgPriceNew = await getAverageFuelPrice(connection, newData.fuelType);
             const valueToAdd = newLiters * avgPriceNew;
             await manageMonthlyExpense({
                 connection,
                 obraId: newData.obraId || oldData.obraId,
+                obraName: newObraName,
                 date: new Date(newData.date),
                 fuelType: newData.fuelType,
-                valueChange: valueToAdd // Adiciona novo valor
+                valueChange: valueToAdd 
             });
         }
 
-        // 5. Atualiza Registro Principal
+        // 5. Atualiza Registro
         await connection.execute(
-            'UPDATE comboio_transactions SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, odometro = ?, horimetro = ? WHERE id = ?',
+            'UPDATE comboio_transactions SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, obraName = ?, odometro = ?, horimetro = ? WHERE id = ?',
             [
                 newLiters, 
                 new Date(newData.date), 
@@ -418,6 +455,7 @@ const updateTransaction = async (req, res) => {
                 sanitize(newData.partnerId) || oldData.partnerId, 
                 sanitize(newData.employeeId) || oldData.employeeId, 
                 sanitize(newData.obraId) || oldData.obraId, 
+                newObraName, // Atualiza nome da obra
                 sanitizeNumber(newData.odometro) || oldData.odometro, 
                 sanitizeNumber(newData.horimetro) || oldData.horimetro, 
                 id
