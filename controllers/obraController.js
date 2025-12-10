@@ -23,7 +23,7 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
-    // Adicionado 'valoresPorTipo' na lista de campos para parsear na leitura
+    // Campos que são JSON no banco e precisam virar Objeto no JS
     const fieldsToParse = ['horasContratadasPorTipo', 'valoresPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
     fieldsToParse.forEach(field => {
         if (obra.hasOwnProperty(field)) {
@@ -118,20 +118,23 @@ const createObra = async (req, res) => {
     const data = { ...req.body };
     data.id = uuidv4();
 
-    // Limpeza de campos calculados/auxiliares
+    // Limpeza de campos calculados/auxiliares que não existem na tabela obras
     delete data.historicoVeiculos; 
     delete data.realizadoPorTipo;
     delete data.totalHorasRealizadas;
 
     // Stringify de campos JSON
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
-    if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo); // <--- CORREÇÃO: Stringify do novo campo
+    if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
     
+    // Tratamento de nulos
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
+    if (data.responsavel === '') data.responsavel = null;
+    if (data.fiscal === '') data.fiscal = null;
 
     // Garante que valores numéricos vazios virem 0 ou null
     if (data.kmContratadoPrancha === '') data.kmContratadoPrancha = 0;
@@ -150,7 +153,6 @@ const createObra = async (req, res) => {
         res.status(201).json({ message: 'Obra criada com sucesso' });
     } catch (error) {
         console.error('Erro ao criar obra:', error);
-        // Retorna mensagem mais detalhada em dev para ajudar a debugar colunas faltando
         res.status(500).json({ error: 'Erro ao criar obra. Verifique se todas as colunas existem no banco.', details: error.message });
     }
 };
@@ -167,13 +169,15 @@ const updateObra = async (req, res) => {
 
     // Stringify de campos JSON
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
-    if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo); // <--- CORREÇÃO
+    if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
 
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
+    if (data.responsavel === '') data.responsavel = null;
+    if (data.fiscal === '') data.fiscal = null;
 
     const fields = Object.keys(data);
     const values = Object.values(data);
@@ -194,14 +198,39 @@ const updateObra = async (req, res) => {
     }
 };
 
-// --- DELETE OBRA ---
+// --- DELETE OBRA (COM LIMPEZA DE FKs) ---
 const deleteObra = async (req, res) => {
+    const obraId = req.params.id;
+    let connection;
+
     try {
-        await db.execute('DELETE FROM obras WHERE id = ?', [req.params.id]);
+        // Obtém uma conexão dedicada para a transação
+        connection = await db.getConnection(); 
+        await connection.beginTransaction();
+
+        // 1. Remove logs financeiros (Se necessário - política de dados)
+        // Se a integridade for crucial, talvez arquivar seja melhor, mas aqui deletaremos conforme pedido.
+        await connection.execute('DELETE FROM daily_work_logs WHERE obraId = ?', [obraId]);
+
+        // 2. Remove histórico de veículos
+        await connection.execute('DELETE FROM obras_historico_veiculos WHERE obraId = ?', [obraId]);
+
+        // 3. Remove a Obra
+        const [result] = await connection.execute('DELETE FROM obras WHERE id = ?', [obraId]);
+
+        if (result.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Obra não encontrada para exclusão.' });
+        }
+
+        await connection.commit();
         res.status(204).end();
     } catch (error) {
+        if (connection) await connection.rollback();
         console.error('Erro ao deletar obra:', error);
-        res.status(500).json({ error: 'Erro ao deletar obra' });
+        res.status(500).json({ error: 'Erro ao deletar obra', details: error.message });
+    } finally {
+        if (connection) connection.release();
     }
 };
 
@@ -212,6 +241,8 @@ const finishObra = async (req, res) => {
     const finalDate = dataFim ? new Date(dataFim) : new Date();
 
     try {
+        // Nota: A validação de veículos ativos deve ser feita no Frontend para melhor UX,
+        // mas idealmente também aqui. Assumimos que o frontend bloqueia por enquanto.
         const [result] = await db.execute(
             "UPDATE obras SET status = 'finalizada', dataFim = ? WHERE id = ?",
             [finalDate, id]
