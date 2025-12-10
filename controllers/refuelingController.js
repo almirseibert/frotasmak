@@ -37,24 +37,18 @@ const parseRefuelingRows = (rows) => {
 };
 
 // --- HELPER CENTRAL: Atualizar Despesa Mensal Consolidada ---
-// Soma tudo (Litros * Preço + Outros) para um Posto/Combustível/Obra/Mês específico
 const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
     if (!obraId || !partnerId || !fuelType || !dateInput) return;
 
-    // 1. Definir o intervalo do mês
     const dateObj = new Date(dateInput);
     const month = dateObj.getMonth();
     const year = dateObj.getFullYear();
     const startDate = new Date(year, month, 1);
     const endDate = new Date(year, month + 1, 0, 23, 59, 59);
 
-    // 2. Buscar Nome do Parceiro para a Descrição
     const [partners] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
     const partnerName = partners[0]?.razaoSocial || 'Posto Desconhecido';
 
-    // 3. Calcular o Total Consolidado do Mês
-    // Soma: (Litros * Preço) + OutrosValores
-    // Considera ordens 'Concluída' E ordens 'Aberta' (caso já tenham valor lançado, ex: outrosValor)
     const querySum = `
         SELECT SUM(
             (COALESCE(litrosAbastecidos, 0) * COALESCE(pricePerLiter, 0)) + 
@@ -70,12 +64,9 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     const [rows] = await connection.execute(querySum, [obraId, partnerId, fuelType, startDate, endDate]);
     const totalAmount = rows[0]?.total || 0;
 
-    // 4. Identificar ou Criar a Despesa
-    // A chave lógica é: Obra + Descrição Padrão (que contém Mês/Ano/Posto/Combustível)
     const monthName = startDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
     const description = `Combustível: ${fuelType} - ${partnerName} (${monthName})`;
 
-    // Verifica se já existe essa despesa
     const [existingExpense] = await connection.execute(
         'SELECT id FROM expenses WHERE obraId = ? AND description = ?',
         [obraId, description]
@@ -83,13 +74,11 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
 
     if (totalAmount > 0) {
         if (existingExpense.length > 0) {
-            // Atualiza
             await connection.execute(
                 'UPDATE expenses SET amount = ?, updatedAt = NOW() WHERE id = ?',
                 [totalAmount, existingExpense[0].id]
             );
         } else {
-            // Cria Nova
             const newId = crypto.randomUUID();
             await connection.execute(
                 `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, date, partnerName, fuelType)
@@ -98,7 +87,6 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
             );
         }
     } else {
-        // Se o total virou zero (ex: todas as ordens excluídas), remove a despesa
         if (existingExpense.length > 0) {
             await connection.execute('DELETE FROM expenses WHERE id = ?', [existingExpense[0].id]);
         }
@@ -143,7 +131,7 @@ const createRefuelingOrder = async (req, res) => {
              dataAbastecimento = new Date(dateStr);
         }
 
-        // Prepara dados
+        // CORREÇÃO AQUI: obraId não usa safeNum, pois é string/UUID
         const refuelingData = {
             id: id,
             authNumber: newAuthNumber,
@@ -151,7 +139,7 @@ const createRefuelingOrder = async (req, res) => {
             partnerId: data.partnerId,
             partnerName: data.partnerName || null,
             employeeId: data.employeeId || null,
-            obraId: safeNum(data.obraId) ? data.obraId : null,
+            obraId: data.obraId || null, // FIX: Passa o valor direto (string) ou null
             fuelType: data.fuelType || null,
             data: dataAbastecimento,
             status: data.status || 'Aberta',
@@ -179,7 +167,6 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
-        // ATUALIZA DESPESA MENSAL (Mesmo se estiver Aberta, pois pode ter outrosValor)
         if (refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
             await updateMonthlyExpense(connection, refuelingData.obraId, refuelingData.partnerId, refuelingData.fuelType, refuelingData.data);
         }
@@ -203,7 +190,6 @@ const updateRefuelingOrder = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        // Busca dados antigos para saber se mudou de obra/posto (para recalcular o mês antigo também)
         const [oldData] = await connection.execute('SELECT * FROM refuelings WHERE id = ?', [id]);
         if (oldData.length === 0) throw new Error('Ordem não encontrada');
         const oldRefueling = oldData[0];
@@ -225,7 +211,10 @@ const updateRefuelingOrder = async (req, res) => {
         
         if (data.partnerName !== undefined) updateData.partnerName = data.partnerName || null;
         if (data.partnerId !== undefined) updateData.partnerId = data.partnerId;
-        if (data.obraId !== undefined) updateData.obraId = data.obraId;
+        
+        // CORREÇÃO AQUI: ObraId direto, sem safeNum
+        if (data.obraId !== undefined) updateData.obraId = data.obraId || null;
+        
         if (data.fuelType !== undefined) updateData.fuelType = data.fuelType || null;
         if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
         if (data.outros !== undefined) updateData.outros = data.outros || null;
@@ -237,8 +226,6 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
-        // RECALCULO FINANCEIRO
-        // 1. Recalcula o destino atual (novo ou mantido)
         const currentObra = updateData.obraId || oldRefueling.obraId;
         const currentPartner = updateData.partnerId || oldRefueling.partnerId;
         const currentFuel = updateData.fuelType || oldRefueling.fuelType;
@@ -248,7 +235,6 @@ const updateRefuelingOrder = async (req, res) => {
             await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
         }
 
-        // 2. Se mudou Obra, Posto ou Combustível, recalcula o "antigo" para remover o valor de lá
         if (
             (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
             (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
@@ -286,7 +272,6 @@ const confirmRefuelingOrder = async (req, res) => {
         }
         const order = orders[0];
 
-        // Atualização de Leitura do Veículo
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
@@ -316,7 +301,6 @@ const confirmRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), order.vehicleId]);
         }
 
-        // Atualiza Preço no Parceiro
         const safePrice = safeNum(pricePerLiter, true);
         if (order.partnerId && safePrice > 0 && order.fuelType) {
             const priceQuery = `
@@ -327,7 +311,6 @@ const confirmRefuelingOrder = async (req, res) => {
             await connection.execute(priceQuery, [order.partnerId, order.fuelType, safePrice]);
         }
 
-        // Atualiza Ordem
         const orderUpdate = {
             status: 'Concluída',
             litrosAbastecidos: safeNum(litrosAbastecidos, true),
@@ -343,7 +326,6 @@ const confirmRefuelingOrder = async (req, res) => {
         const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
         await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
 
-        // RECALCULA DESPESA MENSAL CONSOLIDADA
         if (order.obraId && order.partnerId && order.fuelType) {
             await updateMonthlyExpense(connection, order.obraId, order.partnerId, order.fuelType, order.data);
         }
@@ -374,10 +356,8 @@ const deleteRefuelingOrder = async (req, res) => {
         }
         const ref = rows[0];
 
-        // Deleta a ordem
         await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
 
-        // RECALCULA DESPESA MENSAL (Para remover o valor desta ordem do total)
         if (ref.obraId && ref.partnerId && ref.fuelType) {
             await updateMonthlyExpense(connection, ref.obraId, ref.partnerId, ref.fuelType, ref.data);
         }
