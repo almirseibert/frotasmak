@@ -12,6 +12,15 @@ const sanitizeNumber = (value) => {
     return isNaN(number) ? null : number;
 };
 
+// --- FUNÇÃO AUXILIAR: Obter Preço Médio ---
+const getAverageFuelPrice = async (connection, fuelType) => {
+    const [rows] = await connection.execute(
+        'SELECT AVG(price) as avgPrice FROM partner_fuel_prices WHERE fuelType = ? AND price > 0',
+        [fuelType]
+    );
+    return rows[0].avgPrice ? parseFloat(rows[0].avgPrice) : 0;
+};
+
 // --- FUNÇÃO AUXILIAR: Gerenciar Despesa Mensal Agrupada ---
 const manageMonthlyExpense = async ({ connection, obraId, obraName, date, fuelType, valueChange }) => {
     if (!obraId || !fuelType || valueChange === 0) return;
@@ -50,7 +59,7 @@ const manageMonthlyExpense = async ({ connection, obraId, obraName, date, fuelTy
         );
     } else {
         // Cria novo agrupamento
-        // Descrição conforme solicitado: Combustível: {Tipo} - Comboio - {Obra} ({Mês}/{Ano})
+        // Descrição padrão: Combustível: Diesel S10 - Comboio - Obra X (Dezembro/2025)
         const description = `Combustível: ${formattedFuel} - Comboio - ${obraName || 'Obra'} (${capitalizedMonth}/${year})`;
         const newId = crypto.randomUUID();
         
@@ -60,15 +69,6 @@ const manageMonthlyExpense = async ({ connection, obraId, obraName, date, fuelTy
             [newId, obraId, description, valueChange, referenceDate, fuelType]
         );
     }
-};
-
-// --- FUNÇÃO AUXILIAR: Obter Preço Médio ---
-const getAverageFuelPrice = async (connection, fuelType) => {
-    const [rows] = await connection.execute(
-        'SELECT AVG(price) as avgPrice FROM partner_fuel_prices WHERE fuelType = ? AND price > 0',
-        [fuelType]
-    );
-    return rows[0].avgPrice ? parseFloat(rows[0].avgPrice) : 0;
 };
 
 // --- CRUD ---
@@ -136,7 +136,7 @@ const deleteTransaction = async (req, res) => {
             await manageMonthlyExpense({
                 connection,
                 obraId: transaction.obraId,
-                // Passa nome vazio ou genérico, pois se o registro já existe, o nome não é atualizado, só o valor
+                // Não precisa atualizar nome na reversão
                 obraName: transaction.obraName, 
                 date: new Date(transaction.date),
                 fuelType: transaction.fuelType,
@@ -222,6 +222,7 @@ const createEntradaTransaction = async (req, res) => {
         );
         
         if (price > 0) {
+            // Entrada gera despesa de pagamento ao posto
             await createOrUpdateWeeklyFuelExpense({ connection, obraId, date: new Date(date), fuelType, partnerName: partnerName, valueChange: valorTotal });
         }
 
@@ -331,12 +332,12 @@ const createSaidaTransaction = async (req, res) => {
 };
 
 const createDrenagemTransaction = async (req, res) => {
+    // Mesma lógica anterior
     const { comboioVehicleId, drainingVehicleId, liters, date, fuelType, reason, createdBy } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        // Busca nome do veículo drenado
         let drainingVehicleName = null;
         if (drainingVehicleId) {
             const [vRows] = await connection.execute('SELECT registroInterno FROM vehicles WHERE id = ?', [drainingVehicleId]);
@@ -350,7 +351,7 @@ const createDrenagemTransaction = async (req, res) => {
             date: new Date(date),
             comboioVehicleId,
             drainingVehicleId,
-            drainingVehicleName, // Salva para histórico
+            drainingVehicleName,
             liters: safeLiters,
             fuelType,
             reason: sanitize(reason),
@@ -408,7 +409,6 @@ const updateTransaction = async (req, res) => {
             await manageMonthlyExpense({
                 connection,
                 obraId: oldData.obraId,
-                // Não precisa passar nome para reversão
                 date: new Date(oldData.date),
                 fuelType: oldData.fuelType,
                 valueChange: -valueToRevert 
@@ -424,7 +424,6 @@ const updateTransaction = async (req, res) => {
         }
 
         // 4. Aplicação Nova Despesa (Saída)
-        // Precisamos buscar o nome da nova obra se o ID mudou, para garantir descrição correta se for criado um novo registro
         let newObraName = oldData.obraName;
         if (newData.obraId && newData.obraId !== oldData.obraId) {
              const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [newData.obraId]);
@@ -455,7 +454,7 @@ const updateTransaction = async (req, res) => {
                 sanitize(newData.partnerId) || oldData.partnerId, 
                 sanitize(newData.employeeId) || oldData.employeeId, 
                 sanitize(newData.obraId) || oldData.obraId, 
-                newObraName, // Atualiza nome da obra
+                newObraName, 
                 sanitizeNumber(newData.odometro) || oldData.odometro, 
                 sanitizeNumber(newData.horimetro) || oldData.horimetro, 
                 id
