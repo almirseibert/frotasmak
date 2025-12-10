@@ -75,13 +75,14 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     if (totalAmount > 0) {
         if (existingExpense.length > 0) {
             await connection.execute(
-                'UPDATE expenses SET amount = ?, updatedAt = NOW() WHERE id = ?',
-                [totalAmount, existingExpense[0].id]
+                'UPDATE expenses SET amount = ?, weekStartDate = ? WHERE id = ?', // Atualiza weekStartDate também para manter coerência
+                [totalAmount, startDate, existingExpense[0].id]
             );
         } else {
             const newId = crypto.randomUUID();
+            // CORREÇÃO: Trocado 'date' por 'weekStartDate' conforme schema SQL
             await connection.execute(
-                `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, date, partnerName, fuelType)
+                `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, weekStartDate, partnerName, fuelType)
                  VALUES (?, ?, ?, ?, 'Combustível', NOW(), ?, ?, ?)`,
                 [newId, obraId, description, totalAmount, startDate, partnerName, fuelType]
             );
@@ -131,7 +132,6 @@ const createRefuelingOrder = async (req, res) => {
              dataAbastecimento = new Date(dateStr);
         }
 
-        // CORREÇÃO AQUI: obraId não usa safeNum, pois é string/UUID
         const refuelingData = {
             id: id,
             authNumber: newAuthNumber,
@@ -139,7 +139,7 @@ const createRefuelingOrder = async (req, res) => {
             partnerId: data.partnerId,
             partnerName: data.partnerName || null,
             employeeId: data.employeeId || null,
-            obraId: data.obraId || null, // FIX: Passa o valor direto (string) ou null
+            obraId: data.obraId || null, 
             fuelType: data.fuelType || null,
             data: dataAbastecimento,
             status: data.status || 'Aberta',
@@ -212,7 +212,6 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.partnerName !== undefined) updateData.partnerName = data.partnerName || null;
         if (data.partnerId !== undefined) updateData.partnerId = data.partnerId;
         
-        // CORREÇÃO AQUI: ObraId direto, sem safeNum
         if (data.obraId !== undefined) updateData.obraId = data.obraId || null;
         
         if (data.fuelType !== undefined) updateData.fuelType = data.fuelType || null;
