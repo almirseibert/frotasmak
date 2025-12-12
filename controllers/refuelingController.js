@@ -32,11 +32,13 @@ const parseRefuelingRows = (rows) => {
         litrosAbastecidos: row.litrosAbastecidos ? parseFloat(row.litrosAbastecidos) : 0,
         pricePerLiter: row.pricePerLiter ? parseFloat(row.pricePerLiter) : 0,
         outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
-        outrosGeraValor: !!row.outrosGeraValor 
+        outrosGeraValor: !!row.outrosGeraValor,
+        // NOVO CAMPO
+        invoiceNumber: row.invoiceNumber || null 
     }));
 };
 
-// --- HELPER CENTRAL: Atualizar Despesa Mensal Consolidada ---
+// ... (Mantenha a função updateMonthlyExpense exatamente como estava) ...
 const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
     if (!obraId || !partnerId || !fuelType || !dateInput) return;
 
@@ -75,12 +77,11 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     if (totalAmount > 0) {
         if (existingExpense.length > 0) {
             await connection.execute(
-                'UPDATE expenses SET amount = ?, weekStartDate = ? WHERE id = ?', // Atualiza weekStartDate também para manter coerência
+                'UPDATE expenses SET amount = ?, weekStartDate = ? WHERE id = ?',
                 [totalAmount, startDate, existingExpense[0].id]
             );
         } else {
             const newId = crypto.randomUUID();
-            // CORREÇÃO: Trocado 'date' por 'weekStartDate' conforme schema SQL
             await connection.execute(
                 `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, weekStartDate, partnerName, fuelType)
                  VALUES (?, ?, ?, ?, 'Combustível', NOW(), ?, ?, ?)`,
@@ -94,7 +95,7 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     }
 };
 
-// --- GETTERS ---
+// ... (Mantenha getAllRefuelings e getRefuelingById iguais) ...
 const getAllRefuelings = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM refuelings ORDER BY id DESC');
@@ -157,7 +158,9 @@ const createRefuelingOrder = async (req, res) => {
             outros: data.outros || null,
             createdBy: JSON.stringify(data.createdBy || {}),
             confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
-            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null
+            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
+            // NOVO CAMPO (opcional na criação)
+            invoiceNumber: data.invoiceNumber || null
         };
 
         const fields = Object.keys(refuelingData);
@@ -211,12 +214,33 @@ const updateRefuelingOrder = async (req, res) => {
         
         if (data.partnerName !== undefined) updateData.partnerName = data.partnerName || null;
         if (data.partnerId !== undefined) updateData.partnerId = data.partnerId;
-        
         if (data.obraId !== undefined) updateData.obraId = data.obraId || null;
-        
         if (data.fuelType !== undefined) updateData.fuelType = data.fuelType || null;
         if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
         if (data.outros !== undefined) updateData.outros = data.outros || null;
+
+        // --- VALIDAÇÃO DE NOTA FISCAL (NOVO) ---
+        if (data.invoiceNumber !== undefined) {
+            const newInvoiceNumber = data.invoiceNumber.trim();
+            
+            if (newInvoiceNumber) {
+                // Verifica duplicidade para o MESMO posto
+                // Busca se já existe este número para este posto em OUTRA ordem
+                const partnerIdToCheck = updateData.partnerId || oldRefueling.partnerId;
+                
+                const [duplicateCheck] = await connection.execute(
+                    'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
+                    [partnerIdToCheck, newInvoiceNumber, id]
+                );
+
+                if (duplicateCheck.length > 0) {
+                    throw new Error(`A Nota Fiscal ${newInvoiceNumber} já está cadastrada para este posto.`);
+                }
+                updateData.invoiceNumber = newInvoiceNumber;
+            } else {
+                updateData.invoiceNumber = null;
+            }
+        }
 
         Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
 
@@ -225,6 +249,7 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
+        // Recalculo Financeiro (Mantido)
         const currentObra = updateData.obraId || oldRefueling.obraId;
         const currentPartner = updateData.partnerId || oldRefueling.partnerId;
         const currentFuel = updateData.fuelType || oldRefueling.fuelType;
@@ -249,12 +274,13 @@ const updateRefuelingOrder = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('Erro UPDATE:', error);
-        res.status(500).json({ error: 'Falha ao atualizar.' });
+        res.status(500).json({ error: error.message }); // Retorna a mensagem correta (ex: Duplicidade)
     } finally {
         connection.release();
     }
 };
 
+// ... (Mantenha confirmRefuelingOrder e deleteRefuelingOrder iguais, eles não precisam mudar) ...
 // --- CONFIRM ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
