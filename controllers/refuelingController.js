@@ -33,12 +33,12 @@ const parseRefuelingRows = (rows) => {
         pricePerLiter: row.pricePerLiter ? parseFloat(row.pricePerLiter) : 0,
         outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
         outrosGeraValor: !!row.outrosGeraValor,
-        // NOVO CAMPO
+        // Garante que invoiceNumber retorne
         invoiceNumber: row.invoiceNumber || null 
     }));
 };
 
-// ... (Mantenha a função updateMonthlyExpense exatamente como estava) ...
+// --- ATUALIZAÇÃO DE DESPESAS MENSAIS ---
 const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
     if (!obraId || !partnerId || !fuelType || !dateInput) return;
 
@@ -95,7 +95,6 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     }
 };
 
-// ... (Mantenha getAllRefuelings e getRefuelingById iguais) ...
 const getAllRefuelings = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM refuelings ORDER BY id DESC');
@@ -159,7 +158,6 @@ const createRefuelingOrder = async (req, res) => {
             createdBy: JSON.stringify(data.createdBy || {}),
             confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
             editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
-            // NOVO CAMPO (opcional na criação)
             invoiceNumber: data.invoiceNumber || null
         };
 
@@ -219,15 +217,12 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
         if (data.outros !== undefined) updateData.outros = data.outros || null;
 
-        // --- VALIDAÇÃO DE NOTA FISCAL (NOVO) ---
+        // VALIDAÇÃO DE NOTA FISCAL
         if (data.invoiceNumber !== undefined) {
-            const newInvoiceNumber = data.invoiceNumber.trim();
+            const newInvoiceNumber = data.invoiceNumber ? data.invoiceNumber.toString().trim() : null;
             
             if (newInvoiceNumber) {
-                // Verifica duplicidade para o MESMO posto
-                // Busca se já existe este número para este posto em OUTRA ordem
                 const partnerIdToCheck = updateData.partnerId || oldRefueling.partnerId;
-                
                 const [duplicateCheck] = await connection.execute(
                     'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
                     [partnerIdToCheck, newInvoiceNumber, id]
@@ -249,7 +244,6 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
-        // Recalculo Financeiro (Mantido)
         const currentObra = updateData.obraId || oldRefueling.obraId;
         const currentPartner = updateData.partnerId || oldRefueling.partnerId;
         const currentFuel = updateData.fuelType || oldRefueling.fuelType;
@@ -274,17 +268,25 @@ const updateRefuelingOrder = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('Erro UPDATE:', error);
-        res.status(500).json({ error: error.message }); // Retorna a mensagem correta (ex: Duplicidade)
+        res.status(500).json({ error: error.message });
     } finally {
         connection.release();
     }
 };
 
-// ... (Mantenha confirmRefuelingOrder e deleteRefuelingOrder iguais, eles não precisam mudar) ...
 // --- CONFIRM ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
-    const { litrosAbastecidos, litrosAbastecidosArla, pricePerLiter, confirmedReading, confirmedBy, outrosValor } = req.body;
+    const { 
+        litrosAbastecidos, 
+        litrosAbastecidosArla, 
+        pricePerLiter, 
+        confirmedReading, 
+        confirmedBy, 
+        outrosValor,
+        invoiceNumber, // Recebe a NF
+        updatePartnerPrice // Flag para atualizar preço do posto
+    } = req.body;
     
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -300,6 +302,7 @@ const confirmRefuelingOrder = async (req, res) => {
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
+        // Atualiza a leitura do veículo
         const vehicleUpdate = {};
         const readingVal = safeNum(confirmedReading);
 
@@ -327,7 +330,10 @@ const confirmRefuelingOrder = async (req, res) => {
         }
 
         const safePrice = safeNum(pricePerLiter, true);
-        if (order.partnerId && safePrice > 0 && order.fuelType) {
+        
+        // --- ATUALIZAÇÃO CONDICIONAL DO PREÇO DO POSTO ---
+        // Só atualiza se o usuário confirmou explicitamente (updatePartnerPrice === true)
+        if (order.partnerId && safePrice > 0 && order.fuelType && updatePartnerPrice === true) {
             const priceQuery = `
                 INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
                 VALUES (?, ?, ?) 
@@ -343,6 +349,7 @@ const confirmRefuelingOrder = async (req, res) => {
             pricePerLiter: safePrice,
             confirmedBy: JSON.stringify(confirmedBy),
             outrosValor: safeNum(outrosValor, true),
+            invoiceNumber: invoiceNumber || null, // Salva a NF
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
             ...(vehicleUpdate.horimetroDigital ? { horimetroDigital: vehicleUpdate.horimetroDigital } : {}),
