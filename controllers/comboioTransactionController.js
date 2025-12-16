@@ -12,6 +12,26 @@ const sanitizeNumber = (value) => {
     return isNaN(number) ? null : number;
 };
 
+// --- FUNÇÃO AUXILIAR: Checar Duplicidade de NF ---
+const checkDuplicateNF = async (connection, partnerId, invoiceNumber, excludeId = null) => {
+    if (!invoiceNumber) return;
+    const nfStr = invoiceNumber.toString().trim();
+    if (!nfStr) return;
+
+    let query = 'SELECT id FROM comboio_transactions WHERE partnerId = ? AND invoiceNumber = ?';
+    const params = [partnerId, nfStr];
+
+    if (excludeId) {
+        query += ' AND id != ?';
+        params.push(excludeId);
+    }
+
+    const [rows] = await connection.execute(query, params);
+    if (rows.length > 0) {
+        throw new Error(`A Nota Fiscal ${nfStr} já consta lançada para este posto.`);
+    }
+};
+
 // --- FUNÇÃO AUXILIAR: Obter Preço Médio ---
 const getAverageFuelPrice = async (connection, fuelType) => {
     const [rows] = await connection.execute(
@@ -167,17 +187,51 @@ const deleteTransaction = async (req, res) => {
 };
 
 const createEntradaTransaction = async (req, res) => {
-    const { comboioVehicleId, partnerId, employeeId, odometro, horimetro, obraId, liters, date, fuelType, createdBy } = req.body;
+    const { 
+        comboioVehicleId, 
+        partnerId, 
+        employeeId, 
+        odometro, 
+        horimetro, 
+        obraId, 
+        liters, 
+        date, 
+        fuelType, 
+        createdBy,
+        invoiceNumber, // NOVO
+        pricePerLiter, // NOVO: Preço informado no modal
+        updatePartnerPrice // NOVO: Flag para atualizar tabela de preços
+    } = req.body;
+
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        const [priceRows] = await connection.execute(
-            'SELECT price FROM partner_fuel_prices WHERE partnerId = ? AND fuelType = ?',
-            [partnerId, fuelType]
-        );
+        // 1. Validação de Duplicidade de NF (Se houver NF)
+        if (invoiceNumber) {
+            await checkDuplicateNF(connection, partnerId, invoiceNumber);
+        }
 
-        const price = (priceRows.length > 0 && priceRows[0].price) ? parseFloat(priceRows[0].price) : 0;
+        // 2. Determinação do Preço (Prioridade: Informado > Tabela)
+        let price = sanitizeNumber(pricePerLiter);
+        if (price === null || price <= 0) {
+            const [priceRows] = await connection.execute(
+                'SELECT price FROM partner_fuel_prices WHERE partnerId = ? AND fuelType = ?',
+                [partnerId, fuelType]
+            );
+            price = (priceRows.length > 0 && priceRows[0].price) ? parseFloat(priceRows[0].price) : 0;
+        }
+
+        // 3. Atualização do Preço no Posto (Se solicitado)
+        if (updatePartnerPrice && price > 0) {
+            const priceQuery = `
+                INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
+                VALUES (?, ?, ?) 
+                ON DUPLICATE KEY UPDATE price = VALUES(price)
+            `;
+            await connection.execute(priceQuery, [partnerId, fuelType, price]);
+        }
+
         const safeLiters = sanitizeNumber(liters) || 0;
         const valorTotal = safeLiters * price;
 
@@ -200,7 +254,7 @@ const createEntradaTransaction = async (req, res) => {
             partnerId,
             partnerName,
             obraId,
-            obraName, // Salva o nome da obra na transação para histórico
+            obraName, 
             liters: safeLiters,
             fuelType,
             valorTotal,
@@ -208,6 +262,7 @@ const createEntradaTransaction = async (req, res) => {
             odometro: sanitizeNumber(odometro),
             horimetro: sanitizeNumber(horimetro),
             employeeId: sanitize(employeeId),
+            invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null // Salva NF
         };
         
         const fields = Object.keys(transactionData);
@@ -221,7 +276,7 @@ const createEntradaTransaction = async (req, res) => {
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
         
-        if (price > 0) {
+        if (valorTotal > 0) {
             // Entrada gera despesa de pagamento ao posto
             await createOrUpdateWeeklyFuelExpense({ connection, obraId, date: new Date(date), fuelType, partnerName: partnerName, valueChange: valorTotal });
         }
@@ -395,14 +450,19 @@ const updateTransaction = async (req, res) => {
         if (oldRows.length === 0) throw new Error("Transação não encontrada");
         const oldData = oldRows[0];
 
-        // 1. Reversão Estoque
+        // 1. Check de duplicidade de NF (Se atualizado)
+        if (newData.invoiceNumber && newData.invoiceNumber !== oldData.invoiceNumber) {
+            await checkDuplicateNF(connection, newData.partnerId || oldData.partnerId, newData.invoiceNumber, id);
+        }
+
+        // 2. Reversão Estoque
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
         } else if (oldData.type === 'saida') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${oldData.fuelType}`, `$.${oldData.fuelType}`, oldData.liters, oldData.comboioVehicleId]);
         }
 
-        // 2. Reversão Despesa (Saída)
+        // 3. Reversão Despesa (Saída)
         if (oldData.type === 'saida') {
             const avgPriceOld = await getAverageFuelPrice(connection, oldData.fuelType);
             const valueToRevert = oldData.liters * avgPriceOld;
@@ -415,7 +475,7 @@ const updateTransaction = async (req, res) => {
             });
         }
 
-        // 3. Aplicação Novo Estoque
+        // 4. Aplicação Novo Estoque
         const newLiters = sanitizeNumber(newData.liters) || 0;
         if (oldData.type === 'entrada') {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
@@ -423,7 +483,7 @@ const updateTransaction = async (req, res) => {
             await connection.execute('UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', [`$.${newData.fuelType}`, `$.${newData.fuelType}`, newLiters, oldData.comboioVehicleId]);
         }
 
-        // 4. Aplicação Nova Despesa (Saída)
+        // 5. Aplicação Nova Despesa (Saída)
         let newObraName = oldData.obraName;
         if (newData.obraId && newData.obraId !== oldData.obraId) {
              const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [newData.obraId]);
@@ -444,9 +504,9 @@ const updateTransaction = async (req, res) => {
             });
         }
 
-        // 5. Atualiza Registro
+        // 6. Atualiza Registro (incluindo invoiceNumber)
         await connection.execute(
-            'UPDATE comboio_transactions SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, obraName = ?, odometro = ?, horimetro = ? WHERE id = ?',
+            'UPDATE comboio_transactions SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, obraName = ?, odometro = ?, horimetro = ?, invoiceNumber = ? WHERE id = ?',
             [
                 newLiters, 
                 new Date(newData.date), 
@@ -456,7 +516,8 @@ const updateTransaction = async (req, res) => {
                 sanitize(newData.obraId) || oldData.obraId, 
                 newObraName, 
                 sanitizeNumber(newData.odometro) || oldData.odometro, 
-                sanitizeNumber(newData.horimetro) || oldData.horimetro, 
+                sanitizeNumber(newData.horimetro) || oldData.horimetro,
+                newData.invoiceNumber || oldData.invoiceNumber, // NOVO
                 id
             ]
         );
