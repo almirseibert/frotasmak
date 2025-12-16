@@ -33,7 +33,6 @@ const parseRefuelingRows = (rows) => {
         pricePerLiter: row.pricePerLiter ? parseFloat(row.pricePerLiter) : 0,
         outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
         outrosGeraValor: !!row.outrosGeraValor,
-        // Garante que invoiceNumber retorne
         invoiceNumber: row.invoiceNumber || null 
     }));
 };
@@ -217,7 +216,7 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
         if (data.outros !== undefined) updateData.outros = data.outros || null;
 
-        // VALIDAÇÃO DE NOTA FISCAL
+        // VALIDAÇÃO DE NOTA FISCAL (UPDATE)
         if (data.invoiceNumber !== undefined) {
             const newInvoiceNumber = data.invoiceNumber ? data.invoiceNumber.toString().trim() : null;
             
@@ -299,6 +298,23 @@ const confirmRefuelingOrder = async (req, res) => {
         }
         const order = orders[0];
 
+        // --- VALIDAÇÃO DE DUPLICIDADE DE NF (NOVA) ---
+        // Se a NF foi informada, verifica se já existe para este posto
+        if (invoiceNumber) {
+            const nfStr = invoiceNumber.toString().trim();
+            if (nfStr) {
+                // Procura NFs idênticas no mesmo posto, ignorando a própria ordem
+                const [duplicates] = await connection.execute(
+                    'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
+                    [order.partnerId, nfStr, id]
+                );
+
+                if (duplicates.length > 0) {
+                    throw new Error(`A Nota Fiscal ${nfStr} já consta lançada para este posto.`);
+                }
+            }
+        }
+
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
@@ -332,7 +348,6 @@ const confirmRefuelingOrder = async (req, res) => {
         const safePrice = safeNum(pricePerLiter, true);
         
         // --- ATUALIZAÇÃO CONDICIONAL DO PREÇO DO POSTO ---
-        // Só atualiza se o usuário confirmou explicitamente (updatePartnerPrice === true)
         if (order.partnerId && safePrice > 0 && order.fuelType && updatePartnerPrice === true) {
             const priceQuery = `
                 INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
@@ -349,7 +364,7 @@ const confirmRefuelingOrder = async (req, res) => {
             pricePerLiter: safePrice,
             confirmedBy: JSON.stringify(confirmedBy),
             outrosValor: safeNum(outrosValor, true),
-            invoiceNumber: invoiceNumber || null, // Salva a NF
+            invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null, // Salva a NF
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
             ...(vehicleUpdate.horimetroDigital ? { horimetroDigital: vehicleUpdate.horimetroDigital } : {}),
