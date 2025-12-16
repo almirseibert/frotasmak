@@ -4,7 +4,7 @@ const { createOrUpdateWeeklyFuelExpense } = require('./expenseController');
 const { parseJsonSafe } = require('../utils/parseJsonSafe');
 const crypto = require('crypto');
 
-// Helpers de sanitização
+// Helpers de sanitização (Crucial para evitar erro "Bind parameters must not contain undefined")
 const sanitize = (value) => (value === undefined || value === '' ? null : value);
 const sanitizeNumber = (value) => {
     if (value === undefined || value === null || value === '') return null;
@@ -41,35 +41,34 @@ const getAverageFuelPrice = async (connection, fuelType) => {
     return rows[0].avgPrice ? parseFloat(rows[0].avgPrice) : 0;
 };
 
-// --- FUNÇÃO AUXILIAR: Gerenciar Despesa Mensal Agrupada ---
-const manageMonthlyExpense = async ({ connection, obraId, obraName, date, fuelType, valueChange }) => {
+// --- FUNÇÃO AUXILIAR: Gerenciar Despesa Mensal (Saída Comboio) ---
+const manageComboioExpense = async ({ connection, obraId, obraName, date, fuelType, valueChange, vehicleName }) => {
     if (!obraId || !fuelType || valueChange === 0) return;
 
     const expenseDate = new Date(date);
     const month = expenseDate.getMonth() + 1;
     const year = expenseDate.getFullYear();
-    // Data de referência: dia 1º do mês para facilitar agrupamento
     const referenceDate = new Date(year, month - 1, 1).toISOString().slice(0, 10); 
     
     const mesExtenso = expenseDate.toLocaleString('pt-BR', { month: 'long' });
     const capitalizedMonth = mesExtenso.charAt(0).toUpperCase() + mesExtenso.slice(1);
     const formattedFuel = fuelType === 'dieselS10' ? 'Diesel S10' : (fuelType === 'dieselComum' ? 'Diesel Comum' : fuelType);
 
-    // Tenta encontrar despesa existente para este Mês, Ano, Obra e Combustível (Agrupado)
+    // Descrição padronizada similar à página de abastecimento
+    // Ex: Combustível: Diesel S10 - #Comboio (Dezembro/2025)
+    const description = `Combustível: ${formattedFuel} - #Comboio (${capitalizedMonth}/${year})`;
+
+    // Busca despesa existente para agrupar
     const [existingExpenses] = await connection.execute(
         `SELECT id, amount FROM expenses 
          WHERE obraId = ? 
-         AND fuelType = ? 
+         AND description = ?
          AND category = 'Combustível' 
-         AND expenseType = 'Automático'
-         AND MONTH(createdAt) = ? 
-         AND YEAR(createdAt) = ? 
          LIMIT 1`,
-        [obraId, fuelType, month, year]
+        [obraId, description]
     );
 
     if (existingExpenses.length > 0) {
-        // Atualiza soma
         const expense = existingExpenses[0];
         const newAmount = parseFloat(expense.amount) + valueChange;
         
@@ -78,20 +77,14 @@ const manageMonthlyExpense = async ({ connection, obraId, obraName, date, fuelTy
             [newAmount, expense.id]
         );
     } else {
-        // Cria novo agrupamento
-        // Descrição padrão: Combustível: Diesel S10 - Comboio - Obra X (Dezembro/2025)
-        const description = `Combustível: ${formattedFuel} - Comboio - ${obraName || 'Obra'} (${capitalizedMonth}/${year})`;
         const newId = crypto.randomUUID();
-        
         await connection.execute(
-            `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, fuelType, expenseType) 
-             VALUES (?, ?, ?, ?, 'Combustível', ?, ?, 'Automático')`,
-            [newId, obraId, description, valueChange, referenceDate, fuelType]
+            `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, weekStartDate, fuelType, expenseType, partnerName) 
+             VALUES (?, ?, ?, ?, 'Combustível', ?, ?, ?, 'Automático', 'Comboio Interno')`,
+            [newId, obraId, description, valueChange, new Date(), referenceDate, fuelType]
         );
     }
 };
-
-// --- CRUD ---
 
 const getAllComboioTransactions = async (req, res) => {
     try {
@@ -113,106 +106,21 @@ const getComboioTransactionById = async (req, res) => {
     }
 };
 
-const deleteTransaction = async (req, res) => {
-    const { id } = req.params;
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    try {
-        const [transactionRows] = await connection.execute('SELECT * FROM comboio_transactions WHERE id = ?', [id]);
-        const transaction = transactionRows[0];
-        if (!transaction) {
-            await connection.rollback();
-            return res.status(404).json({ error: 'Transação não encontrada.' });
-        }
-
-        // Reverte Estoque e Despesas
-        if (transaction.type === 'entrada') {
-            await connection.execute(
-                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
-                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
-            );
-            // Reverte despesa de entrada (pagamento ao posto)
-            if (transaction.valorTotal > 0) {
-                await createOrUpdateWeeklyFuelExpense({
-                    connection,
-                    obraId: transaction.obraId,
-                    date: new Date(transaction.date),
-                    fuelType: transaction.fuelType,
-                    partnerName: transaction.partnerName,
-                    valueChange: -transaction.valorTotal, 
-                });
-            }
-        } else if (transaction.type === 'saida') {
-            await connection.execute(
-                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
-                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
-            );
-            
-            // Reverte despesa da OBRA (Estorno do valor)
-            const avgPrice = await getAverageFuelPrice(connection, transaction.fuelType);
-            const valueToRevert = transaction.liters * avgPrice;
-            
-            await manageMonthlyExpense({
-                connection,
-                obraId: transaction.obraId,
-                // Não precisa atualizar nome na reversão
-                obraName: transaction.obraName, 
-                date: new Date(transaction.date),
-                fuelType: transaction.fuelType,
-                valueChange: -valueToRevert 
-            });
-
-        } else if (transaction.type === 'drenagem') {
-            await connection.execute(
-                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
-                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.drainingVehicleId]
-            );
-            await connection.execute(
-                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
-                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
-            );
-        }
-        
-        await connection.execute('DELETE FROM comboio_transactions WHERE id = ?', [id]);
-        await connection.commit();
-        res.status(204).end();
-    } catch (error) {
-        await connection.rollback();
-        console.error('Erro ao deletar:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        connection.release();
-    }
-};
-
 const createEntradaTransaction = async (req, res) => {
     const { 
-        comboioVehicleId, 
-        partnerId, 
-        employeeId, 
-        odometro, 
-        horimetro, 
-        obraId, 
-        liters, 
-        date, 
-        fuelType, 
-        createdBy,
-        invoiceNumber, // NOVO
-        pricePerLiter, // NOVO: Preço informado no modal
-        updatePartnerPrice // NOVO: Flag para atualizar tabela de preços
+        comboioVehicleId, partnerId, employeeId, odometro, horimetro, 
+        obraId, liters, date, fuelType, createdBy, invoiceNumber, 
+        pricePerLiter, updatePartnerPrice 
     } = req.body;
 
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        // 1. Validação de Duplicidade de NF (Se houver NF)
         if (invoiceNumber) {
             await checkDuplicateNF(connection, partnerId, invoiceNumber);
         }
 
-        // 2. Determinação do Preço (Prioridade: Informado > Tabela)
         let price = sanitizeNumber(pricePerLiter);
         if (price === null || price <= 0) {
             const [priceRows] = await connection.execute(
@@ -222,13 +130,8 @@ const createEntradaTransaction = async (req, res) => {
             price = (priceRows.length > 0 && priceRows[0].price) ? parseFloat(priceRows[0].price) : 0;
         }
 
-        // 3. Atualização do Preço no Posto (Se solicitado)
         if (updatePartnerPrice && price > 0) {
-            const priceQuery = `
-                INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
-                VALUES (?, ?, ?) 
-                ON DUPLICATE KEY UPDATE price = VALUES(price)
-            `;
+            const priceQuery = `INSERT INTO partner_fuel_prices (partnerId, fuelType, price) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE price = VALUES(price)`;
             await connection.execute(priceQuery, [partnerId, fuelType, price]);
         }
 
@@ -238,31 +141,30 @@ const createEntradaTransaction = async (req, res) => {
         const [partnerRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
         const partnerName = partnerRows[0]?.razaoSocial || 'Parceiro Desconhecido';
 
-        // Busca nome da obra para registro
         let obraName = 'Obra Desconhecida';
         if (obraId) {
             const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraId]);
-            if (obraRows.length > 0) obraName = obraRows[0].nome;
-            else if (['Administração', 'Oficina', 'Pátio', 'Rampa', 'Diversos'].includes(obraId)) obraName = obraId;
+            obraName = obraRows[0]?.nome || obraId;
         }
 
+        // Sanitização completa do objeto para evitar erro de Bind
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
             type: 'entrada',
             date: new Date(date),
-            comboioVehicleId,
-            partnerId,
-            partnerName,
-            obraId,
-            obraName, 
+            comboioVehicleId: sanitize(comboioVehicleId),
+            partnerId: sanitize(partnerId),
+            partnerName: sanitize(partnerName),
+            obraId: sanitize(obraId), // Aqui é crucial que seja null se undefined
+            obraName: sanitize(obraName), 
             liters: safeLiters,
-            fuelType,
-            valorTotal,
+            fuelType: sanitize(fuelType),
+            valorTotal: sanitizeNumber(valorTotal),
             responsibleUserEmail: sanitize(createdBy?.userEmail),
             odometro: sanitizeNumber(odometro),
             horimetro: sanitizeNumber(horimetro),
             employeeId: sanitize(employeeId),
-            invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null // Salva NF
+            invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null
         };
         
         const fields = Object.keys(transactionData);
@@ -276,9 +178,9 @@ const createEntradaTransaction = async (req, res) => {
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
         
-        if (valorTotal > 0) {
-            // Entrada gera despesa de pagamento ao posto
-            await createOrUpdateWeeklyFuelExpense({ connection, obraId, date: new Date(date), fuelType, partnerName: partnerName, valueChange: valorTotal });
+        // Se houver obra na entrada (opcional), gera despesa
+        if (valorTotal > 0 && transactionData.obraId) {
+            await createOrUpdateWeeklyFuelExpense({ connection, obraId: transactionData.obraId, date: new Date(date), fuelType, partnerName: partnerName, valueChange: valorTotal });
         }
 
         await connection.commit();
@@ -293,22 +195,23 @@ const createEntradaTransaction = async (req, res) => {
 };
 
 const createSaidaTransaction = async (req, res) => {
-    const { comboioVehicleId, receivingVehicleId, odometro, horimetro, horimetroDigital, liters, date, fuelType, obraId, employeeId, createdBy } = req.body;
+    const { 
+        comboioVehicleId, receivingVehicleId, odometro, horimetro, 
+        horimetroDigital, liters, date, fuelType, obraId, employeeId, createdBy 
+    } = req.body;
+    
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
         const safeLiters = sanitizeNumber(liters) || 0;
 
-        // Busca nome da obra para registro e despesa
         let obraName = 'Obra Desconhecida';
         if (obraId) {
             const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraId]);
-            if (obraRows.length > 0) obraName = obraRows[0].nome;
-            else if (['Administração', 'Oficina', 'Pátio', 'Rampa', 'Diversos'].includes(obraId)) obraName = obraId;
+            obraName = obraRows[0]?.nome || obraId;
         }
 
-        // Busca nome do veículo recebedor para histórico
         let receivingVehicleName = null;
         if (receivingVehicleId) {
             const [vRows] = await connection.execute('SELECT registroInterno FROM vehicles WHERE id = ?', [receivingVehicleId]);
@@ -319,14 +222,14 @@ const createSaidaTransaction = async (req, res) => {
             id: req.body.id || crypto.randomUUID(),
             type: 'saida',
             date: new Date(date),
-            comboioVehicleId,
-            receivingVehicleId,
-            receivingVehicleName, // Salva para histórico
-            obraId,
-            obraName, // Salva para histórico
+            comboioVehicleId: sanitize(comboioVehicleId),
+            receivingVehicleId: sanitize(receivingVehicleId),
+            receivingVehicleName: sanitize(receivingVehicleName),
+            obraId: sanitize(obraId),
+            obraName: sanitize(obraName),
             employeeId: sanitize(employeeId),
             liters: safeLiters,
-            fuelType,
+            fuelType: sanitize(fuelType),
             responsibleUserEmail: sanitize(createdBy?.userEmail),
             odometro: sanitizeNumber(odometro), 
             horimetro: sanitizeNumber(horimetro),
@@ -339,12 +242,13 @@ const createSaidaTransaction = async (req, res) => {
         
         await connection.execute(`INSERT INTO comboio_transactions (${fields.join(', ')}) VALUES (${placeholders})`, values);
 
+        // Atualiza Estoque Comboio
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
         
-        // Atualiza veículo recebedor
+        // --- ATUALIZA LEITURA DO VEÍCULO RECEBEDOR (Req. 1) ---
         const vehicleUpdateData = {};
         const safeOdo = sanitizeNumber(odometro);
         const safeHor = sanitizeNumber(horimetro);
@@ -352,7 +256,12 @@ const createSaidaTransaction = async (req, res) => {
 
         if (safeOdo !== null) vehicleUpdateData.odometro = safeOdo;
         if (safeHor !== null) vehicleUpdateData.horimetro = safeHor;
-        if (safeHorDig !== null) vehicleUpdateData.horimetroDigital = safeHorDig;
+        if (safeHorDig !== null) {
+            vehicleUpdateData.horimetroDigital = safeHorDig;
+            vehicleUpdateData.horimetro = safeHorDig; // Atualiza horímetro geral se for digital
+        } else if (safeHor !== null) {
+            vehicleUpdateData.horimetro = safeHor;
+        }
 
         if (Object.keys(vehicleUpdateData).length > 0) {
             const setClause = Object.keys(vehicleUpdateData).map(key => `${key} = ?`).join(', ');
@@ -360,18 +269,19 @@ const createSaidaTransaction = async (req, res) => {
             await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...setValues, receivingVehicleId]);
         }
 
-        // --- GERA DESPESA PARA A OBRA (Valor Médio) ---
+        // --- GERA DESPESA PARA A OBRA (Req. 2) ---
         const avgPrice = await getAverageFuelPrice(connection, fuelType);
         const expenseValue = safeLiters * avgPrice;
 
         if (expenseValue > 0) {
-            await manageMonthlyExpense({
+            await manageComboioExpense({
                 connection,
                 obraId,
                 obraName,
                 date: new Date(date),
                 fuelType,
-                valueChange: expenseValue
+                valueChange: expenseValue,
+                vehicleName: receivingVehicleName
             });
         }
         
@@ -387,7 +297,6 @@ const createSaidaTransaction = async (req, res) => {
 };
 
 const createDrenagemTransaction = async (req, res) => {
-    // Mesma lógica anterior
     const { comboioVehicleId, drainingVehicleId, liters, date, fuelType, reason, createdBy } = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -404,11 +313,11 @@ const createDrenagemTransaction = async (req, res) => {
             id: req.body.id || crypto.randomUUID(),
             type: 'drenagem',
             date: new Date(date),
-            comboioVehicleId,
-            drainingVehicleId,
-            drainingVehicleName,
+            comboioVehicleId: sanitize(comboioVehicleId),
+            drainingVehicleId: sanitize(drainingVehicleId),
+            drainingVehicleName: sanitize(drainingVehicleName),
             liters: safeLiters,
-            fuelType,
+            fuelType: sanitize(fuelType),
             reason: sanitize(reason),
             responsibleUserEmail: sanitize(createdBy?.userEmail),
         };
@@ -433,6 +342,76 @@ const createDrenagemTransaction = async (req, res) => {
         res.status(201).json({ message: 'Drenagem registrada com sucesso.' });
     } catch (error) {
         await connection.rollback();
+        res.status(500).json({ error: error.message });
+    } finally {
+        connection.release();
+    }
+};
+
+const deleteTransaction = async (req, res) => {
+    const { id } = req.params;
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        const [transactionRows] = await connection.execute('SELECT * FROM comboio_transactions WHERE id = ?', [id]);
+        const transaction = transactionRows[0];
+        if (!transaction) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Transação não encontrada.' });
+        }
+
+        // Reverte Estoque e Despesas
+        if (transaction.type === 'entrada') {
+            await connection.execute(
+                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
+                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
+            );
+            
+            if (transaction.valorTotal > 0 && transaction.obraId) {
+                await createOrUpdateWeeklyFuelExpense({
+                    connection,
+                    obraId: transaction.obraId,
+                    date: new Date(transaction.date),
+                    fuelType: transaction.fuelType,
+                    partnerName: transaction.partnerName,
+                    valueChange: -transaction.valorTotal, 
+                });
+            }
+        } else if (transaction.type === 'saida') {
+            await connection.execute(
+                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
+                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
+            );
+            
+            const avgPrice = await getAverageFuelPrice(connection, transaction.fuelType);
+            const valueToRevert = transaction.liters * avgPrice;
+            
+            await manageComboioExpense({
+                connection,
+                obraId: transaction.obraId,
+                obraName: transaction.obraName, 
+                date: new Date(transaction.date),
+                fuelType: transaction.fuelType,
+                valueChange: -valueToRevert 
+            });
+        } else if (transaction.type === 'drenagem') {
+            await connection.execute(
+                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
+                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.drainingVehicleId]
+            );
+            await connection.execute(
+                'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
+                [`$.${transaction.fuelType}`, `$.${transaction.fuelType}`, transaction.liters, transaction.comboioVehicleId]
+            );
+        }
+        
+        await connection.execute('DELETE FROM comboio_transactions WHERE id = ?', [id]);
+        await connection.commit();
+        res.status(204).end();
+    } catch (error) {
+        await connection.rollback();
+        console.error('Erro ao deletar:', error);
         res.status(500).json({ error: error.message });
     } finally {
         connection.release();
