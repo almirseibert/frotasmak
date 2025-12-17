@@ -22,8 +22,10 @@ const login = async (req, res) => {
         }
 
         // --- VERIFICAÇÃO DE STATUS ---
-        // Se user_status ou status for 'inativo', bloqueia
-        const status = user.user_status || user.status; 
+        // Verifica o campo 'status' para ver se está ativo
+        // Aceita 'ativo' (minúsculo ou maiúsculo) para compatibilidade
+        const status = user.status ? user.status.toLowerCase() : '';
+        
         if (status === 'inativo') {
             return res.status(403).json({ message: 'Sua conta aguarda aprovação do administrador.' });
         }
@@ -79,19 +81,19 @@ const register = async (req, res) => {
         const newUserId = uuidv4();
 
         // Insere na tabela USERS com status INATIVO
-        // Mapeando para os campos da sua tabela: id, email, password, role, name, status, user_status, user_type, canAccessRefueling
+        // CORREÇÃO: Removido 'user_status' que não existe na tabela. Usamos apenas 'status'.
         await db.query(
             `INSERT INTO users (
                 id, name, email, password, 
                 role, user_type, 
-                status, user_status, 
+                status, 
                 canAccessRefueling, 
                 data_criacao
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
             [
                 newUserId, name, email, hashedPassword, 
                 'guest', 'guest', // Role e User Type inicial como guest
-                'inativo', 'inativo', // Status e User Status inativos
+                'inativo', // Status inativo
                 0 // canAccessRefueling false
             ] 
         );
@@ -100,7 +102,9 @@ const register = async (req, res) => {
 
     } catch (error) {
         console.error('Erro no registro:', error);
-        // Retorna erro detalhado se possível para debug, ou genérico para segurança
+        // Log detalhado do erro SQL se disponível
+        if (error.sqlMessage) console.error('SQL Error:', error.sqlMessage);
+        
         res.status(500).json({ message: 'Erro ao processar cadastro. Tente novamente.' });
     }
 };
