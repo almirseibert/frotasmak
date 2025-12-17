@@ -22,10 +22,9 @@ const login = async (req, res) => {
         }
 
         // --- VERIFICAÇÃO DE STATUS ---
-        // Aceita 'ativo' (padrão) ou verifica se user_status é 'ativo' (legado/compatibilidade)
-        const isActive = user.status === 'ativo' || user.user_status === 'ativo';
-        
-        if (!isActive) {
+        // Se user_status ou status for 'inativo', bloqueia
+        const status = user.user_status || user.status; 
+        if (status === 'inativo') {
             return res.status(403).json({ message: 'Sua conta aguarda aprovação do administrador.' });
         }
 
@@ -39,7 +38,7 @@ const login = async (req, res) => {
             { 
                 id: user.id, 
                 email: user.email, 
-                role: user.role || user.user_type, // Fallback para user_type se role for nulo
+                role: user.role || user.user_type, 
                 canAccessRefueling: user.canAccessRefueling === 1
             },
             process.env.JWT_SECRET,
@@ -80,22 +79,34 @@ const register = async (req, res) => {
         const newUserId = uuidv4();
 
         // Insere na tabela USERS com status INATIVO
+        // Mapeando para os campos da sua tabela: id, email, password, role, name, status, user_status, user_type, canAccessRefueling
         await db.query(
-            `INSERT INTO users (id, name, email, password, role, status, user_status, canAccessRefueling, created_at) 
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-            [newUserId, name, email, hashedPassword, 'guest', 'inativo', 'inativo', 0] 
+            `INSERT INTO users (
+                id, name, email, password, 
+                role, user_type, 
+                status, user_status, 
+                canAccessRefueling, 
+                data_criacao
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            [
+                newUserId, name, email, hashedPassword, 
+                'guest', 'guest', // Role e User Type inicial como guest
+                'inativo', 'inativo', // Status e User Status inativos
+                0 // canAccessRefueling false
+            ] 
         );
 
         res.status(201).json({ message: 'Solicitação enviada! Aguarde a liberação do administrador.' });
 
     } catch (error) {
         console.error('Erro no registro:', error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
+        // Retorna erro detalhado se possível para debug, ou genérico para segurança
+        res.status(500).json({ message: 'Erro ao processar cadastro. Tente novamente.' });
     }
 };
 
 // ====================================================================
-// VALIDAR SENHA (Para ações críticas)
+// VALIDAR SENHA
 // ====================================================================
 const validatePassword = async (req, res) => {
     const userId = req.user.id;
