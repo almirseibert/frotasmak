@@ -1,69 +1,60 @@
-// controllers/adminController.js
 const db = require('../database');
 const bcrypt = require('bcryptjs');
-const { v4: uuidv4 } = require('uuid'); // *** ADICIONADO PARA GERAR IDs DE USUÁRIO ***
+const { v4: uuidv4 } = require('uuid');
 
-// --- Função Auxiliar para Conversar com o Banco de Dados ---
-const parseAdminJsonFields = (data) => {
-    if (!data) return null;
-    if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.parse(data.ultimaAlteracao);
-    return data;
-};
-
-// --- ROTA: Buscar a lista de solicitações de cadastro ---
+// --- Buscar solicitações (Usuários Inativos) ---
 const getRegistrationRequests = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM registration_requests ORDER BY requestedAt DESC');
+        // Busca usuários onde status ou user_status seja 'inativo'
+        const [rows] = await db.execute(`
+            SELECT id, name, email, created_at 
+            FROM users 
+            WHERE status = 'inativo' OR user_status = 'inativo' 
+            ORDER BY created_at DESC
+        `);
         res.json(rows);
     } catch (error) {
-        console.error('Erro ao buscar solicitações de cadastro:', error);
-        res.status(500).json({ error: 'Erro ao buscar solicitações de cadastro' });
+        console.error('Erro ao buscar solicitações:', error);
+        res.status(500).json({ error: 'Erro ao buscar solicitações' });
     }
 };
 
-// --- ROTA: Aprovar uma solicitação e criar o usuário ---
+// --- Aprovar solicitação (Ativar usuário e Definir Permissões) ---
 const approveRegistrationRequest = async (req, res) => {
-    const { requestId, role, password } = req.body;
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
+    const { userId, role, canAccessRefueling } = req.body;
+
+    if (!userId) return res.status(400).json({ error: "ID do usuário obrigatório" });
 
     try {
-        const [requestRows] = await connection.execute('SELECT * FROM registration_requests WHERE id = ? FOR UPDATE', [requestId]);
-        const request = requestRows[0];
-        if (!request) {
-            await connection.rollback();
-            return res.status(404).json({ error: 'Solicitação não encontrada.' });
-        }
+        // Atualiza status, role (e user_type para compatibilidade) e permissão de abastecimento
+        // REGRA: Se 'role' não for especificado, define como 'operador' por padrão
+        await db.execute(
+            `UPDATE users 
+             SET status = 'ativo', 
+                 user_status = 'ativo', 
+                 role = ?, 
+                 user_type = ?,
+                 canAccessRefueling = ? 
+             WHERE id = ?`,
+            [role || 'operador', role || 'operador', canAccessRefueling ? 1 : 0, userId]
+        );
 
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
-        // *** CORREÇÃO: Gera UUID para o ID do usuário ***
-        const newUserId = uuidv4();
-
-        await connection.execute('INSERT INTO users (id, email, role, password) VALUES (?, ?, ?, ?)', [
-            newUserId,
-            request.email,
-            role || 'operador', // Define 'operador' como padrão se não for especificado
-            hashedPassword
-        ]);
-
-        await connection.execute('DELETE FROM registration_requests WHERE id = ?', [requestId]);
-
-        await connection.commit();
-        res.status(200).json({ message: 'Solicitação aprovada e usuário criado com sucesso.' });
+        res.status(200).json({ message: 'Usuário aprovado e ativado com sucesso.' });
     } catch (error) {
-        await connection.rollback();
-        console.error('Erro ao aprovar solicitação:', error);
-        res.status(500).json({ error: 'Erro ao aprovar solicitação.' });
-    } finally {
-        connection.release();
+        console.error('Erro ao aprovar usuário:', error);
+        res.status(500).json({ error: 'Erro ao aprovar usuário.' });
     }
 };
 
-// --- ROTA: Rejeitar uma solicitação ---
+// --- Rejeitar solicitação (Deletar usuário inativo) ---
 const deleteRegistrationRequest = async (req, res) => {
+    const { id } = req.params;
     try {
-        await db.execute('DELETE FROM registration_requests WHERE id = ?', [req.params.id]);
+        // Segurança: Só deleta se estiver inativo
+        await db.execute(
+            "DELETE FROM users WHERE id = ? AND (status = 'inativo' OR user_status = 'inativo')", 
+            [id]
+        );
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao rejeitar solicitação:', error);
@@ -71,116 +62,97 @@ const deleteRegistrationRequest = async (req, res) => {
     }
 };
 
-// --- ROTA: Atribuir um papel a um usuário existente ---
+// --- Atribuir Papel (Para usuários já ativos) ---
 const assignRole = async (req, res) => {
-    const { email, role } = req.body;
+    const { email, role, canAccessRefueling } = req.body;
     try {
-        await db.execute('UPDATE users SET role = ? WHERE email = ?', [role, email]);
-        res.status(200).json({ message: `Papel de ${role} atribuído com sucesso ao usuário ${email}.` });
+        await db.execute(
+            'UPDATE users SET role = ?, user_type = ?, canAccessRefueling = ? WHERE email = ?', 
+            [role, role, canAccessRefueling ? 1 : 0, email]
+        );
+        res.status(200).json({ message: `Permissões atualizadas para ${email}.` });
     } catch (error) {
         console.error('Erro ao atribuir papel:', error);
         res.status(500).json({ error: 'Erro ao atribuir papel.' });
     }
 };
 
-// --- ROTA: Obter a mensagem de atualização do sistema ---
+// --- Mensagens de Atualização ---
 const getUpdateMessage = async (req, res) => {
     try {
-        // --- CORREÇÃO DO BUG: Busca a ÚLTIMA mensagem salva, não a primeira ---
         const [rows] = await db.execute('SELECT * FROM updates ORDER BY timestamp DESC LIMIT 1');
-        
-        if (rows.length === 0) {
-            // Retorna um objeto padrão vazio se não houver mensagens
-            return res.json({ message: '', showPopup: false });
-        }
+        if (rows.length === 0) return res.json({ message: '', showPopup: false });
         res.json(rows[0]);
     } catch (error) {
-        console.error('Erro ao obter mensagem de atualização:', error);
-        res.status(500).json({ error: 'Erro ao obter mensagem de atualização.' });
+        console.error(error);
+        res.status(500).json({error: 'Erro update msg'});
     }
 };
 
-// --- ROTA: Salvar a mensagem de atualização do sistema ---
 const saveUpdateMessage = async (req, res) => {
     const { message, showPopup } = req.body;
-    
-    // O ideal seria ter uma lógica de "UPSERT" (update or insert)
-    // Mas a query que você tem (ON DUPLICATE KEY) vai INSERIR NOVAS LINHAS
-    // se não houver uma chave primária/única para conflitar.
-    // Como já corrigimos o GET (acima) para pegar a mais recente, esta função VAI funcionar
-    // como esperado, embora vá encher o banco de dados com mensagens antigas.
-    // (Uma solução melhor seria deletar as antigas ou usar um ID fixo)
-    
     try {
-        // Query original (continua inserindo novas linhas, mas o GET agora pega a mais recente)
-        await db.execute('INSERT INTO updates (message, showPopup, timestamp) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE message = ?, showPopup = ?, timestamp = ?',
-            [message, showPopup, new Date(), message, showPopup, new Date()]);
-        
-        res.status(200).json({ message: 'Mensagem de atualização salva com sucesso.' });
+        await db.execute('INSERT INTO updates (message, showPopup, timestamp) VALUES (?, ?, ?)', 
+            [message, showPopup, new Date()]);
+        res.status(200).json({ message: 'Atualizado.' });
     } catch (error) {
-        console.error('Erro ao salvar mensagem de atualização:', error);
-        res.status(500).json({ error: 'Erro ao salvar mensagem de atualização.' });
+        console.error(error);
+        res.status(500).json({error: 'Erro salvar msg'});
     }
 };
 
-// --- ROTA: Migrar funcionários (que não têm user) para usuários ---
+// --- Migração de Funcionários (Para usuários) ---
 const adminMigrateUsers = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
-
     try {
-        // 1. Encontra funcionários ativos sem userId
+        // 1. Busca funcionários ativos que ainda NÃO possuem usuário vinculado (userId IS NULL)
         const [employeesToMigrate] = await connection.execute(
             "SELECT id, nome, registroInterno FROM employees WHERE status = 'ativo' AND userId IS NULL"
         );
 
-        if (employeesToMigrate.length === 0) {
-            await connection.rollback();
-            return res.status(200).json({ message: 'Nenhum funcionário para migrar.' });
-        }
-
         let migratedCount = 0;
-
         for (const employee of employeesToMigrate) {
+            // Ignora funcionários sem registro interno (pois é necessário para o email)
+            if (!employee.registroInterno) {
+                console.warn(`Funcionário ${employee.nome} (ID: ${employee.id}) pulado: Sem Registro Interno.`);
+                continue;
+            }
+
             const newUserId = uuidv4();
-            // Senha padrão = registroInterno
-            const defaultPassword = employee.registroInterno || 'mak123'; 
+            
+            // REGRA: Senha padrão definida estritamente como "mak123"
+            const defaultPassword = 'mak123'; 
             const hashedPassword = await bcrypt.hash(defaultPassword, 10);
-            // Email padrão
+            
+            // REGRA: Login automático baseado no registro interno
             const email = `${employee.registroInterno.toLowerCase()}@frotasmak.com.br`;
 
-            // 2. Cria o novo usuário
+            // Cria o usuário já como ATIVO e com perfil de OPERADOR
             await connection.execute(
-                `INSERT INTO users (id, email, password, role, employeeId, name) 
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [newUserId, email, hashedPassword, 'operador', employee.id, employee.nome]
+                `INSERT INTO users (id, email, password, role, user_type, status, user_status, employeeId, name, canAccessRefueling) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [newUserId, email, hashedPassword, 'operador', 'operador', 'ativo', 'ativo', employee.id, employee.nome, 0]
             );
 
-            // 3. Atualiza o funcionário com o novo userId
-            await connection.execute(
-                `UPDATE employees SET userId = ? WHERE id = ?`,
-                [newUserId, employee.id]
-            );
-            
+            // Vincula o novo usuário ao funcionário existente
+            await connection.execute(`UPDATE employees SET userId = ? WHERE id = ?`, [newUserId, employee.id]);
             migratedCount++;
         }
-
         await connection.commit();
-        res.status(200).json({ message: `Migração concluída! ${migratedCount} usuários foram criados e vinculados.` });
-
+        res.status(200).json({ message: `Migração: ${migratedCount} usuários criados.` });
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao migrar usuários:', error);
-        // Trata erro de email duplicado
+        console.error('Erro migração:', error);
+        // Tratamento específico para duplicidade de email
         if (error.code === 'ER_DUP_ENTRY') {
-            return res.status(500).json({ error: 'Erro de Duplicidade: Um dos emails (registroInterno@frotasmak.com.br) já existe na tabela de usuários.' });
+             return res.status(409).json({ error: 'Conflito: Alguns emails gerados já existem no sistema. Verifique os Registros Internos.' });
         }
-        res.status(500).json({ error: 'Erro interno ao migrar usuários.' });
+        res.status(500).json({ error: 'Erro na migração.' });
     } finally {
         connection.release();
     }
 };
-
 
 module.exports = {
     getRegistrationRequests,
@@ -189,5 +161,5 @@ module.exports = {
     assignRole,
     getUpdateMessage,
     saveUpdateMessage,
-    adminMigrateUsers // *** ADICIONADO À EXPORTAÇÃO ***
+    adminMigrateUsers
 };

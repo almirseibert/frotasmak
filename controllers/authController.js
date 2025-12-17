@@ -1,10 +1,10 @@
 const db = require('../database');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
 
 // ====================================================================
 // FUNÇÃO DE LOGIN
-// OBJETIVO: Autenticar um usuário e retornar um token JWT.
 // ====================================================================
 const login = async (req, res) => {
     const { email, password } = req.body;
@@ -14,29 +14,44 @@ const login = async (req, res) => {
     }
 
     try {
-        // Encontra o usuário pelo e-mail no banco de dados
         const [rows] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
         const user = rows[0];
 
         if (!user) {
-            // Resposta genérica para não informar se o e-mail existe ou não
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
 
-        // Compara a senha fornecida com a senha criptografada armazenada
+        // --- VERIFICAÇÃO DE STATUS ---
+        // Aceita 'ativo' (padrão) ou verifica se user_status é 'ativo' (legado/compatibilidade)
+        const isActive = user.status === 'ativo' || user.user_status === 'ativo';
+        
+        if (!isActive) {
+            return res.status(403).json({ message: 'Sua conta aguarda aprovação do administrador.' });
+        }
+
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) {
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
 
-        // Se as credenciais estiverem corretas, gera o token JWT
+        // Gera token com permissões
         const token = jwt.sign(
-            { id: user.id, email: user.email, role: user.role },
+            { 
+                id: user.id, 
+                email: user.email, 
+                role: user.role || user.user_type, // Fallback para user_type se role for nulo
+                canAccessRefueling: user.canAccessRefueling === 1
+            },
             process.env.JWT_SECRET,
-            { expiresIn: '24h' } // Token expira em 24 horas
+            { expiresIn: '24h' }
         );
 
-        res.json({ token });
+        res.json({ token, user: { 
+            name: user.name, 
+            email: user.email, 
+            role: user.role || user.user_type,
+            canAccessRefueling: user.canAccessRefueling === 1
+        }});
 
     } catch (error) {
         console.error('Erro no login:', error);
@@ -45,8 +60,7 @@ const login = async (req, res) => {
 };
 
 // ====================================================================
-// FUNÇÃO DE REGISTRO
-// OBJETIVO: Registrar um novo usuário (exemplo, pode ser ajustado para o seu fluxo de "pedido de registro").
+// FUNÇÃO DE REGISTRO (Solicitação de Cadastro)
 // ====================================================================
 const register = async (req, res) => {
     const { name, email, password } = req.body;
@@ -56,23 +70,23 @@ const register = async (req, res) => {
     }
 
     try {
-        // Verifica se o e-mail já está cadastrado
         const [existingUsers] = await db.query('SELECT id FROM users WHERE email = ?', [email]);
         if (existingUsers.length > 0) {
             return res.status(409).json({ message: 'Este e-mail já está em uso.' });
         }
 
-        // Criptografa a senha antes de salvar no banco
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
+        const newUserId = uuidv4();
 
-        // Insere o novo usuário com um role padrão.
+        // Insere na tabela USERS com status INATIVO
         await db.query(
-            'INSERT INTO users (name, email, password, role) VALUES (?, ?, ?, ?)',
-            [name, email, hashedPassword, 'viewer'] // 'viewer' como role padrão
+            `INSERT INTO users (id, name, email, password, role, status, user_status, canAccessRefueling, created_at) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            [newUserId, name, email, hashedPassword, 'guest', 'inativo', 'inativo', 0] 
         );
 
-        res.status(201).json({ message: 'Usuário registrado com sucesso.' });
+        res.status(201).json({ message: 'Solicitação enviada! Aguarde a liberação do administrador.' });
 
     } catch (error) {
         console.error('Erro no registro:', error);
@@ -81,48 +95,66 @@ const register = async (req, res) => {
 };
 
 // ====================================================================
-// FUNÇÃO PARA VALIDAR A SENHA (A QUE ESTAVA FALTANDO)
-// OBJETIVO: Confirmar a senha do usuário logado para ações sensíveis.
+// VALIDAR SENHA (Para ações críticas)
 // ====================================================================
 const validatePassword = async (req, res) => {
-    // O ID do usuário vem do token, que foi verificado pelo authMiddleware
     const userId = req.user.id;
     const { password } = req.body;
 
-    if (!password) {
-        return res.status(400).json({ message: 'A senha é obrigatória para validação.' });
-    }
+    if (!password) return res.status(400).json({ message: 'Senha obrigatória.' });
 
     try {
-        // Busca a senha criptografada do usuário no banco
         const [rows] = await db.query('SELECT password FROM users WHERE id = ?', [userId]);
         const user = rows[0];
 
-        if (!user) {
-            // Esta verificação é uma segurança extra
-            return res.status(404).json({ message: 'Usuário não encontrado.' });
-        }
+        if (!user) return res.status(404).json({ message: 'Usuário não encontrado.' });
 
-        // Compara a senha fornecida com a senha armazenada
         const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) return res.status(401).json({ message: 'Senha incorreta.' });
 
-        if (!isMatch) {
-            return res.status(401).json({ message: 'Senha incorreta.' });
-        }
-
-        // Se a senha estiver correta, retorna uma resposta de sucesso
-        res.status(200).json({ message: 'Senha validada com sucesso.' });
-
+        res.status(200).json({ message: 'Senha validada.' });
     } catch (error) {
-        console.error('Erro ao validar senha:', error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
+        console.error('Erro validação senha:', error);
+        res.status(500).json({ message: 'Erro interno.' });
     }
 };
 
-// Exporta todas as funções para que o authRoutes.js possa usá-las
+// ====================================================================
+// TROCAR SENHA
+// ====================================================================
+const changePassword = async (req, res) => {
+    const userId = req.user.id;
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+        return res.status(400).json({ message: 'Preencha a senha atual e a nova senha.' });
+    }
+
+    try {
+        const [rows] = await db.query('SELECT password FROM users WHERE id = ?', [userId]);
+        const user = rows[0];
+
+        if (!user) return res.status(404).json({ message: 'Usuário não encontrado.' });
+
+        const isMatch = await bcrypt.compare(currentPassword, user.password);
+        if (!isMatch) return res.status(401).json({ message: 'A senha atual está incorreta.' });
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedNewPassword = await bcrypt.hash(newPassword, salt);
+
+        await db.query('UPDATE users SET password = ? WHERE id = ?', [hashedNewPassword, userId]);
+
+        res.status(200).json({ message: 'Senha alterada com sucesso.' });
+
+    } catch (error) {
+        console.error('Erro ao trocar senha:', error);
+        res.status(500).json({ message: 'Erro ao trocar senha.' });
+    }
+};
+
 module.exports = {
     login,
     register,
-    validatePassword
+    validatePassword,
+    changePassword
 };
-
