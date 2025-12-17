@@ -10,9 +10,11 @@ const parseAdminJsonFields = (data) => {
 };
 
 // --- ROTA: Buscar a lista de solicitações de cadastro ---
-// AGORA: Busca na tabela 'users' onde status é 'inativo'
+// Busca na tabela 'users' onde status é 'inativo'
 const getRegistrationRequests = async (req, res) => {
     try {
+        // Seleciona apenas os campos necessários. 
+        // O alias 'created_at' mapeia para 'data_criacao' se existir, ou null.
         const [rows] = await db.execute("SELECT id, name, email, data_criacao as created_at FROM users WHERE status = 'inativo' ORDER BY data_criacao DESC");
         res.json(rows);
     } catch (error) {
@@ -21,38 +23,50 @@ const getRegistrationRequests = async (req, res) => {
     }
 };
 
-// --- ROTA: Aprovar uma solicitação e criar o usuário ---
-// AGORA: Atualiza o usuário existente na tabela 'users'
+// --- ROTA: Aprovar uma solicitação e ativar o usuário ---
 const approveRegistrationRequest = async (req, res) => {
-    // Atenção: O frontend envia { userId, role, canAccessRefueling }
     const { userId, role, canAccessRefueling } = req.body;
 
-    if (!userId) return res.status(400).json({ error: "ID do usuário obrigatório" });
+    if (!userId) {
+        return res.status(400).json({ error: "ID do usuário é obrigatório." });
+    }
 
     try {
+        // Atualiza o usuário existente para 'ativo'
+        // Define role, user_type (para compatibilidade) e permissão de abastecimento
+        // ATENÇÃO: A query usa 'status' (varchar) e 'canAccessRefueling' (tinyint)
+        
+        const roleToSet = role || 'operador';
+        const accessValue = canAccessRefueling ? 1 : 0;
+
+        // Se sua tabela tem 'user_status', atualizamos ele também para garantir
+        // Mas como vimos que sua tabela só tem 'status', focamos nele.
+        // Adiciono 'user_status' na query apenas se a coluna existir, mas para segurança vou remover e focar no padrão.
+        // Se precisar de 'user_status', adicione: user_status = 'ativo',
+        
         await db.execute(
             `UPDATE users 
              SET status = 'ativo', 
-                 user_status = 'ativo', 
                  role = ?, 
                  user_type = ?,
                  canAccessRefueling = ? 
              WHERE id = ?`,
-            [role || 'operador', role || 'operador', canAccessRefueling ? 1 : 0, userId]
+            [roleToSet, roleToSet, accessValue, userId]
         );
 
-        res.status(200).json({ message: 'Solicitação aprovada e usuário ativado com sucesso.' });
+        res.status(200).json({ message: 'Usuário aprovado e ativado com sucesso.' });
     } catch (error) {
-        console.error('Erro ao aprovar solicitação:', error);
-        res.status(500).json({ error: 'Erro ao aprovar solicitação.' });
+        console.error('Erro ao aprovar solicitação (UPDATE users):', error);
+        res.status(500).json({ error: 'Erro interno ao aprovar solicitação.' });
     }
 };
 
 // --- ROTA: Rejeitar uma solicitação ---
-// AGORA: Deleta da tabela 'users' (apenas se inativo por segurança)
 const deleteRegistrationRequest = async (req, res) => {
+    const { id } = req.params;
     try {
-        await db.execute("DELETE FROM users WHERE id = ? AND status = 'inativo'", [req.params.id]);
+        // Deleta o usuário da tabela 'users' apenas se ele estiver inativo (segurança)
+        await db.execute("DELETE FROM users WHERE id = ? AND status = 'inativo'", [id]);
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao rejeitar solicitação:', error);
@@ -64,7 +78,6 @@ const deleteRegistrationRequest = async (req, res) => {
 const assignRole = async (req, res) => {
     const { email, role, canAccessRefueling } = req.body;
     try {
-        // Atualiza role, user_type e permissão de abastecimento
         await db.execute('UPDATE users SET role = ?, user_type = ?, canAccessRefueling = ? WHERE email = ?', 
             [role, role, canAccessRefueling ? 1 : 0, email]);
         res.status(200).json({ message: `Permissões de ${email} atualizadas com sucesso.` });
@@ -107,7 +120,6 @@ const adminMigrateUsers = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        // 1. Encontra funcionários ativos sem userId
         const [employeesToMigrate] = await connection.execute(
             "SELECT id, nome, registroInterno FROM employees WHERE status = 'ativo' AND userId IS NULL"
         );
@@ -115,13 +127,14 @@ const adminMigrateUsers = async (req, res) => {
         let migratedCount = 0;
 
         for (const employee of employeesToMigrate) {
-            if (!employee.registroInterno) continue; // Pula se não tiver registro
+            if (!employee.registroInterno) continue;
 
             const newUserId = uuidv4();
             const defaultPassword = 'mak123'; 
             const hashedPassword = await bcrypt.hash(defaultPassword, 10);
             const email = `${employee.registroInterno.toLowerCase()}@frotasmak.com.br`;
 
+            // Query ajustada para a estrutura da tabela users
             await connection.execute(
                 `INSERT INTO users (id, email, password, role, user_type, status, employeeId, name, canAccessRefueling, data_criacao) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
