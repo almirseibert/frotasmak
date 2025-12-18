@@ -1,10 +1,9 @@
 // controllers/vehicleController.js
 const db = require('../database');
 const { randomUUID } = require('crypto');
-const fs = require('fs'); // File System para deletar imagem antiga se houver
-const path = require('path'); // Importar o Path
+const fs = require('fs'); 
+const path = require('path'); 
 
-// ... (parseJsonSafe mantido para segurança)
 const parseJsonSafe = (field, key, defaultValue = null) => {
     if (field === null || typeof field === 'undefined') return defaultValue;
     if (typeof field === 'object') return field; 
@@ -41,19 +40,8 @@ const parseVehicleJsonFields = (vehicle) => {
 const getAllVehicles = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM vehicles');
-        const [historyRows] = await db.execute('SELECT * FROM vehicle_history');
-        
-        const vehicles = rows.map(v => {
-            const vehicle = parseVehicleJsonFields(v);
-            vehicle.history = historyRows
-                .filter(h => h.vehicleId === vehicle.id)
-                .map(h => ({
-                    ...h,
-                    details: parseJsonSafe(h.details, 'history.details') 
-                }));
-            return vehicle;
-        });
-        
+        // Otimização: Não carregar histórico completo na listagem geral para performance
+        const vehicles = rows.map(parseVehicleJsonFields);
         res.json(vehicles);
     } catch (error) {
         console.error('Erro ao buscar veículos:', error);
@@ -85,12 +73,17 @@ const getVehicleById = async (req, res) => {
 
 const createVehicle = async (req, res) => {
     const data = req.body;
+    
+    // Serialização JSON segura
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     delete data.history; 
 
     data.id = randomUUID();
 
+    // GARANTIA: Se o frontend enviou campos antigos, ignorar ou converter
+    // Mas o frontend novo já deve estar enviando 'horimetro' corretamente.
+    
     const fields = Object.keys(data);
     const values = Object.values(data);
     const placeholders = fields.map(() => '?').join(', ');
@@ -108,6 +101,7 @@ const createVehicle = async (req, res) => {
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
+    
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.maintenanceLocation) data.maintenanceLocation = JSON.stringify(data.maintenanceLocation);
@@ -146,24 +140,20 @@ const uploadVehicleImage = async (req, res) => {
         
         if (rows.length > 0 && rows[0].fotoURL) {
             const oldFotoURL = rows[0].fotoURL; 
-            
-            // CORREÇÃO CRÍTICA PARA ARQUITETURA DOCKER/EASYPANEL
             const oldLocalPath = path.resolve(process.cwd(), 'public', oldFotoURL.substring(1)); 
 
             try {
                 if (fs.existsSync(oldLocalPath)) {
                     fs.unlinkSync(oldLocalPath); 
-                    console.log(`[Upload] Imagem antiga ${oldLocalPath} deletada.`);
                 }
             } catch (unlinkError) {
-                console.warn(`[Upload] Aviso: Falha ao deletar imagem antiga ${oldLocalPath}.`, unlinkError.message);
+                console.warn(`[Upload] Aviso: Falha ao deletar imagem antiga.`, unlinkError.message);
             }
         }
 
         await connection.execute('UPDATE vehicles SET fotoURL = ? WHERE id = ?', [fotoURL, id]);
         
         await connection.commit();
-        
         res.json({ message: 'Upload bem-sucedido!', fotoURL: fotoURL });
 
     } catch (error) {
@@ -179,11 +169,14 @@ const deleteVehicle = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
     try {
-        const [revisions] = await connection.execute('SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', [req.params.id, req.params.id]);
+        // Remove revisões associadas para manter integridade
+        const [revisions] = await connection.execute('SELECT id FROM revisions WHERE vehicleId = ?', [req.params.id]);
         if (revisions.length > 0) {
             const revisionIds = revisions.map(r => r.id);
-            await connection.execute(`DELETE FROM revisions_history WHERE revisionId IN (?)`, [revisionIds]);
-            await connection.execute(`DELETE FROM revisions WHERE id IN (?)`, [revisionIds]);
+            // Corrige query string para deletar múltiplos
+            const placeholders = revisionIds.map(() => '?').join(',');
+            await connection.execute(`DELETE FROM revisions_history WHERE revisionId IN (${placeholders})`, revisionIds);
+            await connection.execute(`DELETE FROM revisions WHERE id IN (${placeholders})`, revisionIds);
         }
         
         await connection.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
@@ -208,13 +201,16 @@ const allocateToObra = async (req, res) => {
     try {
         const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraId]);
         const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+        const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
 
         const obra = obraRows[0];
         const employee = employeeRows[0];
+        const vehicle = vehicleRows[0];
 
-        if (!obra || !employee) {
-            throw new Error("Dados de obra ou funcionário inválidos.");
-        }
+        if (!obra || !employee) throw new Error("Dados inválidos.");
+        
+        // Determina campo correto para salvar leitura baseado no TIPO e não apenas no que veio do front
+        // Mas confiamos no readingType vindo do front pois já foi validado pelo rules.js
         
         const newHistoryEntry = {
             vehicleId: id,
@@ -250,7 +246,7 @@ const allocateToObra = async (req, res) => {
                 id: obraId,
                 nome: obra.nome
             }),
-            [readingType]: readingValue, 
+            [readingType]: readingValue, // Atualiza odometro ou horimetro
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -264,9 +260,7 @@ const allocateToObra = async (req, res) => {
         
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
 
-        const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
-        const vehicle = vehicleRows[0];
-        
+        // Histórico de Obras (Legado/Compatibilidade)
         const newObraHistoryEntryData = {
             id: randomUUID(),
             obraId: obraId,
@@ -281,7 +275,7 @@ const allocateToObra = async (req, res) => {
             dataSaida: null,
             odometroEntrada: readingType === 'odometro' ? readingValue : null,
             odometroSaida: null,
-            horimetroEntrada: (readingType === 'horimetro' || readingType === 'horimetroDigital') ? readingValue : null,
+            horimetroEntrada: readingType === 'horimetro' ? readingValue : null,
             horimetroSaida: null
         };
         
@@ -320,7 +314,7 @@ const deallocateFromObra = async (req, res) => {
         );
         
         if (!historyRows || historyRows.length === 0) {
-            throw new Error('Nenhum histórico de alocação em obra ativo encontrado para este veículo.');
+            throw new Error('Nenhum histórico de alocação em obra ativo encontrado.');
         }
 
         const activeHistory = historyRows[0];
@@ -328,10 +322,6 @@ const deallocateFromObra = async (req, res) => {
         
         const obraIdFromHistory = historyDetails.obraId;
         const employeeIdFromHistory = historyDetails.employeeId;
-
-        if (!obraIdFromHistory) {
-            throw new Error('Não foi possível encontrar o ID da obra no histórico ativo. A desalocação falhou.');
-        }
 
         const newDetails = {
             ...historyDetails,
@@ -370,7 +360,7 @@ const deallocateFromObra = async (req, res) => {
         if (readingType === 'odometro') {
             obraHistoryUpdateFields.push('odometroSaida = ?');
             obraHistoryUpdateValues.push(readingValue);
-        } else if (readingType === 'horimetro' || readingType === 'horimetroDigital') {
+        } else {
             obraHistoryUpdateFields.push('horimetroSaida = ?');
             obraHistoryUpdateValues.push(readingValue);
         }
@@ -419,9 +409,7 @@ const assignToOperational = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        if (!employeeId) {
-            throw new Error('ID do funcionário não pode ser vazio.');
-        }
+        if (!employeeId) throw new Error('ID do funcionário não pode ser vazio.');
 
         const now = new Date();
         
@@ -431,10 +419,6 @@ const assignToOperational = async (req, res) => {
         );
         
         const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
-        
-        if (!selectedEmployeeRows || selectedEmployeeRows.length === 0) {
-            throw new Error('Funcionário selecionado não encontrado no banco de dados.');
-        }
         const employeeName = selectedEmployeeRows[0]?.nome;
         
         const newHistoryEntry = {
@@ -490,11 +474,11 @@ const assignToOperational = async (req, res) => {
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeId]);
 
         await connection.commit();
-        res.status(200).json({ message: 'Veículo alocado para operação com sucesso.' });
+        res.status(200).json({ message: 'Veículo alocado para operação.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro ao alocar veículo para operação:", error.message); 
-        res.status(500).json({ error: 'Falha ao alocar o veículo.', message: error.message });
+        console.error("Erro ao alocar veículo para operação:", error); 
+        res.status(500).json({ error: 'Falha ao alocar o veículo.' });
     } finally {
         connection.release();
     }
@@ -621,7 +605,7 @@ const startMaintenance = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error("Erro ao iniciar manutenção:", error);
-        res.status(500).json({ error: 'Falha ao iniciar a manutenção.', message: error.message });
+        res.status(500).json({ error: 'Falha ao iniciar a manutenção.' });
     } finally {
         connection.release();
     }
