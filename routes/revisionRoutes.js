@@ -5,28 +5,23 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 router.use(authMiddleware);
 
-// Rota para buscar o plano de revisões consolidado (GET /api/revisions/plan)
-router.get('/plan', revisionController.getConsolidatedRevisionPlan);
+// --- Rotas de Revisão (Alinhadas com o Controller Atual) ---
 
-// Rota para buscar o histórico de revisões de um veículo específico (GET /api/revisions/history/:vehicleId)
-router.get('/history/:vehicleId', revisionController.getRevisionHistoryByVehicle);
-
-// Rota para CONCLUIR uma revisão/manutenção (POST /api/revisions/complete)
-router.post('/complete', revisionController.completeRevision);
-
-// Rota para buscar todos os planos de revisão (GET /api/revisions/)
-// Esta é a rota que o RevisionsPage.js usa para carregar os dados
+// 1. Buscar todos os planos de revisão (Listagem principal)
 router.get('/', revisionController.getAllRevisionPlans);
 
-// Rota para CRIAR um novo plano (POST /api/revisions/)
+// 2. Criar um novo plano de revisão (Manual ou Automático)
 router.post('/', revisionController.createRevisionPlan);
 
-// Rota para ATUALIZAR/AGENDAR um plano (PUT /api/revisions/:id)
-// O frontend envia o VEHICLE ID como :id
+// 3. Atualizar/Agendar um plano existente (ou criar se não existir para o veículo)
+// O frontend envia o ID do VEÍCULO na URL para edição/agendamento
 router.put('/:id', revisionController.updateRevisionPlan);
 
-// Rota para DELETAR um plano (DELETE /api/revisions/:id)
-// Esta rota espera o REVISION ID, não o vehicleId
+// 4. Concluir uma revisão (Registra histórico e atualiza veículo)
+router.post('/complete/:id', revisionController.completeRevision);
+
+// 5. Deletar um plano de revisão (Remove agendamento)
+// O frontend deve enviar o ID da REVISÃO aqui
 router.delete('/:id', revisionController.deleteRevisionPlan);
 
 module.exports = router;
