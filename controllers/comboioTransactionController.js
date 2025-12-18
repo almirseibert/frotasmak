@@ -85,7 +85,6 @@ const manageSaidaExpense = async ({ connection, obraId, date, fuelType, valueCha
 const updateVehicleReading = async (connection, vehicleId, readings) => {
     if (!vehicleId) return;
     
-    // Recebe apenas odometro ou horimetro (unificado)
     const { odometro, horimetro } = readings;
     
     const valOdo = sanitizeNumber(odometro);
@@ -93,15 +92,13 @@ const updateVehicleReading = async (connection, vehicleId, readings) => {
 
     const updateData = {};
 
-    // Se veio Odômetro válido
     if (valOdo !== null && valOdo > 0) {
         updateData.odometro = valOdo;
     }
 
-    // Se veio Horímetro válido (Unificado)
     if (valHor !== null && valHor > 0) {
         updateData.horimetro = valHor;
-        // Zera as colunas legadas para garantir consistência
+        // Zera as colunas legadas no VEÍCULO para garantir consistência
         updateData.horimetroDigital = null;
         updateData.horimetroAnalogico = null;
     }
@@ -197,7 +194,6 @@ const createEntradaTransaction = async (req, res) => {
 
         await connection.execute(`INSERT INTO comboio_transactions (${fields.join(', ')}) VALUES (${placeholders})`, values);
 
-        // Atualiza Estoque (SOMA)
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
@@ -218,7 +214,7 @@ const createEntradaTransaction = async (req, res) => {
 const createSaidaTransaction = async (req, res) => {
     const { 
         comboioVehicleId, receivingVehicleId, 
-        odometro, horimetro, // Campos unificados
+        odometro, horimetro, 
         liters, date, fuelType, 
         obraId, employeeId, createdBy 
     } = req.body;
@@ -241,6 +237,7 @@ const createSaidaTransaction = async (req, res) => {
             if (vRows.length > 0) receivingVehicleName = vRows[0].registroInterno;
         }
 
+        // CORREÇÃO: Removemos campos horimetroDigital e horimetroAnalogico
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
             type: 'saida',
@@ -254,11 +251,8 @@ const createSaidaTransaction = async (req, res) => {
             liters: safeLiters,
             fuelType: sanitize(fuelType),
             responsibleUserEmail: sanitize(createdBy?.userEmail),
-            // Salva apenas os campos unificados. Ignora digital/analogico.
             odometro: sanitizeNumber(odometro), 
-            horimetro: sanitizeNumber(horimetro),
-            horimetroDigital: null,
-            horimetroAnalogico: null
+            horimetro: sanitizeNumber(horimetro)
         };
         
         const fields = Object.keys(transactionData);
@@ -462,7 +456,6 @@ const updateTransaction = async (req, res) => {
                 valueChange: valueToAdd
             });
 
-            // Atualiza leitura do veículo (Unificado)
             if (newData.odometro || newData.horimetro) {
                 await updateVehicleReading(connection, newData.receivingVehicleId || oldData.receivingVehicleId, {
                     odometro: newData.odometro,
@@ -471,11 +464,11 @@ const updateTransaction = async (req, res) => {
             }
         }
 
-        // --- UPDATE SQL ---
+        // --- UPDATE SQL (Sem colunas legadas) ---
         const updateQuery = `
             UPDATE comboio_transactions 
             SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, 
-                odometro = ?, horimetro = ?, horimetroDigital = NULL, horimetroAnalogico = NULL, invoiceNumber = ? 
+                odometro = ?, horimetro = ?, invoiceNumber = ? 
             WHERE id = ?
         `;
         
