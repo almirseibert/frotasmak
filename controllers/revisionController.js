@@ -2,7 +2,7 @@
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
 
-// ... (parseJsonSafe se mantém igual) ...
+// Helper para parsear JSON de forma segura
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
     if (typeof field === 'object') return field;
@@ -15,7 +15,6 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-
 // --- GET: Obter todos os planos de revisão ---
 const getAllRevisionPlans = async (req, res) => {
     try {
@@ -24,10 +23,8 @@ const getAllRevisionPlans = async (req, res) => {
 
         const revisions = plans.map(plan => {
             const ultimaAlteracao = parseJsonSafe(plan.ultimaAlteracao, 'ultimaAlteracao');
-
             const isImported = !plan.vehicleId;
             const effectiveVehicleId = isImported ? plan.id : plan.vehicleId;
-
             const { tipo, ...restOfPlan } = plan;
             const historico = historyRows.filter(h => h.revisionId === plan.id);
             
@@ -50,10 +47,7 @@ const getAllRevisionPlans = async (req, res) => {
 // --- POST: Criar Plano ---
 const createRevisionPlan = async (req, res) => {
     const { descricao, ...restOfBody } = req.body;
-    const data = { 
-        ...restOfBody, 
-        tipo: descricao 
-    };
+    const data = { ...restOfBody, tipo: descricao };
     
     if (!data.id) data.id = uuidv4();
     delete data.historico; 
@@ -74,15 +68,11 @@ const createRevisionPlan = async (req, res) => {
     }
 };
 
-
 // --- PUT: Atualizar Plano ---
 const updateRevisionPlan = async (req, res) => {
     const { id: vehicleId } = req.params; 
     const { descricao, ...restOfBody } = req.body;
-    const data = {
-        ...restOfBody,
-        tipo: descricao 
-    };
+    const data = { ...restOfBody, tipo: descricao };
 
     const ultimaAlteracao = JSON.stringify({
         userId: req.user?.id || 'sistema',
@@ -101,7 +91,6 @@ const updateRevisionPlan = async (req, res) => {
         
         if (rows.length > 0) {
             const revisionId = rows[0].id;
-            
             delete data.id;
             delete data.vehicleId;
             delete data.historico;
@@ -114,32 +103,130 @@ const updateRevisionPlan = async (req, res) => {
 
             await connection.execute(query, [...values, revisionId]);
         } else {
-            const newRevisionId = uuidv4(); 
-            
-            const newPlan = {
-                id: newRevisionId,
-                vehicleId: vehicleId,
-                ...data, 
-                ultimaAlteracao: ultimaAlteracao
-            };
-            
+            const newRevisionId = uuidv4();
+            const newPlan = { id: newRevisionId, vehicleId: vehicleId, ...data, ultimaAlteracao: ultimaAlteracao };
             delete newPlan.historico;
-
             const fields = Object.keys(newPlan);
             const values = Object.values(newPlan);
             const placeholders = fields.map(() => '?').join(', ');
             const query = `INSERT INTO revisions (${fields.join(', ')}) VALUES (${placeholders})`;
-
             await connection.execute(query, values);
+        }
+        await connection.commit();
+        res.json({ message: 'Agendamento de revisão salvo com sucesso' });
+    } catch (error) {
+        await connection.rollback();
+        console.error('Erro ao salvar plano de revisão:', error);
+        res.status(500).json({ error: 'Erro ao salvar plano de revisão' });
+    } finally {
+        connection.release();
+    }
+};
+
+// --- POST: Concluir Revisão (Novo - Unificado) ---
+const completeRevision = async (req, res) => {
+    const { id: vehicleId } = req.params;
+    const { 
+        realizadaEm, 
+        realizadaPor, 
+        leituraRealizada, // Valor da leitura (Km ou Hr) - Unificado
+        descricao, 
+        custo, 
+        notaFiscal,
+        proximaRevisaoData,
+        proximaRevisaoLeitura // Meta para a próxima
+    } = req.body;
+
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+
+        // 1. Identificar a Revisão e o Veículo
+        const [revRows] = await connection.execute('SELECT * FROM revisions WHERE vehicleId = ?', [vehicleId]);
+        if (revRows.length === 0) throw new Error('Plano de revisão não encontrado.');
+        const revision = revRows[0];
+
+        const [vehRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [vehicleId]);
+        if (vehRows.length === 0) throw new Error('Veículo não encontrado.');
+        const vehicle = vehRows[0];
+
+        // 2. Registrar no Histórico
+        const historyId = uuidv4();
+        const historyData = {
+            id: historyId,
+            revisionId: revision.id,
+            data: realizadaEm,
+            descricao: descricao || 'Revisão Concluída',
+            km: leituraRealizada, // Salva o valor genérico (seja km ou hr)
+            realizadaPor: realizadaPor,
+            custo: parseFloat(custo) || 0,
+            notaFiscal: notaFiscal
+        };
+
+        const histFields = Object.keys(historyData);
+        const histValues = Object.values(historyData);
+        const histPlaceholders = histFields.map(() => '?').join(', ');
+        
+        await connection.execute(
+            `INSERT INTO revisions_history (${histFields.join(', ')}) VALUES (${histPlaceholders})`, 
+            histValues
+        );
+
+        // 3. Atualizar Plano para a Próxima
+        // Regra Unificada:
+        // Se vehicle.mediaCalculo === 'horimetro' -> Atualiza proximaRevisaoHorimetro
+        // Caso contrário (padrão) -> Atualiza proximaRevisaoOdometro
+        
+        let updatePlanQuery = 'UPDATE revisions SET proximaRevisaoData = ?';
+        const updatePlanParams = [proximaRevisaoData];
+
+        const isHourBased = vehicle.mediaCalculo === 'horimetro';
+        
+        if (isHourBased) {
+            updatePlanQuery += ', proximaRevisaoHorimetro = ?';
+            updatePlanParams.push(proximaRevisaoLeitura);
+        } else {
+            updatePlanQuery += ', proximaRevisaoOdometro = ?';
+            updatePlanParams.push(proximaRevisaoLeitura);
+        }
+        
+        // Atualiza metadata
+        const ultimaAlteracao = JSON.stringify({
+             userId: req.user?.id || 'sistema',
+             userEmail: req.user?.email || 'sistema',
+             timestamp: new Date().toISOString(),
+             action: 'Conclusão de Revisão'
+        });
+        
+        updatePlanQuery += ', ultimaAlteracao = ? WHERE id = ?';
+        updatePlanParams.push(ultimaAlteracao);
+        updatePlanParams.push(revision.id);
+
+        await connection.execute(updatePlanQuery, updatePlanParams);
+
+        // 4. Atualizar Leitura do Veículo (Unificado)
+        // Ao concluir revisão, assumimos que a leitura informada é a real atual e atualizamos o veículo
+        let updateVehicleQuery = '';
+        const readingVal = parseFloat(leituraRealizada);
+
+        if (isHourBased) {
+            // Atualiza horimetro e LIMPA os campos legados para evitar conflito
+            updateVehicleQuery = 'UPDATE vehicles SET horimetro = ?, horimetroDigital = NULL, horimetroAnalogico = NULL WHERE id = ?';
+        } else {
+            updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
+        }
+
+        if (!isNaN(readingVal) && readingVal > 0) {
+            await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
         }
 
         await connection.commit();
-        res.json({ message: 'Agendamento de revisão salvo com sucesso' });
-    } catch (error)
-    {
+        res.json({ message: 'Revisão concluída e veículo atualizado com sucesso!' });
+
+    } catch (error) {
         await connection.rollback();
-        console.error('Erro ao salvar plano de revisão:', error); 
-        res.status(500).json({ error: 'Erro ao salvar plano de revisão' });
+        console.error('Erro ao concluir revisão:', error);
+        res.status(500).json({ error: error.message });
     } finally {
         connection.release();
     }
@@ -156,162 +243,10 @@ const deleteRevisionPlan = async (req, res) => {
     }
 };
 
-// --- GET: Consolidado ---
-const getConsolidatedRevisionPlan = async (req, res) => {
-    try {
-        const [rows] = await db.query('SELECT * FROM revisions WHERE proximaRevisaoData IS NOT NULL');
-        res.json(rows);
-    } catch (error) {
-        console.error('Erro ao buscar plano consolidado:', error);
-        res.status(500).json({ error: 'Erro ao buscar plano consolidado de revisões' });
-    }
-};
-
-
-// --- GET: Histórico ---
-const getRevisionHistoryByVehicle = async (req, res) => {
-    const { vehicleId } = req.params;
-    if (!vehicleId) {
-        return res.status(400).json({ error: 'vehicleId é obrigatório.' });
-    }
-    try {
-        const [planRows] = await db.execute(
-            'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
-            [vehicleId, vehicleId]
-        );
-
-        if (planRows.length === 0) {
-             const [historyRowsLegacy] = await db.query('SELECT * FROM revisions_history WHERE revisionId = ? ORDER BY data DESC', [vehicleId]);
-             if (historyRowsLegacy.length > 0) {
-                return res.json(historyRowsLegacy);
-             }
-             return res.json([]); 
-        }
-
-        const revisionId = planRows[0].id; 
-
-        const query = `
-            SELECT h.* FROM revisions_history h
-            WHERE h.revisionId = ? 
-            ORDER BY h.data DESC
-        `;
-        const [rows] = await db.query(query, [revisionId]);
-        res.json(rows);
-    } catch (error) {
-        console.error(`Erro ao buscar histórico do veículo ${vehicleId}:`, error);
-        res.status(500).json({ error: 'Erro ao buscar histórico de revisões' });
-    }
-};
-
-// --- POST: Concluir uma revisão (ATUALIZADO COM UPDATE DO VEÍCULO) ---
-const completeRevision = async (req, res) => {
-    const { vehicleId, isHourBased, ...historyEntry } = req.body;
-    
-    if (!vehicleId) {
-        return res.status(400).json({ error: 'vehicleId é obrigatório.' });
-    }
-
-    const connection = await db.getConnection();
-    try {
-        await connection.beginTransaction();
-
-        // 1. Encontrar o 'revisionId'
-        const [rows] = await connection.execute(
-            'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
-            [vehicleId, vehicleId]
-        );
-        
-        let revisionId;
-        
-        if (rows.length === 0) {
-            console.warn(`Nenhum plano de revisão encontrado para vehicleId: ${vehicleId}. Criando um novo plano.`);
-            revisionId = uuidv4();
-            const newPlanQuery = `INSERT INTO revisions (id, vehicleId, ultimaAlteracao) VALUES (?, ?, ?)`;
-            const ultimaAlteracao = JSON.stringify({
-                userId: req.user?.id || 'sistema',
-                userEmail: req.user?.email || 'sistema',
-                timestamp: new Date().toISOString(),
-                action: 'Criação automática por conclusão de revisão'
-            });
-            await connection.execute(newPlanQuery, [revisionId, vehicleId, ultimaAlteracao]);
-        } else {
-             revisionId = rows[0].id;
-        }
-
-        // 2. Adicionar o registro ao histórico
-        const historyQuery = `
-            INSERT INTO revisions_history (
-                revisionId, data, descricao, realizadaEm, realizadaPor, 
-                odometro, horimetro
-            ) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        `;
-        
-        const leituraValue = historyEntry.leituraRealizada || 0;
-        const odometroValue = !isHourBased ? leituraValue : null;
-        const horimetroValue = isHourBased ? leituraValue : null;
-        const dataRevisao = new Date(historyEntry.realizadaEm);
-
-        await connection.execute(historyQuery, [
-            revisionId,
-            dataRevisao,              
-            historyEntry.descricao,   
-            dataRevisao,              
-            historyEntry.realizadaPor,
-            odometroValue,
-            horimetroValue
-        ]);
-
-        // 3. Limpar (resetar) o plano de revisão
-        const resetQuery = `
-            UPDATE revisions 
-            SET 
-                proximaRevisaoData = NULL, 
-                proximaRevisaoOdometro = NULL, 
-                proximaRevisaoHorimetro = NULL,
-                avisoAntecedenciaKmHr = NULL,
-                avisoAntecedenciaDias = NULL,
-                tipo = NULL, 
-                ultimaAlteracao = ?
-            WHERE id = ?
-        `;
-        const ultimaAlteracaoReset = JSON.stringify({
-             userId: req.user?.id || 'sistema',
-             userEmail: req.user?.email || 'sistema',
-             timestamp: new Date().toISOString(),
-             action: 'Conclusão de Revisão'
-        });
-        await connection.execute(resetQuery, [ultimaAlteracaoReset, revisionId]);
-
-        // 4. ATUALIZAR O VEÍCULO COM A NOVA LEITURA (NOVO!)
-        // Atualiza o campo correto (horimetro ou odometro) com a leitura realizada na revisão.
-        // Assume-se que a validação de consistência (se é menor ou maior) já foi feita no frontend (Modal com Senha).
-        let updateVehicleQuery = '';
-        if (isHourBased) {
-            updateVehicleQuery = 'UPDATE vehicles SET horimetro = ? WHERE id = ?';
-        } else {
-            updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
-        }
-        
-        await connection.execute(updateVehicleQuery, [leituraValue, vehicleId]);
-
-        await connection.commit();
-        res.status(200).json({ message: 'Revisão concluída e veículo atualizado com sucesso!' });
-    } catch (error) {
-        await connection.rollback();
-        console.error("Erro ao concluir revisão:", error);
-        res.status(500).json({ error: 'Falha ao concluir a revisão.' });
-    } finally {
-        connection.release();
-    }
-};
-
 module.exports = {
     getAllRevisionPlans,
     createRevisionPlan,
     updateRevisionPlan,
-    deleteRevisionPlan,
-    getConsolidatedRevisionPlan,
-    getRevisionHistoryByVehicle,
-    completeRevision
+    completeRevision,
+    deleteRevisionPlan
 };

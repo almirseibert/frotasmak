@@ -62,7 +62,6 @@ const updateTire = async (req, res) => {
     delete data.id;
     delete data.currentVehicleId;
     delete data.position;
-    // O status geralmente é controlado por transação, mas permitimos edição se necessário (cuidado)
     
     const fields = Object.keys(data);
     const values = Object.values(data);
@@ -89,9 +88,9 @@ const registerTransaction = async (req, res) => {
         odometer = null, 
         horimeter = null, 
         observation = '',
-        employeeName = null, 
+        employeeName = null,
         obraName = null,
-        vendorName = null // Para recapagem
+        vendorName = null 
     } = req.body;
 
     const connection = await db.getConnection();
@@ -103,7 +102,7 @@ const registerTransaction = async (req, res) => {
             
             // Verifica ocupação
             const [occupied] = await connection.execute(
-                'SELECT id FROM tires WHERE currentVehicleId = ? AND position = ?', 
+                'SELECT id FROM tires WHERE currentVehicleId = ? AND position = ?',
                 [vehicleId, position]
             );
             if (occupied.length > 0) {
@@ -114,86 +113,75 @@ const registerTransaction = async (req, res) => {
                 `UPDATE tires SET status = 'Em Uso', currentVehicleId = ?, position = ?, location = 'Veículo' WHERE id = ?`,
                 [vehicleId, position, tireId]
             );
-
         } else if (type === 'remove') {
             await connection.execute(
                 `UPDATE tires SET status = 'Estoque', currentVehicleId = NULL, position = NULL, location = 'Almoxarifado' WHERE id = ?`,
                 [tireId]
             );
-        
-        } else if (type === 'transfer') { 
-            // Envio para Step/Reserva
-            const locDesc = `Obra: ${obraName || 'N/A'} / Resp: ${employeeName || 'N/A'}`;
+        } else if (type === 'transfer') {
+            const locDesc = `Obra: ${obraName || 'Desconhecida'}`;
             await connection.execute(
                 `UPDATE tires SET status = 'Step/Reserva', currentVehicleId = NULL, position = NULL, location = ? WHERE id = ?`,
                 [locDesc, tireId]
             );
-
         } else if (type === 'maintenance') {
-            // Envio para Recapagem
-            const locDesc = `Fornecedor: ${vendorName || 'Externo'}`;
+            const locDesc = `Fornecedor: ${vendorName || 'Desconhecido'}`;
             await connection.execute(
-                `UPDATE tires SET status = 'Recapagem', currentVehicleId = NULL, position = NULL, location = ?, tireCondition = 'Recapado' WHERE id = ?`,
+                `UPDATE tires SET status = 'Recapagem', currentVehicleId = NULL, position = NULL, location = ? WHERE id = ?`,
                 [locDesc, tireId]
             );
-
+        } else if (type === 'restock') {
+            await connection.execute(
+                `UPDATE tires SET status = 'Estoque', location = 'Almoxarifado' WHERE id = ?`,
+                [tireId]
+            );
         } else if (type === 'scrap') {
-            // Descarte / Sucata
             await connection.execute(
                 `UPDATE tires SET status = 'Sucata', currentVehicleId = NULL, position = NULL, location = 'Descarte' WHERE id = ?`,
                 [tireId]
             );
-
-        } else if (type === 'restock') {
-            // Retorno ao Estoque (vindo de Step, Recapagem, etc)
-            await connection.execute(
-                `UPDATE tires SET status = 'Estoque', currentVehicleId = NULL, position = NULL, location = 'Almoxarifado' WHERE id = ?`,
-                [tireId]
-            );
         }
 
-        // Registra Histórico
+        // Histórico do Pneu
         const transId = uuidv4();
-        let finalObservation = observation || '';
-        
-        if (type === 'transfer') finalObservation = `Enviado para ${obraName} (Resp: ${employeeName}). ${observation}`;
-        if (type === 'maintenance') finalObservation = `Enviado para Recapagem: ${vendorName}. ${observation}`;
-        if (type === 'scrap') finalObservation = `Enviado para Sucata. ${observation}`;
-
-        const transactionDate = date ? new Date(date) : new Date();
-
         await connection.execute(
-            `INSERT INTO tire_transactions (id, tireId, vehicleId, type, position, date, odometer, horimeter, observation)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                transId, 
-                tireId, 
-                vehicleId || null, 
-                type, 
-                position || null, 
-                transactionDate, 
-                odometer || null, 
-                horimeter || null, 
-                finalObservation
-            ]
+            `INSERT INTO tire_transactions (id, tireId, vehicleId, type, position, date, odometer, horimeter, observation, employeeName)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [transId, tireId, vehicleId, type, position, date, odometer, horimeter, observation, employeeName]
         );
 
-        // Atualiza Leitura do Veículo (se aplicável)
-        if (vehicleId) {
-            if (odometer && !isNaN(parseFloat(odometer)) && parseFloat(odometer) > 0) {
-                await connection.execute('UPDATE vehicles SET odometro = GREATEST(IFNULL(odometro, 0), ?) WHERE id = ?', [odometer, vehicleId]);
-            }
-            if (horimeter && !isNaN(parseFloat(horimeter)) && parseFloat(horimeter) > 0) {
-                await connection.execute('UPDATE vehicles SET horimetro = GREATEST(IFNULL(horimetro, 0), ?) WHERE id = ?', [horimeter, vehicleId]);
+        // --- ATUALIZAÇÃO DA LEITURA DO VEÍCULO (UNIFICADO) ---
+        // Se uma leitura foi informada durante a troca, atualizamos o veículo
+        if (vehicleId && (odometer || horimeter)) {
+            const [vehicles] = await connection.execute('SELECT mediaCalculo FROM vehicles WHERE id = ?', [vehicleId]);
+            if (vehicles.length > 0) {
+                const vehicle = vehicles[0];
+                let updateV = '';
+                let val = 0;
+
+                const isHourBased = vehicle.mediaCalculo === 'horimetro';
+
+                if (isHourBased && horimeter) {
+                    // Atualiza horimetro e limpa legados
+                    updateV = 'UPDATE vehicles SET horimetro = ?, horimetroDigital = NULL, horimetroAnalogico = NULL WHERE id = ?';
+                    val = parseFloat(horimeter);
+                } else if (!isHourBased && odometer) {
+                    updateV = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
+                    val = parseFloat(odometer);
+                }
+
+                if (updateV && val > 0) {
+                    await connection.execute(updateV, [val, vehicleId]);
+                }
             }
         }
 
         await connection.commit();
-        res.json({ message: 'Movimentação registrada com sucesso!' });
+        res.json({ message: 'Movimentação registrada com sucesso.' });
 
     } catch (error) {
         await connection.rollback();
-        console.error('Erro na transação de pneu:', error);
+        console.error("Erro Pneu Transaction:", error);
         res.status(500).json({ error: error.message || 'Erro interno ao registrar movimentação.' });
     } finally {
         connection.release();
@@ -232,7 +220,6 @@ const getVehicleTireHistory = async (req, res) => {
         const [rows] = await db.query(query, [vehicleId]);
         res.json(rows);
     } catch (error) {
-        console.error(error);
         res.status(500).json({ error: 'Erro ao buscar histórico do veículo.' });
     }
 };
