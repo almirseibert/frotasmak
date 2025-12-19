@@ -19,7 +19,7 @@ router.put('/:id', revisionController.updateRevisionPlan);
 
 // 4. Concluir uma revisão
 // Rota flexível: aceita chamada direta ou com ID na URL, 
-// pois o controller agora verifica req.params e req.body
+// pois o controller verifica req.params E req.body
 router.post('/complete', revisionController.completeRevision);
 router.post('/complete/:id', revisionController.completeRevision);
 

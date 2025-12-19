@@ -126,13 +126,14 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- POST: Concluir Revisão (Unificado e Robusto) ---
+// --- POST: Concluir Revisão (Unificado - Horímetro Único) ---
 const completeRevision = async (req, res) => {
-    // Busca ID do veículo nos parametros OU no corpo da requisição
+    // Busca ID do veículo nos parametros OU no corpo da requisição de forma robusta
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
     if (!vehicleId) {
-        return res.status(400).json({ error: 'ID do veículo é obrigatório.' });
+        console.error('Erro 400: vehicleId não fornecido. Body:', req.body);
+        return res.status(400).json({ error: 'ID do veículo é obrigatório para concluir a revisão.' });
     }
 
     const { 
@@ -152,7 +153,12 @@ const completeRevision = async (req, res) => {
 
         // 1. Identificar a Revisão e o Veículo
         const [revRows] = await connection.execute('SELECT * FROM revisions WHERE vehicleId = ?', [vehicleId]);
-        if (revRows.length === 0) throw new Error('Plano de revisão não encontrado.');
+        // Se não existir plano, não impede a conclusão (pode ser avulsa), mas vamos avisar se não achar
+        if (revRows.length === 0) {
+             // Opcional: Criar plano on-the-fly ou retornar erro. 
+             // Vamos assumir erro por enquanto para forçar cadastro correto.
+             throw new Error('Plano de revisão não encontrado para este veículo.');
+        }
         const revision = revRows[0];
 
         const [vehRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [vehicleId]);
@@ -166,7 +172,7 @@ const completeRevision = async (req, res) => {
             revisionId: revision.id,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
-            km: leituraRealizada, // Campo genérico no banco
+            km: leituraRealizada, // Campo genérico no banco histórico
             realizadaPor: realizadaPor,
             custo: parseFloat(custo) || 0,
             notaFiscal: notaFiscal
@@ -181,12 +187,13 @@ const completeRevision = async (req, res) => {
             histValues
         );
 
-        // 3. Atualizar Plano para a Próxima (Unificado)
+        // 3. Atualizar Plano para a Próxima
+        // Verifica se é Horímetro ou Odômetro baseando-se na regra de negócio do veículo
+        const isHourBased = vehicle.mediaCalculo === 'horimetro';
+        
         let updatePlanQuery = 'UPDATE revisions SET proximaRevisaoData = ?';
         const updatePlanParams = [proximaRevisaoData];
 
-        const isHourBased = vehicle.mediaCalculo === 'horimetro';
-        
         if (isHourBased) {
             updatePlanQuery += ', proximaRevisaoHorimetro = ?';
             updatePlanParams.push(proximaRevisaoLeitura);
@@ -208,17 +215,26 @@ const completeRevision = async (req, res) => {
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
-        // 4. Atualizar Leitura do Veículo
+        // 4. Atualizar Leitura do Veículo (REGRA GLOBAL 1 e ALTERAÇÃO DE HORÍMETRO)
         const readingVal = parseFloat(leituraRealizada);
+        
         if (!isNaN(readingVal) && readingVal > 0) {
             let updateVehicleQuery = '';
+            
             if (isHourBased) {
-                // Atualiza horimetro e LIMPA legados para evitar conflito futuro
-                updateVehicleQuery = 'UPDATE vehicles SET horimetro = ?, horimetroDigital = NULL, horimetroAnalogico = NULL WHERE id = ?';
+                // REGRA NOVA: Atualiza apenas a coluna 'horimetro' e força NULL nas legadas
+                updateVehicleQuery = `
+                    UPDATE vehicles 
+                    SET horimetro = ?, 
+                        horimetroDigital = NULL, 
+                        horimetroAnalogico = NULL 
+                    WHERE id = ?`;
+                await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
             } else {
+                // Veículos Leves / Trecho: Atualiza Odômetro
                 updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
+                await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
             }
-            await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
         }
 
         await connection.commit();
