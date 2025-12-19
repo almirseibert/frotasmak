@@ -1,5 +1,5 @@
 const db = require('../database');
-const { v4: uuidv4 } = require('uuid');
+// const { v4: uuidv4 } = require('uuid'); // UUID não é mais necessário para IDs auto-incremento
 
 // --- Helper para parsear JSON de forma segura ---
 const parseJsonSafe = (field, key) => {
@@ -58,7 +58,7 @@ const createRevisionPlan = async (req, res) => {
     const { descricao, ...restOfBody } = req.body;
     const data = { ...restOfBody, tipo: descricao };
     
-    if (!data.id) data.id = uuidv4();
+    // REMOVIDO: data.id = uuidv4(); (Deixa o banco gerar Auto-Increment)
     delete data.historico; 
     
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
@@ -100,6 +100,7 @@ const updateRevisionPlan = async (req, res) => {
         );
         
         if (rows.length > 0) {
+            // Atualiza existente
             const revisionId = rows[0].id;
             delete data.id;
             delete data.vehicleId;
@@ -113,9 +114,11 @@ const updateRevisionPlan = async (req, res) => {
 
             await connection.execute(query, [...values, revisionId]);
         } else {
-            const newRevisionId = uuidv4();
-            const newPlan = { id: newRevisionId, vehicleId: vehicleId, ...data, ultimaAlteracao: ultimaAlteracao };
+            // Cria novo se não existir (ID Auto-increment)
+            // REMOVIDO: const newRevisionId = uuidv4();
+            const newPlan = { vehicleId: vehicleId, ...data, ultimaAlteracao: ultimaAlteracao };
             delete newPlan.historico;
+            
             const fields = Object.keys(newPlan);
             const values = Object.values(newPlan);
             const placeholders = fields.map(() => '?').join(', ');
@@ -133,7 +136,7 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- POST: Concluir Revisão (CORRIGIDO ERRO DE COLUNAS INEXISTENTES) ---
+// --- POST: Concluir Revisão (CORRIGIDO ERRO DE ID INTEIRO) ---
 const completeRevision = async (req, res) => {
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
@@ -166,9 +169,8 @@ const completeRevision = async (req, res) => {
         if (revRows.length > 0) {
             revisionId = revRows[0].id;
         } else {
-            revisionId = uuidv4();
+            // Auto-criação de plano (Sem ID explícito)
             const initialPlan = {
-                id: revisionId,
                 vehicleId: vehicleId,
                 tipo: 'Manutenção Inicial',
                 proximaRevisaoData: proximaRevisaoData || null,
@@ -183,10 +185,11 @@ const completeRevision = async (req, res) => {
             const values = Object.values(initialPlan);
             const placeholders = fields.map(() => '?').join(', ');
             
-            await connection.execute(
+            const [result] = await connection.execute(
                 `INSERT INTO revisions (${fields.join(', ')}) VALUES (${placeholders})`, 
                 values
             );
+            revisionId = result.insertId; // Captura o ID numérico gerado pelo banco
         }
 
         const [vehRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [vehicleId]);
@@ -196,12 +199,10 @@ const completeRevision = async (req, res) => {
         // Determina se é base Horimetro antes de montar o objeto de histórico
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
 
-        // 2. Registrar no Histórico (CORREÇÃO AQUI)
-        const historyId = uuidv4();
+        // 2. Registrar no Histórico (Sem ID explícito)
         
         // Removemos 'custo' e 'notaFiscal' pois as colunas não existem no banco de dados
         const historyData = {
-            id: historyId,
             revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
@@ -292,6 +293,7 @@ const completeRevision = async (req, res) => {
     }
 };
 
+// --- DELETE: Deletar Plano ---
 const deleteRevisionPlan = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
