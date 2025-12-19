@@ -18,7 +18,8 @@ router.post('/', revisionController.createRevisionPlan);
 router.put('/:id', revisionController.updateRevisionPlan);
 
 // 4. Concluir uma revisão (Registra histórico e atualiza veículo)
-router.post('/complete/:id', revisionController.completeRevision);
+// Ajustado para '/complete' (sem :id na URL) para compatibilidade com o Frontend
+router.post('/complete', revisionController.completeRevision);
 
 // 5. Deletar um plano de revisão (Remove agendamento)
 // O frontend deve enviar o ID da REVISÃO aqui

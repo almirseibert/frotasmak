@@ -1,8 +1,7 @@
-// controllers/revisionController.js
+// src/controllers/revisionController.js
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
 
-// Helper para parsear JSON de forma segura
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
     if (typeof field === 'object') return field;
@@ -15,7 +14,6 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-// --- GET: Obter todos os planos de revisão ---
 const getAllRevisionPlans = async (req, res) => {
     try {
         const [plans] = await db.query('SELECT * FROM revisions');
@@ -44,7 +42,6 @@ const getAllRevisionPlans = async (req, res) => {
     }
 };
 
-// --- POST: Criar Plano ---
 const createRevisionPlan = async (req, res) => {
     const { descricao, ...restOfBody } = req.body;
     const data = { ...restOfBody, tipo: descricao };
@@ -68,7 +65,6 @@ const createRevisionPlan = async (req, res) => {
     }
 };
 
-// --- PUT: Atualizar Plano ---
 const updateRevisionPlan = async (req, res) => {
     const { id: vehicleId } = req.params; 
     const { descricao, ...restOfBody } = req.body;
@@ -123,18 +119,24 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- POST: Concluir Revisão (Novo - Unificado) ---
+// --- POST: Concluir Revisão (CORRIGIDO PARA LER BODY) ---
 const completeRevision = async (req, res) => {
-    const { id: vehicleId } = req.params;
+    // Tenta pegar o ID dos params (se existir) ou do body (para compatibilidade com frontend)
+    const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
+
+    if (!vehicleId) {
+        return res.status(400).json({ error: 'ID do veículo é obrigatório para concluir revisão.' });
+    }
+
     const { 
         realizadaEm, 
         realizadaPor, 
-        leituraRealizada, // Valor da leitura (Km ou Hr) - Unificado
+        leituraRealizada, 
         descricao, 
         custo, 
         notaFiscal,
         proximaRevisaoData,
-        proximaRevisaoLeitura // Meta para a próxima
+        proximaRevisaoLeitura 
     } = req.body;
 
     const connection = await db.getConnection();
@@ -157,7 +159,7 @@ const completeRevision = async (req, res) => {
             revisionId: revision.id,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
-            km: leituraRealizada, // Salva o valor genérico (seja km ou hr)
+            km: leituraRealizada, 
             realizadaPor: realizadaPor,
             custo: parseFloat(custo) || 0,
             notaFiscal: notaFiscal
@@ -172,11 +174,7 @@ const completeRevision = async (req, res) => {
             histValues
         );
 
-        // 3. Atualizar Plano para a Próxima
-        // Regra Unificada:
-        // Se vehicle.mediaCalculo === 'horimetro' -> Atualiza proximaRevisaoHorimetro
-        // Caso contrário (padrão) -> Atualiza proximaRevisaoOdometro
-        
+        // 3. Atualizar Plano para a Próxima (Unificado)
         let updatePlanQuery = 'UPDATE revisions SET proximaRevisaoData = ?';
         const updatePlanParams = [proximaRevisaoData];
 
@@ -190,7 +188,6 @@ const completeRevision = async (req, res) => {
             updatePlanParams.push(proximaRevisaoLeitura);
         }
         
-        // Atualiza metadata
         const ultimaAlteracao = JSON.stringify({
              userId: req.user?.id || 'sistema',
              userEmail: req.user?.email || 'sistema',
@@ -204,19 +201,15 @@ const completeRevision = async (req, res) => {
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
-        // 4. Atualizar Leitura do Veículo (Unificado)
-        // Ao concluir revisão, assumimos que a leitura informada é a real atual e atualizamos o veículo
-        let updateVehicleQuery = '';
+        // 4. Atualizar Leitura do Veículo
         const readingVal = parseFloat(leituraRealizada);
-
-        if (isHourBased) {
-            // Atualiza horimetro e LIMPA os campos legados para evitar conflito
-            updateVehicleQuery = 'UPDATE vehicles SET horimetro = ?, horimetroDigital = NULL, horimetroAnalogico = NULL WHERE id = ?';
-        } else {
-            updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
-        }
-
         if (!isNaN(readingVal) && readingVal > 0) {
+            let updateVehicleQuery = '';
+            if (isHourBased) {
+                updateVehicleQuery = 'UPDATE vehicles SET horimetro = ?, horimetroDigital = NULL, horimetroAnalogico = NULL WHERE id = ?';
+            } else {
+                updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
+            }
             await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
         }
 
@@ -232,7 +225,6 @@ const completeRevision = async (req, res) => {
     }
 };
 
-// --- DELETE: Deletar Plano ---
 const deleteRevisionPlan = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
