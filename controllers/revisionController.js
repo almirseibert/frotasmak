@@ -84,6 +84,10 @@ const updateRevisionPlan = async (req, res) => {
     
     const data = { ...restOfBody, tipo: descricao || '' };
 
+    // Sanitização para evitar erro de string vazia em campos numéricos no update
+    if (data.avisoAntecedenciaKmHr === '') data.avisoAntecedenciaKmHr = null;
+    if (data.avisoAntecedenciaDias === '') data.avisoAntecedenciaDias = null;
+
     const ultimaAlteracao = JSON.stringify({
         userId: req.user?.id || 'sistema',
         userEmail: req.user?.email || 'sistema',
@@ -136,7 +140,7 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- POST: Concluir Revisão (CORRIGIDO ERRO DE ID INTEIRO) ---
+// --- POST: Concluir Revisão (CORRIGIDO ERRO DE ID INTEIRO E DOUBLE VALUE) ---
 const completeRevision = async (req, res) => {
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
@@ -158,6 +162,15 @@ const completeRevision = async (req, res) => {
         avisoAntecedenciaDias
     } = req.body;
 
+    // --- SANITIZAÇÃO DE ENTRADAS ---
+    // Converte string vazia '' para null para evitar erros de SQL em campos numéricos/data
+    const sanitize = (val) => (val === '' || val === undefined) ? null : val;
+
+    const sanitizedProximaData = sanitize(proximaRevisaoData);
+    const sanitizedProximaLeitura = sanitize(proximaRevisaoLeitura);
+    const sanitizedAvisoKmHr = sanitize(avisoAntecedenciaKmHr);
+    const sanitizedAvisoDias = sanitize(avisoAntecedenciaDias);
+
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
@@ -173,11 +186,11 @@ const completeRevision = async (req, res) => {
             const initialPlan = {
                 vehicleId: vehicleId,
                 tipo: 'Manutenção Inicial',
-                proximaRevisaoData: proximaRevisaoData || null,
+                proximaRevisaoData: sanitizedProximaData,
                 proximaRevisaoOdometro: null,
                 proximaRevisaoHorimetro: null,
-                avisoAntecedenciaKmHr: avisoAntecedenciaKmHr || null,
-                avisoAntecedenciaDias: avisoAntecedenciaDias || null,
+                avisoAntecedenciaKmHr: sanitizedAvisoKmHr,
+                avisoAntecedenciaDias: sanitizedAvisoDias,
                 ultimaAlteracao: JSON.stringify({ userId: 'sistema', action: 'Auto-create on complete' })
             };
 
@@ -229,23 +242,23 @@ const completeRevision = async (req, res) => {
 
         // 3. Atualizar Plano para a Próxima
         let updatePlanQuery = 'UPDATE revisions SET proximaRevisaoData = ?';
-        const updatePlanParams = [proximaRevisaoData];
+        const updatePlanParams = [sanitizedProximaData];
 
         if (isHourBased) {
             updatePlanQuery += ', proximaRevisaoHorimetro = ?';
-            updatePlanParams.push(proximaRevisaoLeitura);
+            updatePlanParams.push(sanitizedProximaLeitura);
         } else {
             updatePlanQuery += ', proximaRevisaoOdometro = ?';
-            updatePlanParams.push(proximaRevisaoLeitura);
+            updatePlanParams.push(sanitizedProximaLeitura);
         }
 
-        if (avisoAntecedenciaKmHr !== undefined && avisoAntecedenciaKmHr !== null) {
+        if (req.body.avisoAntecedenciaKmHr !== undefined) {
             updatePlanQuery += ', avisoAntecedenciaKmHr = ?';
-            updatePlanParams.push(avisoAntecedenciaKmHr);
+            updatePlanParams.push(sanitizedAvisoKmHr);
         }
-        if (avisoAntecedenciaDias !== undefined && avisoAntecedenciaDias !== null) {
+        if (req.body.avisoAntecedenciaDias !== undefined) {
             updatePlanQuery += ', avisoAntecedenciaDias = ?';
-            updatePlanParams.push(avisoAntecedenciaDias);
+            updatePlanParams.push(sanitizedAvisoDias);
         }
         
         const ultimaAlteracao = JSON.stringify({
