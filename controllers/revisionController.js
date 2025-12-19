@@ -1,8 +1,7 @@
-// controllers/revisionController.js
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
 
-// Helper para parsear JSON de forma segura
+// --- Helper para parsear JSON de forma segura ---
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
     if (typeof field === 'object') return field;
@@ -23,6 +22,7 @@ const getAllRevisionPlans = async (req, res) => {
 
         const revisions = plans.map(plan => {
             const ultimaAlteracao = parseJsonSafe(plan.ultimaAlteracao, 'ultimaAlteracao');
+            // Se não tem vehicleId explícito, assume que o ID do plano é o vehicleId (migração antiga)
             const isImported = !plan.vehicleId;
             const effectiveVehicleId = isImported ? plan.id : plan.vehicleId;
             const { tipo, ...restOfPlan } = plan;
@@ -84,12 +84,14 @@ const updateRevisionPlan = async (req, res) => {
     try {
         await connection.beginTransaction();
 
+        // Verifica se já existe plano para este veículo
         const [rows] = await connection.execute(
             'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
             [vehicleId, vehicleId]
         );
         
         if (rows.length > 0) {
+            // Atualiza existente
             const revisionId = rows[0].id;
             delete data.id;
             delete data.vehicleId;
@@ -103,6 +105,7 @@ const updateRevisionPlan = async (req, res) => {
 
             await connection.execute(query, [...values, revisionId]);
         } else {
+            // Cria novo se não existir
             const newRevisionId = uuidv4();
             const newPlan = { id: newRevisionId, vehicleId: vehicleId, ...data, ultimaAlteracao: ultimaAlteracao };
             delete newPlan.historico;
@@ -123,13 +126,13 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- POST: Concluir Revisão (CORRIGIDO) ---
+// --- POST: Concluir Revisão (Unificado e Robusto) ---
 const completeRevision = async (req, res) => {
-    // CORREÇÃO: Tenta pegar ID do params OU do body. Isso resolve o erro 400.
+    // Busca ID do veículo nos parametros OU no corpo da requisição
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
     if (!vehicleId) {
-        return res.status(400).json({ error: 'ID do veículo não informado na URL ou no corpo da requisição.' });
+        return res.status(400).json({ error: 'ID do veículo é obrigatório.' });
     }
 
     const { 
@@ -163,7 +166,7 @@ const completeRevision = async (req, res) => {
             revisionId: revision.id,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
-            km: leituraRealizada, // Salva o valor genérico
+            km: leituraRealizada, // Campo genérico no banco
             realizadaPor: realizadaPor,
             custo: parseFloat(custo) || 0,
             notaFiscal: notaFiscal
@@ -178,7 +181,7 @@ const completeRevision = async (req, res) => {
             histValues
         );
 
-        // 3. Atualizar Plano para a Próxima (Lógica Unificada)
+        // 3. Atualizar Plano para a Próxima (Unificado)
         let updatePlanQuery = 'UPDATE revisions SET proximaRevisaoData = ?';
         const updatePlanParams = [proximaRevisaoData];
 
@@ -192,7 +195,6 @@ const completeRevision = async (req, res) => {
             updatePlanParams.push(proximaRevisaoLeitura);
         }
         
-        // Atualizar metadata
         const ultimaAlteracao = JSON.stringify({
              userId: req.user?.id || 'sistema',
              userEmail: req.user?.email || 'sistema',
@@ -211,7 +213,7 @@ const completeRevision = async (req, res) => {
         if (!isNaN(readingVal) && readingVal > 0) {
             let updateVehicleQuery = '';
             if (isHourBased) {
-                // Atualiza horimetro e limpa legados
+                // Atualiza horimetro e LIMPA legados para evitar conflito futuro
                 updateVehicleQuery = 'UPDATE vehicles SET horimetro = ?, horimetroDigital = NULL, horimetroAnalogico = NULL WHERE id = ?';
             } else {
                 updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
@@ -225,7 +227,7 @@ const completeRevision = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao concluir revisão:', error);
-        res.status(500).json({ error: error.message || 'Erro interno.' });
+        res.status(500).json({ error: error.message });
     } finally {
         connection.release();
     }
