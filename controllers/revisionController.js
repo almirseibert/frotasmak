@@ -68,7 +68,7 @@ const createRevisionPlan = async (req, res) => {
     }
 };
 
-// --- PUT: Atualizar Plano ---
+// --- PUT: Atualizar Plano (Agendamento/Edição) ---
 const updateRevisionPlan = async (req, res) => {
     const { id: vehicleId } = req.params; 
     const { descricao, ...restOfBody } = req.body;
@@ -100,6 +100,7 @@ const updateRevisionPlan = async (req, res) => {
             delete data.historico;
             data.ultimaAlteracao = ultimaAlteracao; 
 
+            // Construção dinâmica da query permite salvar colunas como avisoAntecedenciaKmHr se existirem no body
             const fields = Object.keys(data);
             const values = Object.values(data);
             const setClause = fields.map(field => `${field} = ?`).join(', ');
@@ -130,12 +131,11 @@ const updateRevisionPlan = async (req, res) => {
 
 // --- POST: Concluir Revisão (Unificado - Horímetro Único) ---
 const completeRevision = async (req, res) => {
-    // Busca ID do veículo nos parametros OU no corpo da requisição de forma robusta
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
     if (!vehicleId) {
-        console.error('Erro 400: vehicleId não fornecido. Body Keys:', Object.keys(req.body));
-        return res.status(400).json({ error: 'ID do veículo é obrigatório para concluir a revisão.' });
+        console.error('Erro 400: vehicleId não fornecido.', req.body);
+        return res.status(400).json({ error: 'ID do veículo é obrigatório.' });
     }
 
     const { 
@@ -146,7 +146,10 @@ const completeRevision = async (req, res) => {
         custo, 
         notaFiscal,
         proximaRevisaoData,
-        proximaRevisaoLeitura
+        proximaRevisaoLeitura,
+        // Novos campos opcionais para definir alertas da próxima
+        avisoAntecedenciaKmHr,
+        avisoAntecedenciaDias
     } = req.body;
 
     const connection = await db.getConnection();
@@ -160,11 +163,8 @@ const completeRevision = async (req, res) => {
         if (revRows.length > 0) {
             revisionId = revRows[0].id;
         } else {
-            // CORREÇÃO: Se não existir plano, CRIA UM NOVO automaticamente
-            // Isso permite concluir revisões avulsas sem precisar "Agendar" antes.
+            // Cria novo se não existir
             revisionId = uuidv4();
-            console.log(`Criando plano automático para veículo ${vehicleId}`);
-            
             const initialPlan = {
                 id: revisionId,
                 vehicleId: vehicleId,
@@ -172,6 +172,8 @@ const completeRevision = async (req, res) => {
                 proximaRevisaoData: proximaRevisaoData || null,
                 proximaRevisaoOdometro: null,
                 proximaRevisaoHorimetro: null,
+                avisoAntecedenciaKmHr: avisoAntecedenciaKmHr || null,
+                avisoAntecedenciaDias: avisoAntecedenciaDias || null,
                 ultimaAlteracao: JSON.stringify({ userId: 'sistema', action: 'Auto-create on complete' })
             };
 
@@ -224,6 +226,17 @@ const completeRevision = async (req, res) => {
             updatePlanQuery += ', proximaRevisaoOdometro = ?';
             updatePlanParams.push(proximaRevisaoLeitura);
         }
+
+        // Se o usuário mandou novos parâmetros de antecedência, atualiza.
+        // Se não mandou, mantém o que já estava no banco (não altera).
+        if (avisoAntecedenciaKmHr !== undefined && avisoAntecedenciaKmHr !== null) {
+            updatePlanQuery += ', avisoAntecedenciaKmHr = ?';
+            updatePlanParams.push(avisoAntecedenciaKmHr);
+        }
+        if (avisoAntecedenciaDias !== undefined && avisoAntecedenciaDias !== null) {
+            updatePlanQuery += ', avisoAntecedenciaDias = ?';
+            updatePlanParams.push(avisoAntecedenciaDias);
+        }
         
         const ultimaAlteracao = JSON.stringify({
              userId: req.user?.id || 'sistema',
@@ -234,7 +247,7 @@ const completeRevision = async (req, res) => {
         
         updatePlanQuery += ', ultimaAlteracao = ? WHERE id = ?';
         updatePlanParams.push(ultimaAlteracao);
-        updatePlanParams.push(revisionId); // Use revisionId variable
+        updatePlanParams.push(revisionId);
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
@@ -270,7 +283,6 @@ const completeRevision = async (req, res) => {
     }
 };
 
-// --- DELETE: Deletar Plano ---
 const deleteRevisionPlan = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
