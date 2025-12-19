@@ -133,7 +133,7 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- POST: Concluir Revisão (CORRIGIDO ERRO DE COLUNA KM) ---
+// --- POST: Concluir Revisão (CORRIGIDO ERRO DE COLUNAS INEXISTENTES) ---
 const completeRevision = async (req, res) => {
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
@@ -198,15 +198,16 @@ const completeRevision = async (req, res) => {
 
         // 2. Registrar no Histórico (CORREÇÃO AQUI)
         const historyId = uuidv4();
+        
+        // Removemos 'custo' e 'notaFiscal' pois as colunas não existem no banco de dados
         const historyData = {
             id: historyId,
             revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
-            // km: leituraRealizada, // REMOVIDO: Coluna 'km' não existe
-            realizadaPor: realizadaPor,
-            custo: parseFloat(custo) || 0,
-            notaFiscal: notaFiscal
+            realizadaPor: realizadaPor
+            // custo: parseFloat(custo) || 0, // REMOVIDO: Coluna inexistente
+            // notaFiscal: notaFiscal         // REMOVIDO: Coluna inexistente
         };
 
         // Adiciona a leitura na coluna correta
