@@ -26,7 +26,16 @@ const getAllRevisionPlans = async (req, res) => {
             const isImported = !plan.vehicleId;
             const effectiveVehicleId = isImported ? plan.id : plan.vehicleId;
             const { tipo, ...restOfPlan } = plan;
-            const historico = historyRows.filter(h => h.revisionId === plan.id);
+            
+            // Processa o histórico para unificar a leitura visualmente para o frontend
+            const historico = historyRows
+                .filter(h => h.revisionId === plan.id)
+                .map(h => ({
+                    ...h,
+                    // CRIAÇÃO DO CAMPO VIRTUAL 'km':
+                    // O frontend espera 'h.km', então preenchemos com odometro ou horimetro dependendo do que existir
+                    km: h.odometro || h.horimetro || 0 
+                }));
             
             return {
                 ...restOfPlan,
@@ -73,7 +82,6 @@ const updateRevisionPlan = async (req, res) => {
     const { id: vehicleId } = req.params; 
     const { descricao, ...restOfBody } = req.body;
     
-    // Tratamento para garantir que descricao não seja undefined
     const data = { ...restOfBody, tipo: descricao || '' };
 
     const ultimaAlteracao = JSON.stringify({
@@ -86,21 +94,18 @@ const updateRevisionPlan = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // Verifica se já existe plano para este veículo
         const [rows] = await connection.execute(
             'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
             [vehicleId, vehicleId]
         );
         
         if (rows.length > 0) {
-            // Atualiza existente
             const revisionId = rows[0].id;
             delete data.id;
             delete data.vehicleId;
             delete data.historico;
             data.ultimaAlteracao = ultimaAlteracao; 
 
-            // Construção dinâmica da query permite salvar colunas como avisoAntecedenciaKmHr se existirem no body
             const fields = Object.keys(data);
             const values = Object.values(data);
             const setClause = fields.map(field => `${field} = ?`).join(', ');
@@ -108,7 +113,6 @@ const updateRevisionPlan = async (req, res) => {
 
             await connection.execute(query, [...values, revisionId]);
         } else {
-            // Cria novo se não existir
             const newRevisionId = uuidv4();
             const newPlan = { id: newRevisionId, vehicleId: vehicleId, ...data, ultimaAlteracao: ultimaAlteracao };
             delete newPlan.historico;
@@ -129,7 +133,7 @@ const updateRevisionPlan = async (req, res) => {
     }
 };
 
-// --- POST: Concluir Revisão (Unificado - Horímetro Único) ---
+// --- POST: Concluir Revisão (CORRIGIDO ERRO DE COLUNA KM) ---
 const completeRevision = async (req, res) => {
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
@@ -147,7 +151,6 @@ const completeRevision = async (req, res) => {
         notaFiscal,
         proximaRevisaoData,
         proximaRevisaoLeitura,
-        // Novos campos opcionais para definir alertas da próxima
         avisoAntecedenciaKmHr,
         avisoAntecedenciaDias
     } = req.body;
@@ -163,7 +166,6 @@ const completeRevision = async (req, res) => {
         if (revRows.length > 0) {
             revisionId = revRows[0].id;
         } else {
-            // Cria novo se não existir
             revisionId = uuidv4();
             const initialPlan = {
                 id: revisionId,
@@ -191,18 +193,28 @@ const completeRevision = async (req, res) => {
         if (vehRows.length === 0) throw new Error('Veículo não encontrado.');
         const vehicle = vehRows[0];
 
-        // 2. Registrar no Histórico
+        // Determina se é base Horimetro antes de montar o objeto de histórico
+        const isHourBased = vehicle.mediaCalculo === 'horimetro';
+
+        // 2. Registrar no Histórico (CORREÇÃO AQUI)
         const historyId = uuidv4();
         const historyData = {
             id: historyId,
             revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
-            km: leituraRealizada,
+            // km: leituraRealizada, // REMOVIDO: Coluna 'km' não existe
             realizadaPor: realizadaPor,
             custo: parseFloat(custo) || 0,
             notaFiscal: notaFiscal
         };
+
+        // Adiciona a leitura na coluna correta
+        if (isHourBased) {
+            historyData.horimetro = leituraRealizada;
+        } else {
+            historyData.odometro = leituraRealizada;
+        }
 
         const histFields = Object.keys(historyData);
         const histValues = Object.values(historyData);
@@ -214,8 +226,6 @@ const completeRevision = async (req, res) => {
         );
 
         // 3. Atualizar Plano para a Próxima
-        const isHourBased = vehicle.mediaCalculo === 'horimetro';
-        
         let updatePlanQuery = 'UPDATE revisions SET proximaRevisaoData = ?';
         const updatePlanParams = [proximaRevisaoData];
 
@@ -227,8 +237,6 @@ const completeRevision = async (req, res) => {
             updatePlanParams.push(proximaRevisaoLeitura);
         }
 
-        // Se o usuário mandou novos parâmetros de antecedência, atualiza.
-        // Se não mandou, mantém o que já estava no banco (não altera).
         if (avisoAntecedenciaKmHr !== undefined && avisoAntecedenciaKmHr !== null) {
             updatePlanQuery += ', avisoAntecedenciaKmHr = ?';
             updatePlanParams.push(avisoAntecedenciaKmHr);
