@@ -132,7 +132,8 @@ const completeRevision = async (req, res) => {
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
     if (!vehicleId) {
-        console.error('Erro 400: vehicleId não fornecido. Body:', req.body);
+        // Log para debug em caso de erro 400
+        console.error('Erro 400: vehicleId não fornecido. Body Keys:', Object.keys(req.body));
         return res.status(400).json({ error: 'ID do veículo é obrigatório para concluir a revisão.' });
     }
 
@@ -153,11 +154,11 @@ const completeRevision = async (req, res) => {
 
         // 1. Identificar a Revisão e o Veículo
         const [revRows] = await connection.execute('SELECT * FROM revisions WHERE vehicleId = ?', [vehicleId]);
-        // Se não existir plano, não impede a conclusão (pode ser avulsa), mas vamos avisar se não achar
+        
+        // Se não existir plano, vamos logar para avisar, mas ainda tentamos salvar o histórico e atualizar o veículo se possível?
+        // Neste sistema, parece que o plano deve existir para termos o ID da revisão para o histórico.
         if (revRows.length === 0) {
-             // Opcional: Criar plano on-the-fly ou retornar erro. 
-             // Vamos assumir erro por enquanto para forçar cadastro correto.
-             throw new Error('Plano de revisão não encontrado para este veículo.');
+             throw new Error('Plano de revisão não encontrado para este veículo. Cadastre um plano antes de concluir.');
         }
         const revision = revRows[0];
 
