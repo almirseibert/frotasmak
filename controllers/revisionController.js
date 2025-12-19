@@ -72,7 +72,9 @@ const createRevisionPlan = async (req, res) => {
 const updateRevisionPlan = async (req, res) => {
     const { id: vehicleId } = req.params; 
     const { descricao, ...restOfBody } = req.body;
-    const data = { ...restOfBody, tipo: descricao };
+    
+    // Tratamento para garantir que descricao não seja undefined
+    const data = { ...restOfBody, tipo: descricao || '' };
 
     const ultimaAlteracao = JSON.stringify({
         userId: req.user?.id || 'sistema',
@@ -132,7 +134,6 @@ const completeRevision = async (req, res) => {
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
     if (!vehicleId) {
-        // Log para debug em caso de erro 400
         console.error('Erro 400: vehicleId não fornecido. Body Keys:', Object.keys(req.body));
         return res.status(400).json({ error: 'ID do veículo é obrigatório para concluir a revisão.' });
     }
@@ -140,27 +141,49 @@ const completeRevision = async (req, res) => {
     const { 
         realizadaEm, 
         realizadaPor, 
-        leituraRealizada, // Valor da leitura (Km ou Hr)
+        leituraRealizada, 
         descricao, 
         custo, 
         notaFiscal,
         proximaRevisaoData,
-        proximaRevisaoLeitura // Meta para a próxima
+        proximaRevisaoLeitura
     } = req.body;
 
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
-        // 1. Identificar a Revisão e o Veículo
+        // 1. Identificar ou Criar o Plano de Revisão
+        let revisionId;
         const [revRows] = await connection.execute('SELECT * FROM revisions WHERE vehicleId = ?', [vehicleId]);
         
-        // Se não existir plano, vamos logar para avisar, mas ainda tentamos salvar o histórico e atualizar o veículo se possível?
-        // Neste sistema, parece que o plano deve existir para termos o ID da revisão para o histórico.
-        if (revRows.length === 0) {
-             throw new Error('Plano de revisão não encontrado para este veículo. Cadastre um plano antes de concluir.');
+        if (revRows.length > 0) {
+            revisionId = revRows[0].id;
+        } else {
+            // CORREÇÃO: Se não existir plano, CRIA UM NOVO automaticamente
+            // Isso permite concluir revisões avulsas sem precisar "Agendar" antes.
+            revisionId = uuidv4();
+            console.log(`Criando plano automático para veículo ${vehicleId}`);
+            
+            const initialPlan = {
+                id: revisionId,
+                vehicleId: vehicleId,
+                tipo: 'Manutenção Inicial',
+                proximaRevisaoData: proximaRevisaoData || null,
+                proximaRevisaoOdometro: null,
+                proximaRevisaoHorimetro: null,
+                ultimaAlteracao: JSON.stringify({ userId: 'sistema', action: 'Auto-create on complete' })
+            };
+
+            const fields = Object.keys(initialPlan);
+            const values = Object.values(initialPlan);
+            const placeholders = fields.map(() => '?').join(', ');
+            
+            await connection.execute(
+                `INSERT INTO revisions (${fields.join(', ')}) VALUES (${placeholders})`, 
+                values
+            );
         }
-        const revision = revRows[0];
 
         const [vehRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [vehicleId]);
         if (vehRows.length === 0) throw new Error('Veículo não encontrado.');
@@ -170,10 +193,10 @@ const completeRevision = async (req, res) => {
         const historyId = uuidv4();
         const historyData = {
             id: historyId,
-            revisionId: revision.id,
+            revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
-            km: leituraRealizada, // Campo genérico no banco histórico
+            km: leituraRealizada,
             realizadaPor: realizadaPor,
             custo: parseFloat(custo) || 0,
             notaFiscal: notaFiscal
@@ -189,7 +212,6 @@ const completeRevision = async (req, res) => {
         );
 
         // 3. Atualizar Plano para a Próxima
-        // Verifica se é Horímetro ou Odômetro baseando-se na regra de negócio do veículo
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
         
         let updatePlanQuery = 'UPDATE revisions SET proximaRevisaoData = ?';
@@ -212,18 +234,17 @@ const completeRevision = async (req, res) => {
         
         updatePlanQuery += ', ultimaAlteracao = ? WHERE id = ?';
         updatePlanParams.push(ultimaAlteracao);
-        updatePlanParams.push(revision.id);
+        updatePlanParams.push(revisionId); // Use revisionId variable
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
-        // 4. Atualizar Leitura do Veículo (REGRA GLOBAL 1 e ALTERAÇÃO DE HORÍMETRO)
+        // 4. Atualizar Leitura do Veículo
         const readingVal = parseFloat(leituraRealizada);
         
         if (!isNaN(readingVal) && readingVal > 0) {
             let updateVehicleQuery = '';
             
             if (isHourBased) {
-                // REGRA NOVA: Atualiza apenas a coluna 'horimetro' e força NULL nas legadas
                 updateVehicleQuery = `
                     UPDATE vehicles 
                     SET horimetro = ?, 
@@ -232,7 +253,6 @@ const completeRevision = async (req, res) => {
                     WHERE id = ?`;
                 await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
             } else {
-                // Veículos Leves / Trecho: Atualiza Odômetro
                 updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
                 await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
             }
