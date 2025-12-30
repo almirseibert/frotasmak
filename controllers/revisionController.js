@@ -46,7 +46,7 @@ const getAllRevisionPlans = async (req, res) => {
             return {
                 ...restOfPlan,
                 vehicleId: effectiveVehicleId,
-                // Prioriza plan.descricao se existir (caso o banco tenha essa coluna), senão usa plan.tipo
+                // Prioriza a coluna 'descricao' se existir, senão usa 'tipo' (legado)
                 descricao: plan.descricao || tipo || '', 
                 ultimaAlteracao: ultimaAlteracao,
                 historico: historico,
@@ -62,36 +62,28 @@ const getAllRevisionPlans = async (req, res) => {
 
 // --- POST: Criar Plano ---
 const createRevisionPlan = async (req, res) => {
-    // Extrai descricao e mapeia para 'tipo' (padrão do sistema)
-    const { descricao, ...restOfBody } = req.body;
-    
-    // Mantém descricao no objeto caso a coluna exista, e também preenche tipo
+    // Sanitização e Preparação dos Dados
+    // NÃO renomeamos mais descricao para tipo. Usamos descricao direto.
     const data = { 
-        ...restOfBody, 
-        tipo: descricao || 'Manutenção',
-        // Sanitização dos campos críticos
-        proximaRevisaoData: sanitize(restOfBody.proximaRevisaoData),
-        proximaRevisaoOdometro: sanitize(restOfBody.proximaRevisaoOdometro),
-        proximaRevisaoHorimetro: sanitize(restOfBody.proximaRevisaoHorimetro),
-        avisoAntecedenciaKmHr: sanitize(restOfBody.avisoAntecedenciaKmHr),
-        avisoAntecedenciaDias: sanitize(restOfBody.avisoAntecedenciaDias)
+        ...req.body,
+        // Sanitização dos campos numéricos/data para evitar erro de string vazia
+        proximaRevisaoData: sanitize(req.body.proximaRevisaoData),
+        proximaRevisaoOdometro: sanitize(req.body.proximaRevisaoOdometro),
+        proximaRevisaoHorimetro: sanitize(req.body.proximaRevisaoHorimetro),
+        avisoAntecedenciaKmHr: sanitize(req.body.avisoAntecedenciaKmHr),
+        avisoAntecedenciaDias: sanitize(req.body.avisoAntecedenciaDias)
     };
     
+    // Remove campos que não são colunas do banco
     delete data.historico; 
     
+    // Campo tipo mantido para retrocompatibilidade se necessário, ou removido se não existir coluna
+    if (!data.tipo && data.descricao) data.tipo = data.descricao;
+
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
 
-    // Tenta remover campos que não são colunas se soubermos que falha, 
-    // mas aqui vamos assumir que o insert dinâmico deve funcionar se os dados estiverem sanitizados.
-    // Nota: Se 'descricao' não for uma coluna real no banco, isso quebraria. 
-    // Por segurança, vamos usar a lógica original de mapear para 'tipo' e remover 'descricao' do insert explícito
-    // a menos que você tenha certeza que criou a coluna 'descricao'.
-    // Vou manter a lógica segura: Salvar em TIPO.
-    const safeData = { ...data };
-    if (!req.body.descricaoInDb) delete safeData.descricao; // Remove descricao se não for coluna
-
-    const fields = Object.keys(safeData);
-    const values = Object.values(safeData);
+    const fields = Object.keys(data);
+    const values = Object.values(data);
     const placeholders = fields.map(() => '?').join(', ');
     const query = `INSERT INTO revisions (${fields.join(', ')}) VALUES (${placeholders})`;
 
@@ -107,29 +99,37 @@ const createRevisionPlan = async (req, res) => {
 // --- PUT: Atualizar Plano (Agendamento/Edição) ---
 const updateRevisionPlan = async (req, res) => {
     const { id: vehicleId } = req.params; 
-    const { descricao, ...restOfBody } = req.body;
     
     // Sanitização completa
     const data = { 
-        ...restOfBody, 
-        tipo: descricao || '',
-        proximaRevisaoData: sanitize(restOfBody.proximaRevisaoData),
-        proximaRevisaoOdometro: sanitize(restOfBody.proximaRevisaoOdometro),
-        proximaRevisaoHorimetro: sanitize(restOfBody.proximaRevisaoHorimetro),
-        avisoAntecedenciaKmHr: sanitize(restOfBody.avisoAntecedenciaKmHr),
-        avisoAntecedenciaDias: sanitize(restOfBody.avisoAntecedenciaDias)
+        ...req.body,
+        proximaRevisaoData: sanitize(req.body.proximaRevisaoData),
+        proximaRevisaoOdometro: sanitize(req.body.proximaRevisaoOdometro),
+        proximaRevisaoHorimetro: sanitize(req.body.proximaRevisaoHorimetro),
+        avisoAntecedenciaKmHr: sanitize(req.body.avisoAntecedenciaKmHr),
+        avisoAntecedenciaDias: sanitize(req.body.avisoAntecedenciaDias)
     };
+
+    // Remove campos que não devem ir para o update/insert
+    delete data.id; // ID da revisão (gerado pelo banco)
+    delete data.vehicleId; // Usamos o do params
+    delete data.historico;
+
+    // Garante que 'tipo' tenha valor se for usado no banco
+    if (!data.tipo && data.descricao) data.tipo = data.descricao;
 
     const ultimaAlteracao = JSON.stringify({
         userId: req.user?.id || 'sistema',
         userEmail: req.user?.email || 'sistema',
         timestamp: new Date().toISOString()
     });
+    data.ultimaAlteracao = ultimaAlteracao;
 
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
+        // Verifica se já existe plano para este veículo
         const [rows] = await connection.execute(
             'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
             [vehicleId, vehicleId]
@@ -138,14 +138,7 @@ const updateRevisionPlan = async (req, res) => {
         if (rows.length > 0) {
             // Atualiza existente
             const revisionId = rows[0].id;
-            // Remove campos que não devem ser atualizados via query dinâmica ou que não são colunas
-            delete data.id;
-            delete data.vehicleId;
-            delete data.historico;
-            delete data.descricao; // Remove pois salvamos em 'tipo'
-
-            data.ultimaAlteracao = ultimaAlteracao; 
-
+            
             const fields = Object.keys(data);
             const values = Object.values(data);
             const setClause = fields.map(field => `${field} = ?`).join(', ');
@@ -158,12 +151,9 @@ const updateRevisionPlan = async (req, res) => {
             // Cria novo se não existir (ID Auto-increment)
             const newPlan = { 
                 vehicleId: vehicleId, 
-                ...data, 
-                ultimaAlteracao: ultimaAlteracao 
+                ...data
             };
-            delete newPlan.historico;
-            delete newPlan.descricao; // Segurança: remove descricao, salva em 'tipo'
-
+            
             const fields = Object.keys(newPlan);
             const values = Object.values(newPlan);
             const placeholders = fields.map(() => '?').join(', ');
@@ -190,7 +180,6 @@ const completeRevision = async (req, res) => {
         return res.status(400).json({ error: 'ID do veículo é obrigatório.' });
     }
 
-    // Sanitização das entradas
     const { 
         realizadaEm, 
         realizadaPor, 
@@ -204,6 +193,7 @@ const completeRevision = async (req, res) => {
         avisoAntecedenciaDias
     } = req.body;
 
+    // Sanitização
     const sanitizedProximaData = sanitize(proximaRevisaoData);
     const sanitizedProximaLeitura = sanitize(proximaRevisaoLeitura);
     const sanitizedAvisoKmHr = sanitize(avisoAntecedenciaKmHr);
@@ -220,10 +210,11 @@ const completeRevision = async (req, res) => {
         if (revRows.length > 0) {
             revisionId = revRows[0].id;
         } else {
-            // Auto-criação de plano (Sem ID explícito)
+            // Auto-criação de plano (Sem ID explícito - Auto Increment)
             const initialPlan = {
                 vehicleId: vehicleId,
                 tipo: 'Manutenção Inicial',
+                descricao: 'Manutenção Inicial', // Salva descrição também
                 proximaRevisaoData: sanitizedProximaData,
                 proximaRevisaoOdometro: null,
                 proximaRevisaoHorimetro: null,
@@ -249,13 +240,16 @@ const completeRevision = async (req, res) => {
 
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
 
-        // 2. Registrar no Histórico
+        // 2. Registrar no Histórico (Sem ID explícito - Auto Increment)
         const historyData = {
             revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
             realizadaPor: realizadaPor
-            // custo e notaFiscal removidos até que as colunas existam
+            // Campos custo e notaFiscal devem ser adicionados aqui APENAS se as colunas existirem no banco.
+            // Se existirem, descomente as linhas abaixo:
+            // custo: parseFloat(custo) || 0,
+            // notaFiscal: notaFiscal
         };
 
         if (isHourBased) {
@@ -294,6 +288,12 @@ const completeRevision = async (req, res) => {
             updatePlanParams.push(sanitizedAvisoDias);
         }
         
+        // Atualiza também a descrição no plano principal para refletir o último agendamento/status
+        if (descricao) {
+            updatePlanQuery += ', descricao = ?';
+            updatePlanParams.push(descricao);
+        }
+
         const ultimaAlteracao = JSON.stringify({
              userId: req.user?.id || 'sistema',
              userEmail: req.user?.email || 'sistema',
@@ -307,13 +307,14 @@ const completeRevision = async (req, res) => {
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
-        // 4. Atualizar Leitura do Veículo
+        // 4. Atualizar Leitura do Veículo (REGRA GLOBAL 8, 10, 11)
         const readingVal = parseFloat(leituraRealizada);
         
         if (!isNaN(readingVal) && readingVal > 0) {
             let updateVehicleQuery = '';
             
             if (isHourBased) {
+                // Atualiza horimetro e LIMPA legados para evitar conflito futuro
                 updateVehicleQuery = `
                     UPDATE vehicles 
                     SET horimetro = ?, 
@@ -339,6 +340,7 @@ const completeRevision = async (req, res) => {
     }
 };
 
+// --- DELETE: Deletar Plano ---
 const deleteRevisionPlan = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
