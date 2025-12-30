@@ -1,5 +1,5 @@
 const db = require('../database');
-// const { v4: uuidv4 } = require('uuid'); // UUID não é mais necessário para IDs auto-incremento
+const { v4: uuidv4 } = require('uuid'); // Restaurado UUID pois o banco não é Auto-Increment
 
 // --- Helper para parsear JSON de forma segura ---
 const parseJsonSafe = (field, key) => {
@@ -63,9 +63,9 @@ const getAllRevisionPlans = async (req, res) => {
 // --- POST: Criar Plano ---
 const createRevisionPlan = async (req, res) => {
     // Sanitização e Preparação dos Dados
-    // NÃO renomeamos mais descricao para tipo. Usamos descricao direto.
     const data = { 
         ...req.body,
+        id: uuidv4(), // Gera ID manualmente
         // Sanitização dos campos numéricos/data para evitar erro de string vazia
         proximaRevisaoData: sanitize(req.body.proximaRevisaoData),
         proximaRevisaoOdometro: sanitize(req.body.proximaRevisaoOdometro),
@@ -77,7 +77,7 @@ const createRevisionPlan = async (req, res) => {
     // Remove campos que não são colunas do banco
     delete data.historico; 
     
-    // Campo tipo mantido para retrocompatibilidade se necessário, ou removido se não existir coluna
+    // Campo tipo mantido para retrocompatibilidade se necessário
     if (!data.tipo && data.descricao) data.tipo = data.descricao;
 
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
@@ -111,8 +111,8 @@ const updateRevisionPlan = async (req, res) => {
     };
 
     // Remove campos que não devem ir para o update/insert
-    delete data.id; // ID da revisão (gerado pelo banco)
-    delete data.vehicleId; // Usamos o do params
+    delete data.id; 
+    delete data.vehicleId; 
     delete data.historico;
 
     // Garante que 'tipo' tenha valor se for usado no banco
@@ -148,8 +148,9 @@ const updateRevisionPlan = async (req, res) => {
                 await connection.execute(query, [...values, revisionId]);
             }
         } else {
-            // Cria novo se não existir (ID Auto-increment)
+            // Cria novo se não existir (ID Manual)
             const newPlan = { 
+                id: uuidv4(), // Gera ID manualmente
                 vehicleId: vehicleId, 
                 ...data
             };
@@ -210,8 +211,10 @@ const completeRevision = async (req, res) => {
         if (revRows.length > 0) {
             revisionId = revRows[0].id;
         } else {
-            // Auto-criação de plano (Sem ID explícito - Auto Increment)
+            // Criação de plano (ID Manual)
+            revisionId = uuidv4(); // Gera ID manualmente
             const initialPlan = {
+                id: revisionId,
                 vehicleId: vehicleId,
                 tipo: 'Manutenção Inicial',
                 descricao: 'Manutenção Inicial', // Salva descrição também
@@ -227,11 +230,10 @@ const completeRevision = async (req, res) => {
             const values = Object.values(initialPlan);
             const placeholders = fields.map(() => '?').join(', ');
             
-            const [result] = await connection.execute(
+            await connection.execute(
                 `INSERT INTO revisions (${fields.join(', ')}) VALUES (${placeholders})`, 
                 values
             );
-            revisionId = result.insertId;
         }
 
         const [vehRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [vehicleId]);
@@ -240,16 +242,14 @@ const completeRevision = async (req, res) => {
 
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
 
-        // 2. Registrar no Histórico (Sem ID explícito - Auto Increment)
+        // 2. Registrar no Histórico (ID Manual)
         const historyData = {
+            id: uuidv4(), // Gera ID manualmente para histórico também
             revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
             realizadaPor: realizadaPor
-            // Campos custo e notaFiscal devem ser adicionados aqui APENAS se as colunas existirem no banco.
-            // Se existirem, descomente as linhas abaixo:
-            // custo: parseFloat(custo) || 0,
-            // notaFiscal: notaFiscal
+            // custo e notaFiscal removidos até que as colunas existam
         };
 
         if (isHourBased) {
