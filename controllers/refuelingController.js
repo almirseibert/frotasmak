@@ -37,9 +37,20 @@ const parseRefuelingRows = (rows) => {
     }));
 };
 
-// --- ATUALIZAÇÃO DE DESPESAS MENSAIS ---
+// --- ATUALIZAÇÃO DE DESPESAS MENSAIS (CORRIGIDO) ---
 const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
     if (!obraId || !partnerId || !fuelType || !dateInput) return;
+
+    // 1. VERIFICAÇÃO DE SEGURANÇA (NOVO):
+    // Verifica se o obraId existe na tabela 'obras' para evitar erro de Foreign Key.
+    // Se for uma obra interna (ex: "Pátio", "Oficina") que não está cadastrada como Obra no banco,
+    // nós pulamos a criação da despesa para não travar o sistema.
+    const [obraCheck] = await connection.execute('SELECT id FROM obras WHERE id = ?', [obraId]);
+    if (obraCheck.length === 0) {
+        // Obra não encontrada ou é um local interno sem registro na tabela obras.
+        // Não gera despesa financeira atrelada.
+        return; 
+    }
 
     const dateObj = new Date(dateInput);
     const month = dateObj.getMonth();
@@ -148,11 +159,10 @@ const createRefuelingOrder = async (req, res) => {
             outrosGeraValor: data.outrosGeraValor ? 1 : 0,
             litrosLiberados: safeNum(data.litrosLiberados, true),
             litrosLiberadosArla: safeNum(data.litrosLiberadosArla, true),
-            // Salva apenas campos unificados se possível, ou migra na confirmação
             odometro: safeNum(data.odometro),
             horimetro: safeNum(data.horimetro),
-            horimetroDigital: null,
-            horimetroAnalogico: null,
+            horimetroDigital: safeNum(data.horimetroDigital),
+            horimetroAnalogico: safeNum(data.horimetroAnalogico),
             outrosValor: safeNum(data.outrosValor, true),
             outros: data.outros || null,
             createdBy: JSON.stringify(data.createdBy || {}),
@@ -204,14 +214,10 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.status) updateData.status = data.status;
         
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
-        
-        // Campos de leitura unificados
         if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
         if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
-        // Garante NULL para antigos
-        updateData.horimetroDigital = null;
-        updateData.horimetroAnalogico = null;
-
+        if (data.horimetroDigital !== undefined) updateData.horimetroDigital = safeNum(data.horimetroDigital);
+        if (data.horimetroAnalogico !== undefined) updateData.horimetroAnalogico = safeNum(data.horimetroAnalogico);
         if (data.outrosValor !== undefined) updateData.outrosValor = safeNum(data.outrosValor, true);
         
         if (data.partnerName !== undefined) updateData.partnerName = data.partnerName || null;
@@ -221,8 +227,10 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
         if (data.outros !== undefined) updateData.outros = data.outros || null;
 
+        // VALIDAÇÃO DE NOTA FISCAL
         if (data.invoiceNumber !== undefined) {
             const newInvoiceNumber = data.invoiceNumber ? data.invoiceNumber.toString().trim() : null;
+            
             if (newInvoiceNumber) {
                 const partnerIdToCheck = updateData.partnerId || oldRefueling.partnerId;
                 const [duplicateCheck] = await connection.execute(
@@ -253,6 +261,16 @@ const updateRefuelingOrder = async (req, res) => {
 
         if (currentObra && currentPartner && currentFuel) {
             await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
+        }
+
+        if (
+            (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
+            (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
+            (updateData.fuelType && updateData.fuelType !== oldRefueling.fuelType)
+        ) {
+            if (oldRefueling.obraId && oldRefueling.partnerId && oldRefueling.fuelType) {
+                await updateMonthlyExpense(connection, oldRefueling.obraId, oldRefueling.partnerId, oldRefueling.fuelType, oldRefueling.data);
+            }
         }
 
         await connection.commit();
@@ -291,6 +309,7 @@ const confirmRefuelingOrder = async (req, res) => {
         }
         const order = orders[0];
 
+        // Validação de Duplicidade de NF (Backend)
         if (invoiceNumber) {
             const nfStr = invoiceNumber.toString().trim();
             if (nfStr) {
@@ -308,19 +327,24 @@ const confirmRefuelingOrder = async (req, res) => {
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
-        // --- LÓGICA UNIFICADA v2.0 ---
-        // Determina onde salvar baseado no tipo/mediaCalculo, ignorando colunas legadas
+        // Atualiza a leitura do veículo
         const vehicleUpdate = {};
         const readingVal = safeNum(confirmedReading);
 
-        if (readingVal && readingVal > 0) {
-            // Se o veículo usa horímetro (Máquinas, Caminhões Pesados)
-            if (vehicle.mediaCalculo === 'horimetro' || order.horimetro > 0) {
+        if (readingVal) {
+            if (vehicle.possuiHorimetroDigital) {
+                vehicleUpdate.horimetroDigital = readingVal;
+                vehicleUpdate.horimetro = readingVal; 
+            } else if (vehicle.possuiHorimetroAnalogico) {
+                vehicleUpdate.horimetroAnalogico = readingVal;
                 vehicleUpdate.horimetro = readingVal;
-                vehicleUpdate.horimetroDigital = null; // Zera legados
-                vehicleUpdate.horimetroAnalogico = null; // Zera legados
+            } else if (vehicle.tipo === 'Caminhão' || vehicle.mediaCalculo === 'horimetro') {
+                if (order.horimetro || (!order.odometro && !order.horimetro)) {
+                     vehicleUpdate.horimetro = readingVal;
+                } else {
+                     vehicleUpdate.odometro = readingVal;
+                }
             } else {
-                // Padrão: Odômetro
                 vehicleUpdate.odometro = readingVal;
             }
         }
@@ -332,6 +356,7 @@ const confirmRefuelingOrder = async (req, res) => {
 
         const safePrice = safeNum(pricePerLiter, true);
         
+        // Atualização de Preço (Opcional)
         if (order.partnerId && safePrice > 0 && order.fuelType && updatePartnerPrice === true) {
             const priceQuery = `
                 INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
@@ -349,11 +374,9 @@ const confirmRefuelingOrder = async (req, res) => {
             confirmedBy: JSON.stringify(confirmedBy),
             outrosValor: safeNum(outrosValor, true),
             invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null,
-            // Salva na ordem exatamente o que foi salvo no veículo
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
-            horimetroDigital: null,
-            horimetroAnalogico: null
+            ...(vehicleUpdate.horimetroDigital ? { horimetroDigital: vehicleUpdate.horimetroDigital } : {}),
         };
 
         const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
