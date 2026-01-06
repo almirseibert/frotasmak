@@ -18,8 +18,6 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
             return defaultValue; 
         }
     }
-    
-    // Se for string simples e não parecer JSON, retorna o valor padrão (null) ou o próprio valor dependendo da lógica
     return defaultValue;
 };
 
@@ -57,7 +55,6 @@ const getVehicleById = async (req, res) => {
         
         const vehicle = parseVehicleJsonFields(rows[0]);
         
-        // Carrega histórico unificado (limitado a 50 para performance)
         const [historyRows] = await db.execute('SELECT * FROM vehicle_history WHERE vehicleId = ? ORDER BY startDate DESC LIMIT 50', [req.params.id]);
         vehicle.history = historyRows.map(h => ({
             ...h,
@@ -74,12 +71,16 @@ const getVehicleById = async (req, res) => {
 const createVehicle = async (req, res) => {
     const data = req.body;
     
+    // Tratamento de JSONs
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     delete data.history; 
 
     data.id = randomUUID();
     
+    // Remove campos undefined/null para evitar erro na query dinâmica se não existirem colunas default
+    Object.keys(data).forEach(key => data[key] === undefined && delete data[key]);
+
     const fields = Object.keys(data);
     const values = Object.values(data);
     const placeholders = fields.map(() => '?').join(', ');
@@ -90,7 +91,7 @@ const createVehicle = async (req, res) => {
         res.status(201).json({ ...req.body, id: data.id }); 
     } catch (error) {
         console.error('Erro ao criar veículo:', error);
-        res.status(500).json({ error: 'Erro ao criar veículo' });
+        res.status(500).json({ error: 'Erro ao criar veículo: ' + error.message });
     }
 };
 
@@ -117,7 +118,7 @@ const updateVehicle = async (req, res) => {
         res.json({ message: 'Veículo atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar veículo:', error);
-        res.status(500).json({ error: 'Erro ao atualizar veículo' });
+        res.status(500).json({ error: 'Erro ao atualizar veículo: ' + error.message });
     }
 };
 
@@ -131,7 +132,6 @@ const uploadVehicleImage = async (req, res) => {
     }
 
     const fotoURL = `/uploads/${req.file.filename}`; 
-
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
@@ -152,7 +152,6 @@ const uploadVehicleImage = async (req, res) => {
         }
 
         await connection.execute('UPDATE vehicles SET fotoURL = ? WHERE id = ?', [fotoURL, id]);
-        
         await connection.commit();
         res.json({ message: 'Upload bem-sucedido!', fotoURL: fotoURL });
 
@@ -190,25 +189,35 @@ const deleteVehicle = async (req, res) => {
     }
 };
 
-// --- ALOCAÇÃO EM OBRA ---
+// --- ALOCAÇÃO EM OBRA (CORREÇÃO DE ERRO 500) ---
 
 const allocateToObra = async (req, res) => {
     const { id } = req.params; 
     const { obraId, employeeId, dataEntrada, readingType, readingValue, observacoes } = req.body;
     
+    // Validação básica para evitar erro SQL
+    if (!obraId || !employeeId) {
+        return res.status(400).json({ error: "IDs de Obra e Funcionário são obrigatórios." });
+    }
+
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraId]);
-        const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+        // Conversão de tipos para evitar problemas no SQL
+        const obraIdInt = parseInt(obraId, 10);
+        const employeeIdInt = parseInt(employeeId, 10);
+        const readingVal = parseFloat(readingValue) || 0;
+
+        const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraIdInt]);
+        const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdInt]);
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
 
         const obra = obraRows[0];
         const employee = employeeRows[0];
         const vehicle = vehicleRows[0];
 
-        if (!obra || !employee) throw new Error("Dados de Obra ou Funcionário inválidos.");
+        if (!obra || !employee) throw new Error("Dados de Obra ou Funcionário não encontrados no banco.");
         
         // 1. Inserir no Histórico Geral (vehicle_history)
         const newHistoryEntry = {
@@ -217,11 +226,11 @@ const allocateToObra = async (req, res) => {
             startDate: new Date(dataEntrada || new Date()),
             endDate: null,
             details: JSON.stringify({ 
-                obraId: obraId,
+                obraId: obraIdInt,
                 obraNome: obra.nome,
-                employeeId: employeeId,
+                employeeId: employeeIdInt,
                 employeeName: employee.nome,
-                [`${readingType}Entrada`]: readingValue,
+                [`${readingType}Entrada`]: readingVal,
                 observacoes: observacoes
             })
         };
@@ -235,19 +244,19 @@ const allocateToObra = async (req, res) => {
             historyValues
         );
         
-        // 2. Atualizar Veículo (Status e Localização)
+        // 2. Atualizar Veículo
         const vehicleUpdateData = {
-            obraAtualId: obraId,
+            obraAtualId: obraIdInt,
             status: 'Em Obra',
             localizacaoAtual: obra.nome,
             operationalAssignment: null, 
             maintenanceLocation: null, 
             alocadoEm: JSON.stringify({
                 type: 'obra',
-                id: obraId,
+                id: obraIdInt,
                 nome: obra.nome
             }),
-            [readingType]: readingValue 
+            [readingType]: readingVal 
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -260,26 +269,32 @@ const allocateToObra = async (req, res) => {
         );
         
         // 3. Atualizar Funcionário
-        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
+        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeIdInt]);
 
-        // 4. Inserir no Histórico de Obras (Relacional - Legado/Compatibilidade)
+        // 4. Inserir no Histórico de Obras (CORREÇÃO DE NULOS - ERRO 500)
+        // Campos numéricos (odometro/horimetro) DEVEM ser inicializados com 0, não null, se a coluna for NOT NULL.
+        // Saídas (odometroSaida/horimetroSaida) também devem ser 0 enquanto a alocação estiver aberta.
         const newObraHistoryEntryData = {
             id: randomUUID(),
-            obraId: obraId,
+            obraId: obraIdInt,
             veiculoId: vehicle.id,
             tipo: vehicle.tipo,
             registroInterno: vehicle.registroInterno,
             placa: vehicle.placa,
             modelo: `${vehicle.marca} ${vehicle.modelo}`,
-            employeeId: employeeId,
+            employeeId: employeeIdInt,
             employeeName: employee.nome,
             dataEntrada: new Date(dataEntrada || new Date()),
-            dataSaida: null,
-            odometroEntrada: readingType === 'odometro' ? readingValue : null,
-            odometroSaida: null,
-            horimetroEntrada: readingType === 'horimetro' ? readingValue : null,
-            horimetroSaida: null,
-            observacoes: observacoes
+            dataSaida: null, // Data pode ser null
+            
+            // CORREÇÃO: Força 0 em vez de null para evitar erro SQL
+            odometroEntrada: readingType === 'odometro' ? readingVal : 0,
+            odometroSaida: 0, // Inicializa com 0 pois está aberta
+            
+            horimetroEntrada: readingType === 'horimetro' ? readingVal : 0,
+            horimetroSaida: 0, // Inicializa com 0 pois está aberta
+            
+            observacoes: observacoes || ''
         };
         
         const obraHistoryFields = Object.keys(newObraHistoryEntryData);
@@ -295,15 +310,12 @@ const allocateToObra = async (req, res) => {
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro ao alocar veículo:", error);
-        res.status(500).json({ error: 'Falha ao alocar veículo.', details: error.message });
+        console.error("Erro CRÍTICO ao alocar veículo (Obra):", error);
+        res.status(500).json({ error: 'Falha ao alocar veículo.', details: error.message, sqlMessage: error.sqlMessage });
     } finally {
         connection.release();
     }
 };
-
-// --- DESALOCAÇÃO DE OBRA (CORRIGIDA E ROBUSTA) ---
-// AQUI ESTAVA O ERRO 500: O throw new Error foi removido e substituído por lógica tolerante a falhas
 
 const deallocateFromObra = async (req, res) => {
     const { id } = req.params; 
@@ -314,15 +326,16 @@ const deallocateFromObra = async (req, res) => {
 
     try {
         const exitTimestamp = new Date(dataSaida || new Date());
+        const readingVal = parseFloat(readingValue) || 0;
 
-        // 1. Identificar Obra Atual (Prioridade: Payload > Banco)
-        let targetObraId = obraId;
+        // 1. Identificar Obra Atual
+        let targetObraId = obraId ? parseInt(obraId, 10) : null;
         if (!targetObraId) {
             const [vRows] = await connection.execute('SELECT obraAtualId FROM vehicles WHERE id = ?', [id]);
             if (vRows.length > 0) targetObraId = vRows[0].obraAtualId;
         }
 
-        // 2. Atualizar Histórico Geral (vehicle_history) - MODO ROBUSTO
+        // 2. Atualizar Histórico Geral
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'obra']
@@ -335,12 +348,11 @@ const deallocateFromObra = async (req, res) => {
             const historyDetails = parseJsonSafe(activeHistory.details, 'history.details') || {};
             employeeIdToRelease = historyDetails.employeeId;
 
-            // Se não tinhamos obraId, tenta pegar do histórico
             if (!targetObraId) targetObraId = historyDetails.obraId;
 
             const newDetails = {
                 ...historyDetails,
-                [`${readingType}Saida`]: readingValue,
+                [`${readingType}Saida`]: readingVal,
                 observacoesSaida: observacoes
             };
             
@@ -348,17 +360,15 @@ const deallocateFromObra = async (req, res) => {
                 'UPDATE vehicle_history SET endDate = ?, details = ? WHERE id = ?',
                 [exitTimestamp, JSON.stringify(newDetails), activeHistory.id]
             );
-        } else {
-            console.warn(`[Desalocação] Aviso: Nenhum histórico ativo encontrado em 'vehicle_history' para o veículo ${id}. Prosseguindo para limpeza das tabelas legadas.`);
         }
 
-        // 3. Atualizar Veículo (Libera status)
+        // 3. Atualizar Veículo
         const vehicleUpdateData = {
             obraAtualId: null, 
             status: 'Disponível', 
             localizacaoAtual: location || 'Pátio', 
             alocadoEm: null,
-            [readingType]: readingValue, 
+            [readingType]: readingVal, 
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
@@ -370,22 +380,21 @@ const deallocateFromObra = async (req, res) => {
             [...updateValues, id]
         );
 
-        // 4. Liberar Funcionário (se encontrado)
         if (employeeIdToRelease) {
              await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdToRelease]);
         }
         
-        // 5. Atualizar Histórico Relacional de Obras (obras_historico_veiculos)
+        // 5. Atualizar Histórico Relacional de Obras
         if (targetObraId) {
             const obraHistoryUpdateFields = ['dataSaida = ?'];
             const obraHistoryUpdateValues = [exitTimestamp];
 
             if (readingType === 'odometro') {
                 obraHistoryUpdateFields.push('odometroSaida = ?');
-                obraHistoryUpdateValues.push(readingValue);
+                obraHistoryUpdateValues.push(readingVal);
             } else {
                 obraHistoryUpdateFields.push('horimetroSaida = ?');
-                obraHistoryUpdateValues.push(readingValue);
+                obraHistoryUpdateValues.push(readingVal);
             }
 
             if (observacoes) {
@@ -393,8 +402,8 @@ const deallocateFromObra = async (req, res) => {
                 obraHistoryUpdateValues.push(observacoes);
             }
 
-            obraHistoryUpdateValues.push(id); // WHERE veiculoId
-            obraHistoryUpdateValues.push(targetObraId); // WHERE obraId
+            obraHistoryUpdateValues.push(id); 
+            obraHistoryUpdateValues.push(targetObraId);
 
             await connection.execute(
                 `UPDATE obras_historico_veiculos 
@@ -410,7 +419,6 @@ const deallocateFromObra = async (req, res) => {
                 status: 'finalizada', 
                 dataFim: new Date(dataFimObra || new Date())
             };
-
             const obraUpdateFields = Object.keys(obraUpdate);
             const obraUpdateValues = Object.values(obraUpdate);
             const obraSetClause = obraUpdateFields.map(field => `${field} = ?`).join(', ');
@@ -425,14 +433,12 @@ const deallocateFromObra = async (req, res) => {
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro ao desalocar veículo:", error);
-        res.status(500).json({ error: 'Falha ao desalocar veículo.', details: error.message });
+        console.error("Erro CRÍTICO ao desalocar veículo:", error);
+        res.status(500).json({ error: 'Falha ao desalocar veículo.', details: error.message, sqlMessage: error.sqlMessage });
     } finally {
         connection.release();
     }
 };
-
-// --- OUTRAS ALOCAÇÕES (MANUTENÇÃO / OPERACIONAL) ---
 
 const assignToOperational = async (req, res) => {
     const { id } = req.params; 
@@ -442,7 +448,7 @@ const assignToOperational = async (req, res) => {
 
     try {
         if (!employeeId) throw new Error('ID do funcionário não pode ser vazio.');
-
+        const employeeIdInt = parseInt(employeeId, 10);
         const now = new Date();
         
         await connection.execute(
@@ -450,7 +456,7 @@ const assignToOperational = async (req, res) => {
             [now, id]
         );
         
-        const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+        const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdInt]);
         const employeeName = selectedEmployeeRows[0]?.nome;
         
         const newHistoryEntry = {
@@ -460,7 +466,7 @@ const assignToOperational = async (req, res) => {
             endDate: null,
             details: JSON.stringify({
                 subGroup,
-                employeeId,
+                employeeId: employeeIdInt,
                 employeeName,
                 observacoes,
             })
@@ -477,7 +483,7 @@ const assignToOperational = async (req, res) => {
         
         const operationalAssignment = { 
             subGroup, 
-            employeeId, 
+            employeeId: employeeIdInt, 
             employeeName, 
             startDate: now 
         };
@@ -503,14 +509,14 @@ const assignToOperational = async (req, res) => {
             [...updateValues, id]
         );
         
-        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeId]);
+        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeIdInt]);
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo alocado para operação.' });
     } catch (error) {
         await connection.rollback();
         console.error("Erro ao alocar veículo para operação:", error); 
-        res.status(500).json({ error: 'Falha ao alocar o veículo.' });
+        res.status(500).json({ error: 'Falha ao alocar o veículo.', details: error.message });
     } finally {
         connection.release();
     }
@@ -524,7 +530,6 @@ const unassignFromOperational = async (req, res) => {
 
     try {
         const now = new Date();
-
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'operacional']
@@ -532,10 +537,7 @@ const unassignFromOperational = async (req, res) => {
         const activeHistory = historyRows[0];
         
         if (activeHistory) { 
-            await connection.execute(
-                'UPDATE vehicle_history SET endDate = ? WHERE id = ?',
-                [now, activeHistory.id]
-            );
+            await connection.execute('UPDATE vehicle_history SET endDate = ? WHERE id = ?', [now, activeHistory.id]);
         }
 
         const vehicleUpdateData = { 
@@ -549,10 +551,7 @@ const unassignFromOperational = async (req, res) => {
         const updateValues = Object.values(vehicleUpdateData);
         const setClause = updateFields.map(field => `${field} = ?`).join(', ');
 
-        await connection.execute(
-            `UPDATE vehicles SET ${setClause} WHERE id = ?`,
-            [...updateValues, id]
-        );
+        await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
 
         if (activeHistory?.details) {
              const details = parseJsonSafe(activeHistory.details, 'history.details'); 
@@ -566,7 +565,7 @@ const unassignFromOperational = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error("Erro ao finalizar alocação:", error);
-        res.status(500).json({ error: 'Falha ao finalizar a alocação.' });
+        res.status(500).json({ error: 'Falha ao finalizar a alocação.', details: error.message });
     } finally {
         connection.release();
     }
@@ -581,20 +580,14 @@ const startMaintenance = async (req, res) => {
     try {
         const now = new Date();
         
-        await connection.execute(
-            'UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND endDate IS NULL',
-            [now, id]
-        );
+        await connection.execute('UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND endDate IS NULL', [now, id]);
 
         const newHistoryEntry = {
             vehicleId: id,
             historyType: 'manutencao',
             startDate: now,
             endDate: null,
-            details: JSON.stringify({
-                status: status,
-                location: location,
-            })
+            details: JSON.stringify({ status: status, location: location })
         };
         
         const historyFields = Object.keys(newHistoryEntry);
@@ -616,28 +609,21 @@ const startMaintenance = async (req, res) => {
             maintenanceLocation: JSON.stringify(maintenanceLocation),
             obraAtualId: null,
             operationalAssignment: null,
-            alocadoEm: JSON.stringify({
-                type: 'manutencao',
-                location: location,
-                status: status
-            }),
+            alocadoEm: JSON.stringify({ type: 'manutencao', location: location, status: status }),
         };
         
         const updateFields = Object.keys(vehicleUpdateData);
         const updateValues = Object.values(vehicleUpdateData);
         const setClause = updateFields.map(field => `${field} = ?`).join(', ');
 
-        await connection.execute(
-            `UPDATE vehicles SET ${setClause} WHERE id = ?`,
-            [...updateValues, id]
-        );
+        await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
 
         await connection.commit();
         res.status(200).json({ message: 'Status de manutenção atualizado.' });
     } catch (error) {
         await connection.rollback();
         console.error("Erro ao iniciar manutenção:", error);
-        res.status(500).json({ error: 'Falha ao iniciar a manutenção.' });
+        res.status(500).json({ error: 'Falha ao iniciar a manutenção.', details: error.message });
     } finally {
         connection.release();
     }
@@ -651,11 +637,7 @@ const endMaintenance = async (req, res) => {
 
     try {
         const now = new Date();
-        
-        await connection.execute(
-            'UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
-            [now, id, 'manutencao']
-        );
+        await connection.execute('UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL', [now, id, 'manutencao']);
 
         const vehicleUpdateData = {
             status: 'Disponível',
@@ -668,17 +650,14 @@ const endMaintenance = async (req, res) => {
         const updateValues = Object.values(vehicleUpdateData);
         const setClause = updateFields.map(field => `${field} = ?`).join(', ');
 
-        await connection.execute(
-            `UPDATE vehicles SET ${setClause} WHERE id = ?`,
-            [...updateValues, id]
-        );
+        await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
 
         await connection.commit();
         res.status(200).json({ message: 'Manutenção finalizada.' });
     } catch (error) {
         await connection.rollback();
         console.error("Erro ao finalizar manutenção:", error);
-        res.status(500).json({ error: 'Falha ao finalizar a manutenção.' });
+        res.status(500).json({ error: 'Falha ao finalizar a manutenção.', details: error.message });
     } finally {
         connection.release();
     }
