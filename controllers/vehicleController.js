@@ -76,9 +76,9 @@ const createVehicle = async (req, res) => {
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     delete data.history; 
 
+    // SQL Dump confirma que ID é varchar(255), então randomUUID é seguro e correto
     data.id = randomUUID();
     
-    // Remove campos undefined/null para evitar erro na query dinâmica se não existirem colunas default
     Object.keys(data).forEach(key => data[key] === undefined && delete data[key]);
 
     const fields = Object.keys(data);
@@ -189,54 +189,50 @@ const deleteVehicle = async (req, res) => {
     }
 };
 
-// --- ALOCAÇÃO EM OBRA (CORREÇÃO DE ERRO 500/400 - Debug e Conversão Inteligente) ---
+// --- ALOCAÇÃO EM OBRA (CORRIGIDO PARA O SCHEMA DO BANCO) ---
 
 const allocateToObra = async (req, res) => {
     const { id } = req.params; 
-    // Log do payload para debug no servidor
-    console.log(`[Alocação Obra] Recebido para Veículo ${id}:`, req.body);
+    console.log(`[Alocação Obra] Veículo ${id}:`, req.body);
 
     const { obraId, employeeId, dataEntrada, readingType, readingValue, observacoes } = req.body;
     
-    // Validação com retorno de debug
     if (!obraId || !employeeId) {
-        console.warn("[Alocação Obra] Falha na validação de IDs obrigatórios.");
-        return res.status(400).json({ 
-            error: "IDs de Obra e Funcionário são obrigatórios.",
-            receivedBody: req.body // Retorna o que foi recebido para ajudar no front
-        });
+        return res.status(400).json({ error: "IDs de Obra e Funcionário são obrigatórios." });
     }
 
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        // Conversão Inteligente: Se for apenas dígitos, converte para INT, senão mantém STRING (UUID)
-        // Isso resolve o problema de migração SQL vs legado
-        const obraIdProcessed = /^\d+$/.test(String(obraId)) ? parseInt(obraId, 10) : obraId;
-        const employeeIdProcessed = /^\d+$/.test(String(employeeId)) ? parseInt(employeeId, 10) : employeeId;
+        // CORREÇÃO BASEADA NO SQL: IDs são varchar(255), não convertemos para int.
+        // Isso evita que IDs alfanuméricos como '0ddviJWArUNC2o5i0goq' quebrem.
+        const obraIdStr = String(obraId);
+        const employeeIdStr = String(employeeId);
         const readingVal = parseFloat(readingValue) || 0;
 
-        const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraIdProcessed]);
-        const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdProcessed]);
+        const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraIdStr]);
+        const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdStr]);
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
 
         const obra = obraRows[0];
         const employee = employeeRows[0];
         const vehicle = vehicleRows[0];
 
-        if (!obra || !employee) throw new Error("Dados de Obra ou Funcionário não encontrados no banco (ID inválido).");
+        if (!obra || !employee || !vehicle) {
+            throw new Error("Obra, Funcionário ou Veículo não encontrado (ID inválido).");
+        }
         
-        // 1. Inserir no Histórico Geral (vehicle_history)
+        // 1. Histórico Geral (ID é Auto Increment no banco, não enviamos)
         const newHistoryEntry = {
             vehicleId: id,
             historyType: 'obra',
             startDate: new Date(dataEntrada || new Date()),
             endDate: null,
             details: JSON.stringify({ 
-                obraId: obraIdProcessed,
+                obraId: obraIdStr,
                 obraNome: obra.nome,
-                employeeId: employeeIdProcessed,
+                employeeId: employeeIdStr,
                 employeeName: employee.nome,
                 [`${readingType}Entrada`]: readingVal,
                 observacoes: observacoes
@@ -254,14 +250,14 @@ const allocateToObra = async (req, res) => {
         
         // 2. Atualizar Veículo
         const vehicleUpdateData = {
-            obraAtualId: obraIdProcessed,
+            obraAtualId: obraIdStr,
             status: 'Em Obra',
             localizacaoAtual: obra.nome,
             operationalAssignment: null, 
             maintenanceLocation: null, 
             alocadoEm: JSON.stringify({
                 type: 'obra',
-                id: obraIdProcessed,
+                id: obraIdStr,
                 nome: obra.nome
             }),
             [readingType]: readingVal 
@@ -277,23 +273,26 @@ const allocateToObra = async (req, res) => {
         );
         
         // 3. Atualizar Funcionário
-        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeIdProcessed]);
+        try {
+            await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeIdStr]);
+        } catch (empError) {
+            console.warn("Aviso: Falha ao atualizar funcionário:", empError.message);
+        }
 
-        // 4. Inserir no Histórico de Obras (CORREÇÃO DE NULOS - ERRO 500)
+        // 4. Histórico de Obras (ID é varchar(255) no banco, geramos UUID)
         const newObraHistoryEntryData = {
             id: randomUUID(),
-            obraId: obraIdProcessed,
+            obraId: obraIdStr,
             veiculoId: vehicle.id,
-            tipo: vehicle.tipo,
-            registroInterno: vehicle.registroInterno,
-            placa: vehicle.placa,
-            modelo: `${vehicle.marca} ${vehicle.modelo}`,
-            employeeId: employeeIdProcessed,
-            employeeName: employee.nome,
+            tipo: vehicle.tipo || 'Desconhecido', 
+            registroInterno: vehicle.registroInterno || '',
+            placa: vehicle.placa || '',
+            modelo: `${vehicle.marca || ''} ${vehicle.modelo || ''}`.trim() || 'Modelo N/A',
+            employeeId: employeeIdStr,
+            employeeName: employee.nome || 'Funcionário',
             dataEntrada: new Date(dataEntrada || new Date()),
-            dataSaida: null, 
+            dataSaida: null,
             
-            // CORREÇÃO: Força 0 em vez de null para evitar erro SQL Strict Mode
             odometroEntrada: readingType === 'odometro' ? readingVal : 0,
             odometroSaida: 0, 
             horimetroEntrada: readingType === 'horimetro' ? readingVal : 0,
@@ -315,7 +314,7 @@ const allocateToObra = async (req, res) => {
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro CRÍTICO ao alocar veículo (Obra):", error);
+        console.error("Erro CRÍTICO ao alocar (Obra):", error);
         res.status(500).json({ error: 'Falha ao alocar veículo.', details: error.message, sqlMessage: error.sqlMessage });
     } finally {
         connection.release();
@@ -333,14 +332,13 @@ const deallocateFromObra = async (req, res) => {
         const exitTimestamp = new Date(dataSaida || new Date());
         const readingVal = parseFloat(readingValue) || 0;
 
-        // 1. Identificar Obra Atual (Mantemos como string/original por padrão e convertemos se necessário)
-        let targetObraId = obraId;
+        let targetObraId = obraId ? String(obraId) : null;
         if (!targetObraId) {
             const [vRows] = await connection.execute('SELECT obraAtualId FROM vehicles WHERE id = ?', [id]);
             if (vRows.length > 0) targetObraId = vRows[0].obraAtualId;
         }
 
-        // 2. Atualizar Histórico Geral
+        // Histórico Geral
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'obra']
@@ -353,7 +351,7 @@ const deallocateFromObra = async (req, res) => {
             const historyDetails = parseJsonSafe(activeHistory.details, 'history.details') || {};
             employeeIdToRelease = historyDetails.employeeId;
 
-            if (!targetObraId) targetObraId = historyDetails.obraId;
+            if (!targetObraId && historyDetails.obraId) targetObraId = String(historyDetails.obraId);
 
             const newDetails = {
                 ...historyDetails,
@@ -367,7 +365,7 @@ const deallocateFromObra = async (req, res) => {
             );
         }
 
-        // 3. Atualizar Veículo
+        // Veículo
         const vehicleUpdateData = {
             obraAtualId: null, 
             status: 'Disponível', 
@@ -386,10 +384,12 @@ const deallocateFromObra = async (req, res) => {
         );
 
         if (employeeIdToRelease) {
-             await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdToRelease]);
+             try {
+                await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdToRelease]);
+             } catch (e) { console.warn("Erro ao liberar funcionário", e.message); }
         }
         
-        // 5. Atualizar Histórico Relacional de Obras
+        // Histórico Obras (Garantindo que targetObraId é string para match)
         if (targetObraId) {
             const obraHistoryUpdateFields = ['dataSaida = ?'];
             const obraHistoryUpdateValues = [exitTimestamp];
@@ -418,7 +418,6 @@ const deallocateFromObra = async (req, res) => {
             );
         }
         
-        // 6. Finalizar Obra (Se solicitado)
         if (shouldFinalizeObra && targetObraId) {
             const obraUpdate = { 
                 status: 'finalizada', 
@@ -438,7 +437,7 @@ const deallocateFromObra = async (req, res) => {
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro CRÍTICO ao desalocar veículo:", error);
+        console.error("Erro CRÍTICO ao desalocar:", error);
         res.status(500).json({ error: 'Falha ao desalocar veículo.', details: error.message, sqlMessage: error.sqlMessage });
     } finally {
         connection.release();
@@ -460,10 +459,10 @@ const assignToOperational = async (req, res) => {
             [now, id]
         );
         
-        // Conversão inteligente também para Operacional
-        const employeeIdProcessed = /^\d+$/.test(String(employeeId)) ? parseInt(employeeId, 10) : employeeId;
+        // CORREÇÃO: IDs como string para compatibilidade total
+        const employeeIdStr = String(employeeId);
 
-        const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdProcessed]);
+        const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdStr]);
         const employeeName = selectedEmployeeRows[0]?.nome;
         
         const newHistoryEntry = {
@@ -473,7 +472,7 @@ const assignToOperational = async (req, res) => {
             endDate: null,
             details: JSON.stringify({
                 subGroup,
-                employeeId: employeeIdProcessed,
+                employeeId: employeeIdStr,
                 employeeName,
                 observacoes,
             })
@@ -490,7 +489,7 @@ const assignToOperational = async (req, res) => {
         
         const operationalAssignment = { 
             subGroup, 
-            employeeId: employeeIdProcessed, 
+            employeeId: employeeIdStr, 
             employeeName, 
             startDate: now 
         };
@@ -516,13 +515,13 @@ const assignToOperational = async (req, res) => {
             [...updateValues, id]
         );
         
-        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeIdProcessed]);
+        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeIdStr]);
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo alocado para operação.' });
     } catch (error) {
         await connection.rollback();
-        console.error("Erro ao alocar veículo para operação:", error); 
+        console.error("Erro ao alocar operacional:", error); 
         res.status(500).json({ error: 'Falha ao alocar o veículo.', details: error.message });
     } finally {
         connection.release();
