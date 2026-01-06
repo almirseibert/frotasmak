@@ -189,34 +189,43 @@ const deleteVehicle = async (req, res) => {
     }
 };
 
-// --- ALOCAÇÃO EM OBRA (CORREÇÃO DE ERRO 500/400 - IDs como String) ---
+// --- ALOCAÇÃO EM OBRA (CORREÇÃO DE ERRO 500/400 - Debug e Conversão Inteligente) ---
 
 const allocateToObra = async (req, res) => {
     const { id } = req.params; 
+    // Log do payload para debug no servidor
+    console.log(`[Alocação Obra] Recebido para Veículo ${id}:`, req.body);
+
     const { obraId, employeeId, dataEntrada, readingType, readingValue, observacoes } = req.body;
     
-    // Validação básica
+    // Validação com retorno de debug
     if (!obraId || !employeeId) {
-        return res.status(400).json({ error: "IDs de Obra e Funcionário são obrigatórios." });
+        console.warn("[Alocação Obra] Falha na validação de IDs obrigatórios.");
+        return res.status(400).json({ 
+            error: "IDs de Obra e Funcionário são obrigatórios.",
+            receivedBody: req.body // Retorna o que foi recebido para ajudar no front
+        });
     }
 
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        // CORREÇÃO: Não forçamos parseInt nos IDs, pois podem ser UUIDs (strings)
-        // O MySQL driver lida com strings em campos ID se a coluna for compatível ou faz a conversão implícita se for INT
+        // Conversão Inteligente: Se for apenas dígitos, converte para INT, senão mantém STRING (UUID)
+        // Isso resolve o problema de migração SQL vs legado
+        const obraIdProcessed = /^\d+$/.test(String(obraId)) ? parseInt(obraId, 10) : obraId;
+        const employeeIdProcessed = /^\d+$/.test(String(employeeId)) ? parseInt(employeeId, 10) : employeeId;
         const readingVal = parseFloat(readingValue) || 0;
 
-        const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraId]);
-        const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+        const [obraRows] = await connection.execute('SELECT nome FROM obras WHERE id = ?', [obraIdProcessed]);
+        const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdProcessed]);
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
 
         const obra = obraRows[0];
         const employee = employeeRows[0];
         const vehicle = vehicleRows[0];
 
-        if (!obra || !employee) throw new Error("Dados de Obra ou Funcionário não encontrados no banco.");
+        if (!obra || !employee) throw new Error("Dados de Obra ou Funcionário não encontrados no banco (ID inválido).");
         
         // 1. Inserir no Histórico Geral (vehicle_history)
         const newHistoryEntry = {
@@ -225,9 +234,9 @@ const allocateToObra = async (req, res) => {
             startDate: new Date(dataEntrada || new Date()),
             endDate: null,
             details: JSON.stringify({ 
-                obraId: obraId,
+                obraId: obraIdProcessed,
                 obraNome: obra.nome,
-                employeeId: employeeId,
+                employeeId: employeeIdProcessed,
                 employeeName: employee.nome,
                 [`${readingType}Entrada`]: readingVal,
                 observacoes: observacoes
@@ -245,14 +254,14 @@ const allocateToObra = async (req, res) => {
         
         // 2. Atualizar Veículo
         const vehicleUpdateData = {
-            obraAtualId: obraId,
+            obraAtualId: obraIdProcessed,
             status: 'Em Obra',
             localizacaoAtual: obra.nome,
             operationalAssignment: null, 
             maintenanceLocation: null, 
             alocadoEm: JSON.stringify({
                 type: 'obra',
-                id: obraId,
+                id: obraIdProcessed,
                 nome: obra.nome
             }),
             [readingType]: readingVal 
@@ -268,27 +277,25 @@ const allocateToObra = async (req, res) => {
         );
         
         // 3. Atualizar Funcionário
-        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeId]);
+        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeIdProcessed]);
 
         // 4. Inserir no Histórico de Obras (CORREÇÃO DE NULOS - ERRO 500)
-        // Campos numéricos DEVEM ser inicializados com 0, não null.
         const newObraHistoryEntryData = {
             id: randomUUID(),
-            obraId: obraId,
+            obraId: obraIdProcessed,
             veiculoId: vehicle.id,
             tipo: vehicle.tipo,
             registroInterno: vehicle.registroInterno,
             placa: vehicle.placa,
             modelo: `${vehicle.marca} ${vehicle.modelo}`,
-            employeeId: employeeId,
+            employeeId: employeeIdProcessed,
             employeeName: employee.nome,
             dataEntrada: new Date(dataEntrada || new Date()),
             dataSaida: null, 
             
-            // CORREÇÃO: Força 0 em vez de null para evitar erro SQL
+            // CORREÇÃO: Força 0 em vez de null para evitar erro SQL Strict Mode
             odometroEntrada: readingType === 'odometro' ? readingVal : 0,
             odometroSaida: 0, 
-            
             horimetroEntrada: readingType === 'horimetro' ? readingVal : 0,
             horimetroSaida: 0, 
             
@@ -326,7 +333,7 @@ const deallocateFromObra = async (req, res) => {
         const exitTimestamp = new Date(dataSaida || new Date());
         const readingVal = parseFloat(readingValue) || 0;
 
-        // 1. Identificar Obra Atual (Mantemos como string/original)
+        // 1. Identificar Obra Atual (Mantemos como string/original por padrão e convertemos se necessário)
         let targetObraId = obraId;
         if (!targetObraId) {
             const [vRows] = await connection.execute('SELECT obraAtualId FROM vehicles WHERE id = ?', [id]);
@@ -453,7 +460,10 @@ const assignToOperational = async (req, res) => {
             [now, id]
         );
         
-        const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+        // Conversão inteligente também para Operacional
+        const employeeIdProcessed = /^\d+$/.test(String(employeeId)) ? parseInt(employeeId, 10) : employeeId;
+
+        const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdProcessed]);
         const employeeName = selectedEmployeeRows[0]?.nome;
         
         const newHistoryEntry = {
@@ -463,7 +473,7 @@ const assignToOperational = async (req, res) => {
             endDate: null,
             details: JSON.stringify({
                 subGroup,
-                employeeId: employeeId,
+                employeeId: employeeIdProcessed,
                 employeeName,
                 observacoes,
             })
@@ -480,7 +490,7 @@ const assignToOperational = async (req, res) => {
         
         const operationalAssignment = { 
             subGroup, 
-            employeeId: employeeId, 
+            employeeId: employeeIdProcessed, 
             employeeName, 
             startDate: now 
         };
@@ -506,7 +516,7 @@ const assignToOperational = async (req, res) => {
             [...updateValues, id]
         );
         
-        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeId]);
+        await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeIdProcessed]);
 
         await connection.commit();
         res.status(200).json({ message: 'Veículo alocado para operação.' });
