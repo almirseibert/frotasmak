@@ -23,7 +23,6 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
-    // Campos que são JSON no banco e precisam virar Objeto no JS
     const fieldsToParse = ['horasContratadasPorTipo', 'valoresPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
     fieldsToParse.forEach(field => {
         if (obra.hasOwnProperty(field)) {
@@ -33,13 +32,12 @@ const parseObraJsonFields = (obra) => {
     return newObra;
 };
 
-// --- GET ALL OBRAS (Com Soma de Horas do Faturamento) ---
+// --- GET ALL OBRAS ---
 const getAllObras = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras');
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
 
-        // Busca soma de horas apontadas no Faturamento
         const [billingRows] = await db.query(`
             SELECT obraId, SUM(totalHours) as totalHorasRealizadas 
             FROM daily_work_logs 
@@ -53,13 +51,10 @@ const getAllObras = async (req, res) => {
 
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
-            
             parsedObra.historicoVeiculos = historyRows
                 .filter(h => h.obraId === parsedObra.id)
                 .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada));
-            
             parsedObra.totalHorasRealizadas = billingMap[parsedObra.id] || 0;
-                
             return parsedObra;
         });
         
@@ -70,7 +65,7 @@ const getAllObras = async (req, res) => {
     }
 };
 
-// --- GET OBRA BY ID (Com Detalhamento por Tipo do Faturamento) ---
+// --- GET OBRA BY ID ---
 const getObraById = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM obras WHERE id = ?', [req.params.id]);
@@ -83,7 +78,6 @@ const getObraById = async (req, res) => {
             [req.params.id]
         );
 
-        // Busca horas realizadas agrupadas por TIPO DE VEÍCULO
         const [billingByTypeRows] = await db.query(`
             SELECT v.tipo, SUM(l.totalHours) as totalHoras
             FROM daily_work_logs l
@@ -101,7 +95,6 @@ const getObraById = async (req, res) => {
         });
         
         const obra = parseObraJsonFields(rows[0]);
-        
         obra.historicoVeiculos = historyRows; 
         obra.realizadoPorTipo = realizadoPorTipo; 
         obra.totalHorasRealizadas = totalRealizadoGeral;
@@ -118,25 +111,21 @@ const createObra = async (req, res) => {
     const data = { ...req.body };
     data.id = uuidv4();
 
-    // Limpeza de campos calculados/auxiliares que não existem na tabela obras
     delete data.historicoVeiculos; 
     delete data.realizadoPorTipo;
     delete data.totalHorasRealizadas;
 
-    // Stringify de campos JSON
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
     
-    // Tratamento de nulos
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
     if (data.responsavel === '') data.responsavel = null;
     if (data.fiscal === '') data.fiscal = null;
 
-    // Garante que valores numéricos vazios virem 0 ou null
     if (data.kmContratadoPrancha === '') data.kmContratadoPrancha = 0;
     if (data.valorKmPrancha === '') data.valorKmPrancha = 0;
     if (data.valorTotalContrato === '') data.valorTotalContrato = 0;
@@ -153,7 +142,7 @@ const createObra = async (req, res) => {
         res.status(201).json({ message: 'Obra criada com sucesso' });
     } catch (error) {
         console.error('Erro ao criar obra:', error);
-        res.status(500).json({ error: 'Erro ao criar obra. Verifique se todas as colunas existem no banco.', details: error.message });
+        res.status(500).json({ error: 'Erro ao criar obra.', details: error.message });
     }
 };
 
@@ -167,7 +156,6 @@ const updateObra = async (req, res) => {
     delete data.totalHorasRealizadas;
     delete data.id;
 
-    // Stringify de campos JSON
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
@@ -198,24 +186,18 @@ const updateObra = async (req, res) => {
     }
 };
 
-// --- DELETE OBRA (COM LIMPEZA DE FKs) ---
+// --- DELETE OBRA ---
 const deleteObra = async (req, res) => {
     const obraId = req.params.id;
     let connection;
 
     try {
-        // Obtém uma conexão dedicada para a transação
         connection = await db.getConnection(); 
         await connection.beginTransaction();
 
-        // 1. Remove logs financeiros (Se necessário - política de dados)
-        // Se a integridade for crucial, talvez arquivar seja melhor, mas aqui deletaremos conforme pedido.
         await connection.execute('DELETE FROM daily_work_logs WHERE obraId = ?', [obraId]);
-
-        // 2. Remove histórico de veículos
         await connection.execute('DELETE FROM obras_historico_veiculos WHERE obraId = ?', [obraId]);
-
-        // 3. Remove a Obra
+        
         const [result] = await connection.execute('DELETE FROM obras WHERE id = ?', [obraId]);
 
         if (result.affectedRows === 0) {
@@ -241,8 +223,6 @@ const finishObra = async (req, res) => {
     const finalDate = dataFim ? new Date(dataFim) : new Date();
 
     try {
-        // Nota: A validação de veículos ativos deve ser feita no Frontend para melhor UX,
-        // mas idealmente também aqui. Assumimos que o frontend bloqueia por enquanto.
         const [result] = await db.execute(
             "UPDATE obras SET status = 'finalizada', dataFim = ? WHERE id = ?",
             [finalDate, id]
@@ -254,51 +234,159 @@ const finishObra = async (req, res) => {
         res.json({ message: 'Obra finalizada com sucesso.' });
     } catch (error) {
         console.error('Erro ao finalizar obra:', error);
-        res.status(500).json({ message: 'Erro interno do servidor ao finalizar a obra.' });
+        res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 };
 
-// --- UPDATE HISTORICO ---
+// --- UPDATE HISTORICO (SINCRONIZADO E ROBUSTO) ---
 const updateObraHistoryEntry = async (req, res) => {
     const { historyId } = req.params;
     const { dataEntrada, dataSaida, employeeId, leituraEntrada, leituraSaida } = req.body;
 
-    let employeeName = null;
-    if (employeeId) {
-        try {
-            const [empRows] = await db.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
-            if (empRows.length > 0) employeeName = empRows[0].nome;
-        } catch (e) { console.warn("Erro ao buscar nome funcionário"); }
-    }
-
-    let odometroEntrada = null, horimetroEntrada = null, odometroSaida = null, horimetroSaida = null;
-
+    let connection;
     try {
-        const [currentHistory] = await db.execute('SELECT * FROM obras_historico_veiculos WHERE id = ?', [historyId]);
-        if (currentHistory.length === 0) return res.status(404).json({ error: 'Histórico não encontrado.' });
+        connection = await db.getConnection();
+        await connection.beginTransaction();
 
-        const history = currentHistory[0];
+        // 1. Busca registro atual para saber quem era o veículo e operador anterior
+        const [currentRows] = await connection.execute('SELECT * FROM obras_historico_veiculos WHERE id = ?', [historyId]);
+        if (currentRows.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Histórico não encontrado.' });
+        }
         
-        if (history.odometroEntrada !== null) {
-            odometroEntrada = parseFloat(leituraEntrada) || null;
-            odometroSaida = parseFloat(leituraSaida) || null;
-        } else {
-            horimetroEntrada = parseFloat(leituraEntrada) || null;
-            horimetroSaida = parseFloat(leituraSaida) || null;
+        const currentEntry = currentRows[0];
+        const veiculoId = currentEntry.veiculoId;
+        const oldEmployeeId = currentEntry.employeeId;
+        const obraId = currentEntry.obraId;
+
+        // 2. Busca nome do novo funcionário (se mudou)
+        let employeeName = currentEntry.employeeName;
+        if (employeeId && String(employeeId) !== String(oldEmployeeId)) {
+            const [empRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+            if (empRows.length > 0) employeeName = empRows[0].nome;
+        } else if (!employeeId) {
+            employeeName = null;
         }
 
-        const query = `
+        // 3. Prepara valores de leitura (mantém o que já existia ou atualiza)
+        let odometroEntrada = currentEntry.odometroEntrada;
+        let horimetroEntrada = currentEntry.horimetroEntrada;
+        let odometroSaida = currentEntry.odometroSaida;
+        let horimetroSaida = currentEntry.horimetroSaida;
+
+        // Se o registro original tinha odômetro ou se a nova leitura veio e não há horímetro
+        if (currentEntry.odometroEntrada !== null || (leituraEntrada && !currentEntry.horimetroEntrada)) {
+            odometroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
+            odometroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
+        } else {
+            horimetroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
+            horimetroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
+        }
+
+        // 4. ATUALIZA 'obras_historico_veiculos'
+        const queryUpdate = `
             UPDATE obras_historico_veiculos 
             SET dataEntrada=?, dataSaida=?, employeeId=?, employeeName=?, odometroEntrada=?, odometroSaida=?, horimetroEntrada=?, horimetroSaida=?
             WHERE id=?
         `;
         
-        await db.execute(query, [dataEntrada || null, dataSaida || null, employeeId || null, employeeName, odometroEntrada, odometroSaida, horimetroEntrada, horimetroSaida, historyId]);
-        res.json({ message: 'Histórico atualizado com sucesso.' });
+        await connection.execute(queryUpdate, [
+            dataEntrada || null, 
+            dataSaida || null, 
+            employeeId || null, 
+            employeeName, 
+            odometroEntrada, 
+            odometroSaida, 
+            horimetroEntrada, 
+            horimetroSaida, 
+            historyId
+        ]);
+
+        // 5. PROPAGAÇÃO DE MUDANÇAS (Sincronização)
+        
+        // Verifica se é uma alocação ATIVA (sem data de saída)
+        const isActiveAllocation = (!dataSaida && !currentEntry.dataSaida);
+
+        if (isActiveAllocation) {
+            // A) Sincroniza com 'vehicle_history' (Tabela Unificada)
+            // Busca o registro aberto mais recente deste veículo
+            const [vhRows] = await connection.execute(
+                `SELECT id, details FROM vehicle_history 
+                 WHERE vehicleId = ? AND historyType = 'obra' AND endDate IS NULL 
+                 ORDER BY startDate DESC LIMIT 1`, 
+                [veiculoId]
+            );
+
+            if (vhRows.length > 0) {
+                const vhEntry = vhRows[0];
+                let details = typeof vhEntry.details === 'string' ? JSON.parse(vhEntry.details) : (vhEntry.details || {});
+                
+                // Atualiza os detalhes unificados
+                details.employeeId = employeeId;
+                details.employeeName = employeeName;
+                if (odometroEntrada) details.odometroEntrada = odometroEntrada;
+                if (horimetroEntrada) details.horimetroEntrada = horimetroEntrada;
+                
+                await connection.execute(
+                    'UPDATE vehicle_history SET startDate = ?, details = ? WHERE id = ?',
+                    [dataEntrada, JSON.stringify(details), vhEntry.id]
+                );
+            }
+
+            // B) Sincroniza com 'employees' (Troca de alocação de funcionário)
+            if (String(oldEmployeeId) !== String(employeeId)) {
+                // Libera o funcionário antigo
+                if (oldEmployeeId) {
+                    await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [oldEmployeeId]);
+                }
+                // Aloca o novo funcionário
+                if (employeeId) {
+                    const employeeAllocation = JSON.stringify({ veiculoId: veiculoId, assignmentType: 'obra' });
+                    await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [employeeAllocation, employeeId]);
+                }
+            }
+            
+            // Nota: Não precisamos atualizar a tabela 'vehicles' aqui a menos que o nome da obra mudasse (o que não acontece nesta rota)
+            // O vínculo veículo->obra continua o mesmo (obraAtualId).
+        } else {
+            // É um registro histórico PASSADO (tem dataSaida)
+            // Tenta atualizar o vehicle_history correspondente pela data de início (apenas melhor esforço)
+            // Isso evita inconsistência no histórico global
+            if (currentEntry.dataEntrada) {
+                 const [vhRows] = await connection.execute(
+                    `SELECT id, details FROM vehicle_history 
+                     WHERE vehicleId = ? AND historyType = 'obra' AND startDate = ? LIMIT 1`, 
+                    [veiculoId, currentEntry.dataEntrada]
+                );
+                
+                if (vhRows.length > 0) {
+                     const vhEntry = vhRows[0];
+                     let details = typeof vhEntry.details === 'string' ? JSON.parse(vhEntry.details) : (vhEntry.details || {});
+                     
+                     // Atualiza dados históricos
+                     details.employeeId = employeeId;
+                     details.employeeName = employeeName;
+                     details.odometroSaida = odometroSaida;
+                     details.horimetroSaida = horimetroSaida;
+                     
+                     await connection.execute(
+                        'UPDATE vehicle_history SET startDate = ?, endDate = ?, details = ? WHERE id = ?',
+                        [dataEntrada, dataSaida, JSON.stringify(details), vhEntry.id]
+                    );
+                }
+            }
+        }
+
+        await connection.commit();
+        res.json({ message: 'Histórico e vínculos atualizados com sucesso.' });
 
     } catch (error) {
+        if (connection) await connection.rollback();
         console.error('Erro ao atualizar histórico:', error);
-        res.status(500).json({ error: 'Erro ao atualizar histórico.' });
+        res.status(500).json({ error: 'Erro ao atualizar histórico.', details: error.message });
+    } finally {
+        if (connection) connection.release();
     }
 };
 
