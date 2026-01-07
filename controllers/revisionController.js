@@ -242,9 +242,9 @@ const completeRevision = async (req, res) => {
 
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
 
-        // 2. Registrar no Histórico (ID Manual)
+        // 2. Registrar no Histórico
+        // ALTERADO: Removido 'id: uuidv4()' pois causava 'Data truncated' em bancos onde 'id' é INT/Auto-Increment
         const historyData = {
-            id: uuidv4(), // Gera ID manualmente para histórico também
             revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
