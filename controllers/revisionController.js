@@ -65,7 +65,7 @@ const createRevisionPlan = async (req, res) => {
     // Sanitização e Preparação dos Dados
     const data = { 
         ...req.body,
-        id: uuidv4(), // Gera ID manualmente
+        id: uuidv4(), // Gera ID manualmente para Revisions (tabela suporta UUID)
         // Sanitização dos campos numéricos/data para evitar erro de string vazia
         proximaRevisaoData: sanitize(req.body.proximaRevisaoData),
         proximaRevisaoOdometro: sanitize(req.body.proximaRevisaoOdometro),
@@ -89,10 +89,6 @@ const createRevisionPlan = async (req, res) => {
 
     try {
         await db.execute(query, values);
-
-        // EMITIR EVENTO SOCKET.IO
-        req.io.emit('server:sync', { targets: ['revisions'] });
-
         res.status(201).json({ message: 'Plano de revisão criado com sucesso' });
     } catch (error) {
         console.error('Erro ao criar plano de revisão:', error);
@@ -166,10 +162,6 @@ const updateRevisionPlan = async (req, res) => {
             await connection.execute(query, values);
         }
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
-        req.io.emit('server:sync', { targets: ['revisions'] });
-
         res.json({ message: 'Agendamento de revisão salvo com sucesso' });
     } catch (error) {
         await connection.rollback();
@@ -251,13 +243,14 @@ const completeRevision = async (req, res) => {
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
 
         // 2. Registrar no Histórico
-        // ALTERADO: Removido 'id: uuidv4()' pois causava 'Data truncated' em bancos onde 'id' é INT/Auto-Increment
+        // CORREÇÃO: Não passamos 'id' aqui. O banco deve usar AUTO_INCREMENT para o histórico.
+        // O campo 'revisionId' (FK) recebe o UUID, mas o ID do registro histórico é numérico/automático.
         const historyData = {
             revisionId: revisionId,
             data: realizadaEm,
             descricao: descricao || 'Revisão Concluída',
             realizadaPor: realizadaPor
-            // custo e notaFiscal removidos até que as colunas existam
+            // custo e notaFiscal removidos até que as colunas existam no banco
         };
 
         if (isHourBased) {
@@ -270,6 +263,7 @@ const completeRevision = async (req, res) => {
         const histValues = Object.values(historyData);
         const histPlaceholders = histFields.map(() => '?').join(', ');
         
+        // Esta query não inclui a coluna 'id', evitando o erro "Data truncated"
         await connection.execute(
             `INSERT INTO revisions_history (${histFields.join(', ')}) VALUES (${histPlaceholders})`, 
             histValues
@@ -315,7 +309,7 @@ const completeRevision = async (req, res) => {
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
-        // 4. Atualizar Leitura do Veículo (REGRA GLOBAL 8, 10, 11)
+        // 4. Atualizar Leitura do Veículo
         const readingVal = parseFloat(leituraRealizada);
         
         if (!isNaN(readingVal) && readingVal > 0) {
@@ -337,11 +331,6 @@ const completeRevision = async (req, res) => {
         }
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
-        // Fundamental: Atualiza lista de revisões E status do veículo (ex: remove alerta de manutenção)
-        req.io.emit('server:sync', { targets: ['revisions', 'vehicles'] });
-
         res.json({ message: 'Revisão concluída e veículo atualizado com sucesso!' });
 
     } catch (error) {
@@ -357,10 +346,6 @@ const completeRevision = async (req, res) => {
 const deleteRevisionPlan = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
-
-        // EMITIR EVENTO SOCKET.IO
-        req.io.emit('server:sync', { targets: ['revisions'] });
-
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar plano de revisão:', error);
