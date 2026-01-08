@@ -135,6 +135,9 @@ const createExpense = async (req, res) => {
             expenseType
         ]);
 
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['expenses'] });
+
         res.status(201).json({ id: newExpenseId, ...req.body, createdAt, createdBy });
     } catch (error) {
         console.error("Erro ao criar despesa manual:", error);
@@ -171,6 +174,9 @@ const updateExpense = async (req, res) => {
             return res.status(404).json({ error: 'Despesa não encontrada.' });
         }
 
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['expenses'] });
+
         res.json({ message: 'Despesa atualizada com sucesso.' });
     } catch (error) {
         console.error("Erro ao atualizar despesa:", error);
@@ -189,6 +195,9 @@ const deleteExpense = async (req, res) => {
         if (result.affectedRows === 0) {
             return res.status(404).json({ error: 'Despesa não encontrada.' });
         }
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['expenses'] });
 
         res.status(204).end(); // Sucesso, sem conteúdo
     } catch (error) {

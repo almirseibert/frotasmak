@@ -82,6 +82,10 @@ const upsertDailyLog = async (req, res) => {
                 observation || null,
                 existing[0].id
             ]);
+            
+            // EMITIR EVENTO SOCKET.IO
+            req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
+
             res.json({ message: 'Registro atualizado com sucesso.', id: existing[0].id });
         } else {
             // Criar
@@ -103,6 +107,10 @@ const upsertDailyLog = async (req, res) => {
                 totalHours || 0, 
                 observation || null
             ]);
+            
+            // EMITIR EVENTO SOCKET.IO
+            req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
+
             res.status(201).json({ message: 'Registro criado com sucesso.', id: newId });
         }
     } catch (error) {
@@ -115,6 +123,10 @@ const deleteDailyLog = async (req, res) => {
     const { id } = req.params;
     try {
         await db.execute('DELETE FROM daily_work_logs WHERE id = ?', [id]);
+        
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar log:', error);

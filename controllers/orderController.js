@@ -107,6 +107,11 @@ const createOrder = async (req, res) => {
         }
         
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Atualiza tanto a lista de ordens quanto o painel financeiro (se gerou despesa)
+        req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
+
         res.status(201).json({ id: orderId, orderNumber: newOrderNumber });
     } catch (error) {
         await connection.rollback();
@@ -162,6 +167,10 @@ const updateOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
+
         res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
     } catch (error) {
         await connection.rollback();
@@ -189,6 +198,11 @@ const cancelOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Importante: Cancela a ordem e remove a despesa do financeiro automaticamente
+        req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
+
         res.status(200).json({ message: 'Ordem cancelada com sucesso.' });
     } catch (error) {
         await connection.rollback();
@@ -203,6 +217,10 @@ const cancelOrder = async (req, res) => {
 const deleteOrder = async (req, res) => {
     try {
         await db.execute('DELETE FROM orders WHERE id = ?', [req.params.id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['orders'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar ordem:', error);

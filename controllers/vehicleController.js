@@ -88,6 +88,10 @@ const createVehicle = async (req, res) => {
 
     try {
         await db.execute(query, values);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles'] });
+
         res.status(201).json({ ...req.body, id: data.id }); 
     } catch (error) {
         console.error('Erro ao criar veículo:', error);
@@ -115,6 +119,10 @@ const updateVehicle = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles'] });
+
         res.json({ message: 'Veículo atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar veículo:', error);
@@ -153,6 +161,10 @@ const uploadVehicleImage = async (req, res) => {
 
         await connection.execute('UPDATE vehicles SET fotoURL = ? WHERE id = ?', [fotoURL, id]);
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles'] });
+
         res.json({ message: 'Upload bem-sucedido!', fotoURL: fotoURL });
 
     } catch (error) {
@@ -179,6 +191,10 @@ const deleteVehicle = async (req, res) => {
         await connection.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
         
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles', 'revisions'] });
+
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
@@ -311,6 +327,11 @@ const allocateToObra = async (req, res) => {
         );
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Atualiza tanto a lista de veículos quanto os detalhes da obra
+        req.io.emit('server:sync', { targets: ['vehicles', 'obras'] });
+
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
@@ -434,6 +455,10 @@ const deallocateFromObra = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles', 'obras'] });
+
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
@@ -518,6 +543,10 @@ const assignToOperational = async (req, res) => {
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeIdStr]);
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles'] });
+
         res.status(200).json({ message: 'Veículo alocado para operação.' });
     } catch (error) {
         await connection.rollback();
@@ -567,6 +596,10 @@ const unassignFromOperational = async (req, res) => {
         }
         
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles'] });
+
         res.status(200).json({ message: 'Alocação operacional finalizada.' });
     } catch (error) {
         await connection.rollback();
@@ -625,6 +658,10 @@ const startMaintenance = async (req, res) => {
         await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles'] });
+
         res.status(200).json({ message: 'Status de manutenção atualizado.' });
     } catch (error) {
         await connection.rollback();
@@ -659,6 +696,10 @@ const endMaintenance = async (req, res) => {
         await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['vehicles'] });
+
         res.status(200).json({ message: 'Manutenção finalizada.' });
     } catch (error) {
         await connection.rollback();

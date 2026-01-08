@@ -183,6 +183,10 @@ const createRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
+
         res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
@@ -274,6 +278,10 @@ const updateRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
+
         res.json({ message: 'Ordem atualizada.' });
     } catch (error) {
         await connection.rollback();
@@ -387,6 +395,11 @@ const confirmRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Confirmação impacta: Lista de abastecimentos, Km do Veículo e Financeiro
+        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'partners'] });
+
         res.json({ message: 'Abastecimento confirmado com sucesso.' });
 
     } catch (error) {
@@ -419,6 +432,10 @@ const deleteRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
+
         res.status(204).end();
     } catch (error) {
         await connection.rollback();

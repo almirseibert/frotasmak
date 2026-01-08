@@ -139,6 +139,10 @@ const createObra = async (req, res) => {
 
     try {
         await db.execute(query, values);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['obras'] });
+
         res.status(201).json({ message: 'Obra criada com sucesso' });
     } catch (error) {
         console.error('Erro ao criar obra:', error);
@@ -179,6 +183,10 @@ const updateObra = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['obras'] });
+
         res.json({ message: 'Obra atualizada com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar obra:', error);
@@ -206,6 +214,11 @@ const deleteObra = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Sincroniza 'vehicles' também, pois o histórico foi apagado, o que pode impactar visualização
+        req.io.emit('server:sync', { targets: ['obras', 'vehicles'] });
+
         res.status(204).end();
     } catch (error) {
         if (connection) await connection.rollback();
@@ -231,6 +244,11 @@ const finishObra = async (req, res) => {
         if (result.affectedRows === 0) {
             return res.status(404).json({ message: 'Obra não encontrada.' });
         }
+
+        // EMITIR EVENTO SOCKET.IO
+        // Importante: Ao finalizar, veículos podem mudar de status logicamente, então atualizamos 'vehicles'
+        req.io.emit('server:sync', { targets: ['obras', 'vehicles'] });
+
         res.json({ message: 'Obra finalizada com sucesso.' });
     } catch (error) {
         console.error('Erro ao finalizar obra:', error);
@@ -379,6 +397,10 @@ const updateObraHistoryEntry = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['obras', 'vehicles'] });
+
         res.json({ message: 'Histórico e vínculos atualizados com sucesso.' });
 
     } catch (error) {

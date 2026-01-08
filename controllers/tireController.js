@@ -46,6 +46,10 @@ const createTire = async (req, res) => {
             data.price || null, 
             'Almoxarifado'
         ]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['tires'] });
+
         res.status(201).json({ message: 'Pneu cadastrado com sucesso!' });
     } catch (error) {
         console.error('Erro ao criar pneu:', error);
@@ -71,6 +75,10 @@ const updateTire = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['tires'] });
+
         res.json({ message: 'Pneu atualizado.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao atualizar pneu.' });
@@ -177,6 +185,11 @@ const registerTransaction = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Movimentação impacta pneus e possivelmente km/horímetro de veículos
+        req.io.emit('server:sync', { targets: ['tires', 'vehicles'] });
+
         res.json({ message: 'Movimentação registrada com sucesso.' });
 
     } catch (error) {

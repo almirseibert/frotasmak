@@ -89,6 +89,10 @@ const createRevisionPlan = async (req, res) => {
 
     try {
         await db.execute(query, values);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['revisions'] });
+
         res.status(201).json({ message: 'Plano de revisão criado com sucesso' });
     } catch (error) {
         console.error('Erro ao criar plano de revisão:', error);
@@ -162,6 +166,10 @@ const updateRevisionPlan = async (req, res) => {
             await connection.execute(query, values);
         }
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['revisions'] });
+
         res.json({ message: 'Agendamento de revisão salvo com sucesso' });
     } catch (error) {
         await connection.rollback();
@@ -329,6 +337,11 @@ const completeRevision = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Fundamental: Atualiza lista de revisões E status do veículo (ex: remove alerta de manutenção)
+        req.io.emit('server:sync', { targets: ['revisions', 'vehicles'] });
+
         res.json({ message: 'Revisão concluída e veículo atualizado com sucesso!' });
 
     } catch (error) {
@@ -344,6 +357,10 @@ const completeRevision = async (req, res) => {
 const deleteRevisionPlan = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['revisions'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar plano de revisão:', error);

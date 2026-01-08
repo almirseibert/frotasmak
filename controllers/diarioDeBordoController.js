@@ -105,6 +105,10 @@ const createDiarioDeBordo = async (req, res) => {
 
     try {
         const [result] = await db.execute(query, values);
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['diarioDeBordo'] });
+
         res.status(201).json({ id: result.insertId, ...req.body });
     } catch (error) {
         console.error('Erro ao criar registro de diário de bordo:', error);
@@ -128,6 +132,10 @@ const updateDiarioDeBordo = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['diarioDeBordo'] });
+
         res.json({ message: 'Registro de diário de bordo atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar registro:', error);
@@ -139,6 +147,10 @@ const updateDiarioDeBordo = async (req, res) => {
 const deleteDiarioDeBordo = async (req, res) => {
     try {
         await db.execute('DELETE FROM diario_de_bordo WHERE id = ?', [req.params.id]);
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['diarioDeBordo'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar registro:', error);
@@ -191,6 +203,10 @@ const startJourney = async (req, res) => {
         await connection.execute('INSERT INTO diario_de_bordo SET ?', [newLog]);
 
         await connection.commit();
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['diarioDeBordo'] });
+
         res.status(201).json({ message: 'Jornada iniciada com sucesso!' });
     } catch (error) {
         await connection.rollback();
@@ -238,6 +254,10 @@ const endJourney = async (req, res) => {
         }
 
         await connection.commit();
+
+        // SOCKET EMIT: Atualiza Diário E Veículos (pois a leitura mudou)
+        req.io.emit('server:sync', { targets: ['diarioDeBordo', 'vehicles'] });
+
         res.status(200).json({ message: 'Jornada finalizada com sucesso!' });
     } catch (error) {
         await connection.rollback();
@@ -254,6 +274,10 @@ const startBreak = async (req, res) => {
     const { lunchStartTime } = req.body;
     try {
         await db.execute('UPDATE diario_de_bordo SET status = "Em Almoço", lunchStartTime = ? WHERE id = ?', [new Date(lunchStartTime), id]);
+        
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['diarioDeBordo'] });
+
         res.status(200).json({ message: 'Intervalo iniciado com sucesso.' });
     } catch (error) {
         console.error("Erro ao iniciar intervalo:", error);
@@ -267,6 +291,10 @@ const endBreak = async (req, res) => {
     const { breaks } = req.body;
     try {
         await db.execute('UPDATE diario_de_bordo SET status = "Aberto", breaks = ?, lunchStartTime = NULL WHERE id = ?', [JSON.stringify(breaks), id]);
+        
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['diarioDeBordo'] });
+
         res.status(200).json({ message: 'Retorno do intervalo registrado com sucesso.' });
     } catch (error) {
         console.error("Erro ao finalizar intervalo:", error);

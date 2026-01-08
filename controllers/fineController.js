@@ -174,6 +174,10 @@ const createFine = async (req, res) => {
 
         // 6. Executa
         await db.execute(query, values);
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['fines'] });
+
         res.status(201).json({ id: newFineId, ...dataFromFrontend }); // Retorna os dados do frontend
     } catch (error) {
         console.error('Erro ao criar multa:', error);
@@ -228,6 +232,10 @@ const updateFine = async (req, res) => {
 
         // 5. Executa
         await db.execute(query, [...values, id]);
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['fines'] });
+
         res.json({ message: 'Multa atualizada com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar multa:', error);
@@ -246,6 +254,10 @@ const deleteFine = async (req, res) => {
          if (result.affectedRows === 0) {
             return res.status(404).json({ message: 'Multa não encontrada.' });
         }
+        
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['fines'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar multa:', error);

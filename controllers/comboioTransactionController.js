@@ -200,6 +200,10 @@ const createEntradaTransaction = async (req, res) => {
         );
 
         await connection.commit();
+
+        // SOCKET EMIT: Atualizar Comboio e Veículos (Estoque mudou)
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles'] });
+
         res.status(201).json({ message: 'Entrada registrada.', refuelingOrder: { authNumber: 0 } });
     } catch (error) {
         await connection.rollback();
@@ -289,6 +293,10 @@ const createSaidaTransaction = async (req, res) => {
         }
         
         await connection.commit();
+
+        // SOCKET EMIT: Atualizar Comboio, Veículos (Estoque e Km) e Despesas
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses'] });
+
         res.status(201).json({ message: 'Abastecimento registrado.', refuelingOrder: { authNumber: 0 } });
     } catch (error) {
         await connection.rollback();
@@ -342,6 +350,10 @@ const createDrenagemTransaction = async (req, res) => {
         );
 
         await connection.commit();
+
+        // SOCKET EMIT: Atualizar Comboio e Veículos
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles'] });
+
         res.status(201).json({ message: 'Drenagem registrada.' });
     } catch (error) {
         await connection.rollback();
@@ -392,6 +404,10 @@ const deleteTransaction = async (req, res) => {
 
         await connection.execute('DELETE FROM comboio_transactions WHERE id = ?', [id]);
         await connection.commit();
+
+        // SOCKET EMIT: Atualização ampla pois delete reverte estoque e despesas
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses'] });
+
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
@@ -486,6 +502,10 @@ const updateTransaction = async (req, res) => {
         ]);
 
         await connection.commit();
+
+        // SOCKET EMIT: Atualização completa
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses'] });
+
         res.json({ message: "Transação atualizada com sucesso" });
     } catch (e) {
         await connection.rollback();

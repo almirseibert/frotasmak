@@ -32,6 +32,11 @@ const createUpdate = async (req, res) => {
     
     try {
         const [result] = await db.execute(query, [newUpdate.message, newUpdate.showPopup, newUpdate.timestamp]);
+        
+        // EMITIR EVENTO SOCKET.IO
+        // Dispara o alerta para todos os clientes conectados imediatamente
+        req.io.emit('server:sync', { targets: ['updates'] });
+
         res.status(201).json({ id: result.insertId, ...newUpdate });
     } catch (error) {
         console.error('Erro ao criar atualização:', error);
@@ -50,6 +55,9 @@ const deleteUpdate = async (req, res) => {
             return res.status(404).json({ error: 'Atualização não encontrada.' });
         }
         
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['updates'] });
+
         res.status(204).end(); // Sucesso, sem conteúdo
     } catch (error) {
         console.error('Erro ao deletar atualização:', error);

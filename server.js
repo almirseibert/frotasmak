@@ -4,6 +4,8 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const db = require('./database');
+const http = require('http'); // <--- 1. Importar módulo HTTP nativo
+const { Server } = require("socket.io"); // <--- 2. Importar Socket.io
 
 // Importa o multer
 const multer = require('multer');
@@ -39,10 +41,27 @@ const billingRoutes = require('./routes/billingRoutes');
 const app = express();
 const port = process.env.PORT || 3001;
 
+// <--- 3. Criar o servidor HTTP explicitamente usando o app do Express
+const server = http.createServer(app);
+
+// <--- 4. Configurar o Socket.io com CORS (Permite conexão do Frontend)
+const io = new Server(server, {
+    cors: {
+        origin: "*", // Aceita conexões de qualquer origem (ideal para dev/fases iniciais)
+        methods: ["GET", "POST", "PUT", "DELETE"]
+    }
+});
+
 app.use(cors());
 app.use(express.json()); 
 
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+
+// <--- 5. Middleware para disponibilizar o 'io' em todas as requisições (req.io)
+app.use((req, res, next) => {
+    req.io = io;
+    next();
+});
 
 // --- ROTAS DA API ---
 const apiRouter = express.Router();
@@ -85,6 +104,15 @@ apiRouter.use('/billing', billingRoutes);
 
 app.use('/api', apiRouter);
 
+// <--- 6. (Opcional) Log de conexões Socket para Debug
+io.on('connection', (socket) => {
+    console.log('🔌 Cliente conectado via Socket:', socket.id);
+    
+    socket.on('disconnect', () => {
+        console.log('❌ Cliente desconectado:', socket.id);
+    });
+});
+
 // Inicialização do Banco de Dados (Verificação de Conexão Apenas)
 db.getConnection()
     .then(connection => {
@@ -95,6 +123,7 @@ db.getConnection()
         console.error('Erro ao conectar ao banco de dados:', err.stack);
     });
 
-app.listen(port, () => {
-    console.log(`Servidor rodando na porta ${port}`);
+// <--- 7. IMPORTANTE: Mude app.listen para server.listen
+server.listen(port, () => {
+    console.log(`🚀 Servidor rodando (HTTP + Socket.io) na porta ${port}`);
 });

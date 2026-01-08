@@ -20,6 +20,11 @@ const createRegistrationRequest = async (req, res) => {
 
     try {
         const [result] = await db.execute(query, values);
+
+        // EMITIR EVENTO SOCKET.IO
+        // Notifica o painel administrativo imediatamente
+        req.io.emit('server:sync', { targets: ['admin_requests'] });
+
         res.status(201).json({ id: result.insertId, ...req.body });
     } catch (error) {
         console.error('Erro ao criar solicitação de cadastro:', error);
@@ -30,6 +35,10 @@ const createRegistrationRequest = async (req, res) => {
 const deleteRegistrationRequest = async (req, res) => {
     try {
         await db.execute('DELETE FROM registration_requests WHERE id = ?', [req.params.id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['admin_requests'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar solicitação de cadastro:', error);

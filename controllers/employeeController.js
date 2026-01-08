@@ -135,6 +135,10 @@ const createEmployee = async (req, res) => {
 
     try {
         await db.execute(query, values);
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['employees'] });
+
         res.status(201).json({ id: employeeData.id, ...req.body });
     } catch (error) {
         console.error('Erro ao criar funcionário:', error);
@@ -179,6 +183,10 @@ const updateEmployee = async (req, res) => {
     try {
         const [result] = await db.execute(query, [...values, id]);
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Funcionário não encontrado.' });
+        
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['employees'] });
+        
         res.json({ message: 'Atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar:', error);
@@ -191,6 +199,10 @@ const deleteEmployee = async (req, res) => {
     try {
         const [result] = await db.execute('DELETE FROM employees WHERE id = ?', [req.params.id]);
          if (result.affectedRows === 0) return res.status(404).json({ message: 'Não encontrado.' });
+        
+         // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['employees'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar:', error);
@@ -329,6 +341,10 @@ const updateEmployeeStatus = async (req, res) => {
         );
 
         await connection.commit();
+
+        // SOCKET EMIT
+        req.io.emit('server:sync', { targets: ['employees'] });
+
         res.json({ message: `Status atualizado para ${status} com sucesso.` });
 
     } catch (error) {

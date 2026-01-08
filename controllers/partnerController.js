@@ -137,6 +137,10 @@ const createPartner = async (req, res) => {
         }
 
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['partners'] });
+
         res.status(201).json({ id: newPartnerId, ...req.body });
     } catch (error) {
         await connection.rollback();
@@ -193,6 +197,10 @@ const updatePartner = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['partners'] });
+
         res.json({ message: 'Parceiro atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar parceiro:', error);
@@ -227,6 +235,11 @@ const updateFuelPrices = async (req, res) => {
         await Promise.all(priceUpdates);
         
         await connection.commit();
+
+        // EMITIR EVENTO SOCKET.IO
+        // Fundamental para que novos abastecimentos peguem o preço correto instantaneamente
+        req.io.emit('server:sync', { targets: ['partners'] });
+
         res.json({ message: 'Preços de combustível atualizados com sucesso.' });
     } catch (error) {
         await connection.rollback();
@@ -245,6 +258,10 @@ const deletePartner = async (req, res) => {
         // O 'ON DELETE CASCADE' na tabela 'partner_fuel_prices' (definido no SQL)
         // deve remover os preços automaticamente.
         await db.execute('DELETE FROM partners WHERE id = ?', [req.params.id]);
+
+        // EMITIR EVENTO SOCKET.IO
+        req.io.emit('server:sync', { targets: ['partners'] });
+
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar parceiro:', error);
