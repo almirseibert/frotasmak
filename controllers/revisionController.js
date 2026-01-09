@@ -1,5 +1,5 @@
 const db = require('../database');
-const { v4: uuidv4 } = require('uuid'); // Restaurado UUID pois o banco não é Auto-Increment
+const { v4: uuidv4 } = require('uuid');
 
 // --- Helper para parsear JSON de forma segura ---
 const parseJsonSafe = (field, key) => {
@@ -14,7 +14,7 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-// --- Helper de Sanitização (Corrige Erro 500 de String Vazia) ---
+// --- Helper de Sanitização ---
 const sanitize = (val) => {
     if (val === '' || val === undefined || val === 'undefined') return null;
     return val;
@@ -33,20 +33,18 @@ const getAllRevisionPlans = async (req, res) => {
             const effectiveVehicleId = isImported ? plan.id : plan.vehicleId;
             const { tipo, ...restOfPlan } = plan;
             
-            // Processa o histórico para unificar a leitura visualmente para o frontend
+            // Processa o histórico
             const historico = historyRows
                 .filter(h => h.revisionId === plan.id)
                 .map(h => ({
                     ...h,
-                    // CRIAÇÃO DO CAMPO VIRTUAL 'km':
-                    // O frontend espera 'h.km', então preenchemos com odometro ou horimetro dependendo do que existir
+                    // Garante que o frontend receba um campo 'km' unificado para exibição
                     km: h.odometro || h.horimetro || 0 
                 }));
             
             return {
                 ...restOfPlan,
                 vehicleId: effectiveVehicleId,
-                // Prioriza a coluna 'descricao' se existir, senão usa 'tipo' (legado)
                 descricao: plan.descricao || tipo || '', 
                 ultimaAlteracao: ultimaAlteracao,
                 historico: historico,
@@ -62,11 +60,9 @@ const getAllRevisionPlans = async (req, res) => {
 
 // --- POST: Criar Plano ---
 const createRevisionPlan = async (req, res) => {
-    // Sanitização e Preparação dos Dados
     const data = { 
         ...req.body,
-        id: uuidv4(), // Gera ID manualmente para Revisions (tabela suporta UUID)
-        // Sanitização dos campos numéricos/data para evitar erro de string vazia
+        id: uuidv4(),
         proximaRevisaoData: sanitize(req.body.proximaRevisaoData),
         proximaRevisaoOdometro: sanitize(req.body.proximaRevisaoOdometro),
         proximaRevisaoHorimetro: sanitize(req.body.proximaRevisaoHorimetro),
@@ -74,12 +70,9 @@ const createRevisionPlan = async (req, res) => {
         avisoAntecedenciaDias: sanitize(req.body.avisoAntecedenciaDias)
     };
     
-    // Remove campos que não são colunas do banco
     delete data.historico; 
     
-    // Campo tipo mantido para retrocompatibilidade se necessário
     if (!data.tipo && data.descricao) data.tipo = data.descricao;
-
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
 
     const fields = Object.keys(data);
@@ -89,6 +82,7 @@ const createRevisionPlan = async (req, res) => {
 
     try {
         await db.execute(query, values);
+        req.io.emit('server:sync', { targets: ['revisions'] });
         res.status(201).json({ message: 'Plano de revisão criado com sucesso' });
     } catch (error) {
         console.error('Erro ao criar plano de revisão:', error);
@@ -100,7 +94,6 @@ const createRevisionPlan = async (req, res) => {
 const updateRevisionPlan = async (req, res) => {
     const { id: vehicleId } = req.params; 
     
-    // Sanitização completa
     const data = { 
         ...req.body,
         proximaRevisaoData: sanitize(req.body.proximaRevisaoData),
@@ -110,12 +103,10 @@ const updateRevisionPlan = async (req, res) => {
         avisoAntecedenciaDias: sanitize(req.body.avisoAntecedenciaDias)
     };
 
-    // Remove campos que não devem ir para o update/insert
     delete data.id; 
     delete data.vehicleId; 
     delete data.historico;
 
-    // Garante que 'tipo' tenha valor se for usado no banco
     if (!data.tipo && data.descricao) data.tipo = data.descricao;
 
     const ultimaAlteracao = JSON.stringify({
@@ -129,16 +120,20 @@ const updateRevisionPlan = async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // Verifica se já existe plano para este veículo
+        // CORREÇÃO CRÍTICA: Busca por vehicleId OU id (para casos legados)
         const [rows] = await connection.execute(
-            'SELECT id FROM revisions WHERE vehicleId = ? OR id = ?', 
+            'SELECT id, vehicleId FROM revisions WHERE vehicleId = ? OR id = ?', 
             [vehicleId, vehicleId]
         );
         
         if (rows.length > 0) {
-            // Atualiza existente
             const revisionId = rows[0].id;
             
+            // Self-Healing: Se achou pelo ID mas o vehicleId estava NULL, corrige agora
+            if (!rows[0].vehicleId) {
+                 await connection.execute('UPDATE revisions SET vehicleId = ? WHERE id = ?', [vehicleId, revisionId]);
+            }
+
             const fields = Object.keys(data);
             const values = Object.values(data);
             const setClause = fields.map(field => `${field} = ?`).join(', ');
@@ -148,9 +143,8 @@ const updateRevisionPlan = async (req, res) => {
                 await connection.execute(query, [...values, revisionId]);
             }
         } else {
-            // Cria novo se não existir (ID Manual)
             const newPlan = { 
-                id: uuidv4(), // Gera ID manualmente
+                id: uuidv4(),
                 vehicleId: vehicleId, 
                 ...data
             };
@@ -162,6 +156,7 @@ const updateRevisionPlan = async (req, res) => {
             await connection.execute(query, values);
         }
         await connection.commit();
+        req.io.emit('server:sync', { targets: ['revisions'] });
         res.json({ message: 'Agendamento de revisão salvo com sucesso' });
     } catch (error) {
         await connection.rollback();
@@ -177,7 +172,6 @@ const completeRevision = async (req, res) => {
     const vehicleId = req.params.id || req.body.vehicleId || req.body.id;
 
     if (!vehicleId) {
-        console.error('Erro 400: vehicleId não fornecido.', req.body);
         return res.status(400).json({ error: 'ID do veículo é obrigatório.' });
     }
 
@@ -194,30 +188,38 @@ const completeRevision = async (req, res) => {
         avisoAntecedenciaDias
     } = req.body;
 
-    // Sanitização
     const sanitizedProximaData = sanitize(proximaRevisaoData);
     const sanitizedProximaLeitura = sanitize(proximaRevisaoLeitura);
     const sanitizedAvisoKmHr = sanitize(avisoAntecedenciaKmHr);
     const sanitizedAvisoDias = sanitize(avisoAntecedenciaDias);
+    const sanitizedCusto = sanitize(custo);
+    const sanitizedNotaFiscal = sanitize(notaFiscal);
 
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
 
         // 1. Identificar ou Criar o Plano de Revisão
+        // CORREÇÃO CRÍTICA: Mesma lógica do update, busca por vehicleId OU id
         let revisionId;
-        const [revRows] = await connection.execute('SELECT * FROM revisions WHERE vehicleId = ?', [vehicleId]);
+        const [revRows] = await connection.execute(
+            'SELECT id, vehicleId FROM revisions WHERE vehicleId = ? OR id = ?', 
+            [vehicleId, vehicleId]
+        );
         
         if (revRows.length > 0) {
             revisionId = revRows[0].id;
+            // Self-Healing: Vincula vehicleId se estiver faltando
+            if (!revRows[0].vehicleId) {
+                await connection.execute('UPDATE revisions SET vehicleId = ? WHERE id = ?', [vehicleId, revisionId]);
+            }
         } else {
-            // Criação de plano (ID Manual)
-            revisionId = uuidv4(); // Gera ID manualmente
+            revisionId = uuidv4();
             const initialPlan = {
                 id: revisionId,
                 vehicleId: vehicleId,
                 tipo: 'Manutenção Inicial',
-                descricao: 'Manutenção Inicial', // Salva descrição também
+                descricao: 'Manutenção Inicial',
                 proximaRevisaoData: sanitizedProximaData,
                 proximaRevisaoOdometro: null,
                 proximaRevisaoHorimetro: null,
@@ -239,18 +241,18 @@ const completeRevision = async (req, res) => {
         const [vehRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [vehicleId]);
         if (vehRows.length === 0) throw new Error('Veículo não encontrado.');
         const vehicle = vehRows[0];
-
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
 
         // 2. Registrar no Histórico
-        // CORREÇÃO: Não passamos 'id' aqui. O banco deve usar AUTO_INCREMENT para o histórico.
-        // O campo 'revisionId' (FK) recebe o UUID, mas o ID do registro histórico é numérico/automático.
+        // A tabela tem 'data' (timestamp) e 'realizadaEm' (timestamp). Salvamos em ambos por segurança.
         const historyData = {
             revisionId: revisionId,
-            data: realizadaEm,
+            data: realizadaEm, 
+            realizadaEm: realizadaEm, // Preenche a coluna correta do banco
             descricao: descricao || 'Revisão Concluída',
-            realizadaPor: realizadaPor
-            // custo e notaFiscal removidos até que as colunas existam no banco
+            realizadaPor: realizadaPor,
+            custo: sanitizedCusto || 0.00, // Agora salva o custo
+            notaFiscal: sanitizedNotaFiscal // Agora salva a nota
         };
 
         if (isHourBased) {
@@ -263,7 +265,6 @@ const completeRevision = async (req, res) => {
         const histValues = Object.values(historyData);
         const histPlaceholders = histFields.map(() => '?').join(', ');
         
-        // Esta query não inclui a coluna 'id', evitando o erro "Data truncated"
         await connection.execute(
             `INSERT INTO revisions_history (${histFields.join(', ')}) VALUES (${histPlaceholders})`, 
             histValues
@@ -290,7 +291,6 @@ const completeRevision = async (req, res) => {
             updatePlanParams.push(sanitizedAvisoDias);
         }
         
-        // Atualiza também a descrição no plano principal para refletir o último agendamento/status
         if (descricao) {
             updatePlanQuery += ', descricao = ?';
             updatePlanParams.push(descricao);
@@ -309,14 +309,14 @@ const completeRevision = async (req, res) => {
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
-        // 4. Atualizar Leitura do Veículo
+        // 4. Atualizar Leitura do Veículo (REGRA GLOBAL 8, 10, 11)
         const readingVal = parseFloat(leituraRealizada);
         
         if (!isNaN(readingVal) && readingVal > 0) {
             let updateVehicleQuery = '';
             
             if (isHourBased) {
-                // Atualiza horimetro e LIMPA legados para evitar conflito futuro
+                // Atualiza horimetro e LIMPA legados (Regra Global 8)
                 updateVehicleQuery = `
                     UPDATE vehicles 
                     SET horimetro = ?, 
@@ -331,6 +331,8 @@ const completeRevision = async (req, res) => {
         }
 
         await connection.commit();
+
+        req.io.emit('server:sync', { targets: ['revisions', 'vehicles'] });
         res.json({ message: 'Revisão concluída e veículo atualizado com sucesso!' });
 
     } catch (error) {
@@ -346,6 +348,7 @@ const completeRevision = async (req, res) => {
 const deleteRevisionPlan = async (req, res) => {
     try {
         await db.execute('DELETE FROM revisions WHERE id = ?', [req.params.id]);
+        req.io.emit('server:sync', { targets: ['revisions'] });
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar plano de revisão:', error);
