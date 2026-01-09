@@ -179,7 +179,8 @@ const completeRevision = async (req, res) => {
         realizadaEm, 
         realizadaPor, 
         leituraRealizada, 
-        descricao, 
+        descricao,          // Usado para o HISTÓRICO ("O que foi feito?")
+        proximaDescricao,   // Usado para o PRÓXIMO AGENDAMENTO ("Descrição da Meta")
         custo, 
         notaFiscal,
         proximaRevisaoData,
@@ -200,7 +201,6 @@ const completeRevision = async (req, res) => {
         await connection.beginTransaction();
 
         // 1. Identificar ou Criar o Plano de Revisão
-        // CORREÇÃO CRÍTICA: Mesma lógica do update, busca por vehicleId OU id
         let revisionId;
         const [revRows] = await connection.execute(
             'SELECT id, vehicleId FROM revisions WHERE vehicleId = ? OR id = ?', 
@@ -209,7 +209,6 @@ const completeRevision = async (req, res) => {
         
         if (revRows.length > 0) {
             revisionId = revRows[0].id;
-            // Self-Healing: Vincula vehicleId se estiver faltando
             if (!revRows[0].vehicleId) {
                 await connection.execute('UPDATE revisions SET vehicleId = ? WHERE id = ?', [vehicleId, revisionId]);
             }
@@ -244,15 +243,15 @@ const completeRevision = async (req, res) => {
         const isHourBased = vehicle.mediaCalculo === 'horimetro';
 
         // 2. Registrar no Histórico
-        // A tabela tem 'data' (timestamp) e 'realizadaEm' (timestamp). Salvamos em ambos por segurança.
+        // Usa o campo 'descricao' (original) para dizer O QUE FOI FEITO AGORA
         const historyData = {
             revisionId: revisionId,
             data: realizadaEm, 
-            realizadaEm: realizadaEm, // Preenche a coluna correta do banco
+            realizadaEm: realizadaEm, 
             descricao: descricao || 'Revisão Concluída',
             realizadaPor: realizadaPor,
-            custo: sanitizedCusto || 0.00, // Agora salva o custo
-            notaFiscal: sanitizedNotaFiscal // Agora salva a nota
+            custo: sanitizedCusto || 0.00, 
+            notaFiscal: sanitizedNotaFiscal 
         };
 
         if (isHourBased) {
@@ -291,9 +290,11 @@ const completeRevision = async (req, res) => {
             updatePlanParams.push(sanitizedAvisoDias);
         }
         
-        if (descricao) {
+        // NOVO: Usa 'proximaDescricao' para atualizar o nome do plano (O QUE SERÁ FEITO DEPOIS)
+        // Se o frontend mandar (mesmo que vazio), atualiza.
+        if (proximaDescricao !== undefined) {
             updatePlanQuery += ', descricao = ?';
-            updatePlanParams.push(descricao);
+            updatePlanParams.push(proximaDescricao);
         }
 
         const ultimaAlteracao = JSON.stringify({
@@ -309,14 +310,13 @@ const completeRevision = async (req, res) => {
 
         await connection.execute(updatePlanQuery, updatePlanParams);
 
-        // 4. Atualizar Leitura do Veículo (REGRA GLOBAL 8, 10, 11)
+        // 4. Atualizar Leitura do Veículo
         const readingVal = parseFloat(leituraRealizada);
         
         if (!isNaN(readingVal) && readingVal > 0) {
             let updateVehicleQuery = '';
             
             if (isHourBased) {
-                // Atualiza horimetro e LIMPA legados (Regra Global 8)
                 updateVehicleQuery = `
                     UPDATE vehicles 
                     SET horimetro = ?, 
