@@ -37,20 +37,13 @@ const parseRefuelingRows = (rows) => {
     }));
 };
 
-// --- ATUALIZAÇÃO DE DESPESAS MENSAIS (CORRIGIDO) ---
+// --- ATUALIZAÇÃO DE DESPESAS MENSAIS ---
 const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
     if (!obraId || !partnerId || !fuelType || !dateInput) return;
 
-    // 1. VERIFICAÇÃO DE SEGURANÇA (NOVO):
-    // Verifica se o obraId existe na tabela 'obras' para evitar erro de Foreign Key.
-    // Se for uma obra interna (ex: "Pátio", "Oficina") que não está cadastrada como Obra no banco,
-    // nós pulamos a criação da despesa para não travar o sistema.
+    // Verifica se a obra existe para evitar erro de FK
     const [obraCheck] = await connection.execute('SELECT id FROM obras WHERE id = ?', [obraId]);
-    if (obraCheck.length === 0) {
-        // Obra não encontrada ou é um local interno sem registro na tabela obras.
-        // Não gera despesa financeira atrelada.
-        return; 
-    }
+    if (obraCheck.length === 0) return; 
 
     const dateObj = new Date(dateInput);
     const month = dateObj.getMonth();
@@ -142,12 +135,22 @@ const createRefuelingOrder = async (req, res) => {
              dataAbastecimento = new Date(dateStr);
         }
 
+        // GARANTIA DE NOME DO POSTO
+        // Se o frontend não mandou o nome, buscamos no banco para garantir histórico correto
+        let finalPartnerName = data.partnerName;
+        if (!finalPartnerName && data.partnerId) {
+            const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [data.partnerId]);
+            if (pRows.length > 0) {
+                finalPartnerName = pRows[0].razaoSocial;
+            }
+        }
+
         const refuelingData = {
             id: id,
             authNumber: newAuthNumber,
             vehicleId: data.vehicleId,
             partnerId: data.partnerId,
-            partnerName: data.partnerName || null,
+            partnerName: finalPartnerName || null,
             employeeId: data.employeeId || null,
             obraId: data.obraId || null, 
             fuelType: data.fuelType || null,
@@ -159,10 +162,11 @@ const createRefuelingOrder = async (req, res) => {
             outrosGeraValor: data.outrosGeraValor ? 1 : 0,
             litrosLiberados: safeNum(data.litrosLiberados, true),
             litrosLiberadosArla: safeNum(data.litrosLiberadosArla, true),
+            // Regra unificada: Salva preferencialmente em horimetro se enviado
             odometro: safeNum(data.odometro),
-            horimetro: safeNum(data.horimetro),
-            horimetroDigital: safeNum(data.horimetroDigital),
-            horimetroAnalogico: safeNum(data.horimetroAnalogico),
+            horimetro: safeNum(data.horimetro), 
+            horimetroDigital: null, // Abolido conforme regra 8
+            horimetroAnalogico: null, // Abolido conforme regra 8
             outrosValor: safeNum(data.outrosValor, true),
             outros: data.outros || null,
             createdBy: JSON.stringify(data.createdBy || {}),
@@ -183,10 +187,7 @@ const createRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
-
         res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
@@ -218,30 +219,37 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.status) updateData.status = data.status;
         
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
+        
+        // Atualização Unificada
         if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
         if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
-        if (data.horimetroDigital !== undefined) updateData.horimetroDigital = safeNum(data.horimetroDigital);
-        if (data.horimetroAnalogico !== undefined) updateData.horimetroAnalogico = safeNum(data.horimetroAnalogico);
+        // Garantir limpeza de colunas abolidas caso venham no request
+        if (data.horimetroDigital !== undefined) updateData.horimetroDigital = null;
+        if (data.horimetroAnalogico !== undefined) updateData.horimetroAnalogico = null;
+
         if (data.outrosValor !== undefined) updateData.outrosValor = safeNum(data.outrosValor, true);
         
-        if (data.partnerName !== undefined) updateData.partnerName = data.partnerName || null;
-        if (data.partnerId !== undefined) updateData.partnerId = data.partnerId;
+        // Atualiza nome do posto se mudar o ID
+        if (data.partnerId !== undefined) {
+            updateData.partnerId = data.partnerId;
+            // Busca o nome novo
+             const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [data.partnerId]);
+             if (pRows.length > 0) updateData.partnerName = pRows[0].razaoSocial;
+        }
+
         if (data.obraId !== undefined) updateData.obraId = data.obraId || null;
         if (data.fuelType !== undefined) updateData.fuelType = data.fuelType || null;
         if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
         if (data.outros !== undefined) updateData.outros = data.outros || null;
 
-        // VALIDAÇÃO DE NOTA FISCAL
         if (data.invoiceNumber !== undefined) {
             const newInvoiceNumber = data.invoiceNumber ? data.invoiceNumber.toString().trim() : null;
-            
             if (newInvoiceNumber) {
                 const partnerIdToCheck = updateData.partnerId || oldRefueling.partnerId;
                 const [duplicateCheck] = await connection.execute(
                     'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
                     [partnerIdToCheck, newInvoiceNumber, id]
                 );
-
                 if (duplicateCheck.length > 0) {
                     throw new Error(`A Nota Fiscal ${newInvoiceNumber} já está cadastrada para este posto.`);
                 }
@@ -267,6 +275,7 @@ const updateRefuelingOrder = async (req, res) => {
             await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
         }
 
+        // Recalcula anterior se mudou algo critico
         if (
             (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
             (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
@@ -278,10 +287,7 @@ const updateRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
-
         res.json({ message: 'Ordem atualizada.' });
     } catch (error) {
         await connection.rollback();
@@ -317,7 +323,6 @@ const confirmRefuelingOrder = async (req, res) => {
         }
         const order = orders[0];
 
-        // Validação de Duplicidade de NF (Backend)
         if (invoiceNumber) {
             const nfStr = invoiceNumber.toString().trim();
             if (nfStr) {
@@ -325,7 +330,6 @@ const confirmRefuelingOrder = async (req, res) => {
                     'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
                     [order.partnerId, nfStr, id]
                 );
-
                 if (duplicates.length > 0) {
                     throw new Error(`A Nota Fiscal ${nfStr} já consta lançada para este posto.`);
                 }
@@ -335,25 +339,36 @@ const confirmRefuelingOrder = async (req, res) => {
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
-        // Atualiza a leitura do veículo
+        // Atualiza a leitura do veículo - UNIFICADO PARA HORIMETRO
         const vehicleUpdate = {};
         const readingVal = safeNum(confirmedReading);
 
         if (readingVal) {
-            if (vehicle.possuiHorimetroDigital) {
-                vehicleUpdate.horimetroDigital = readingVal;
-                vehicleUpdate.horimetro = readingVal; 
-            } else if (vehicle.possuiHorimetroAnalogico) {
-                vehicleUpdate.horimetroAnalogico = readingVal;
-                vehicleUpdate.horimetro = readingVal;
-            } else if (vehicle.tipo === 'Caminhão' || vehicle.mediaCalculo === 'horimetro') {
-                if (order.horimetro || (!order.odometro && !order.horimetro)) {
-                     vehicleUpdate.horimetro = readingVal;
-                } else {
-                     vehicleUpdate.odometro = readingVal;
-                }
+            // Regra unificada: Verifica se usa KM ou HORAS
+            // Se for caminhão ou máquina pesada (baseado em vehicleRules que deve ser respeitado no frontend e aqui implicitamente), usamos horimetro
+            // Como regra geral, se não for explicitamente odometro, vai para horimetro (coluna unica)
+            
+            // Simplificação baseada na Regra 10 e 11:
+            // Se o veículo tiver campo 'odometro' ativo (leves/trecho), atualiza odometro.
+            // Se não, atualiza 'horimetro'.
+            // Removemos update de horimetroDigital/Analogico
+            
+            // Vamos verificar se no banco tem algum valor de odometro anterior significativo ou se é do tipo que usa odometro
+            // Mas para segurança, vamos confiar no que o frontend mandou ou checar o tipo se possível.
+            // Como não temos vehicleRules aqui, assumimos: se veio como odometro na ordem ou o veiculo tem odometro > 0 e horimetro zerado...
+            
+            // Porem, a melhor logica para a regra "Unica coluna horimetro":
+            // Se o veículo usa Odômetro (Leves/Trecho), atualiza 'odometro'.
+            // Se usa Horas, atualiza 'horimetro'.
+            
+            // Como não temos vehicleGroups aqui hardcoded, vamos inferir ou usar a lógica anterior mas simplificada:
+            if (order.odometro > 0 || (vehicle.odometro > 0 && vehicle.tipo !== 'Caminhão')) {
+                 vehicleUpdate.odometro = readingVal;
             } else {
-                vehicleUpdate.odometro = readingVal;
+                 vehicleUpdate.horimetro = readingVal;
+                 // Zera ou ignora os legados para garantir consistencia
+                 vehicleUpdate.horimetroDigital = null;
+                 vehicleUpdate.horimetroAnalogico = null;
             }
         }
 
@@ -364,7 +379,6 @@ const confirmRefuelingOrder = async (req, res) => {
 
         const safePrice = safeNum(pricePerLiter, true);
         
-        // Atualização de Preço (Opcional)
         if (order.partnerId && safePrice > 0 && order.fuelType && updatePartnerPrice === true) {
             const priceQuery = `
                 INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
@@ -382,9 +396,12 @@ const confirmRefuelingOrder = async (req, res) => {
             confirmedBy: JSON.stringify(confirmedBy),
             outrosValor: safeNum(outrosValor, true),
             invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null,
+            // Grava na ordem exatamente onde gravou no veículo
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
-            ...(vehicleUpdate.horimetroDigital ? { horimetroDigital: vehicleUpdate.horimetroDigital } : {}),
+            // Garante que na ordem também fique limpo
+            horimetroDigital: null,
+            horimetroAnalogico: null
         };
 
         const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
@@ -395,11 +412,7 @@ const confirmRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
-        // Confirmação impacta: Lista de abastecimentos, Km do Veículo e Financeiro
         req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'partners'] });
-
         res.json({ message: 'Abastecimento confirmado com sucesso.' });
 
     } catch (error) {
@@ -411,7 +424,6 @@ const confirmRefuelingOrder = async (req, res) => {
     }
 };
 
-// --- DELETE ---
 const deleteRefuelingOrder = async (req, res) => {
     const { id } = req.params;
     const connection = await db.getConnection();
@@ -432,10 +444,7 @@ const deleteRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
-
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
