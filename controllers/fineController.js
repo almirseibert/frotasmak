@@ -1,8 +1,8 @@
 // controllers/fineController.js
 const db = require('../database');
-const { v4: uuidv4 } = require('uuid'); // Importa o gerador de UUID
+const { v4: uuidv4 } = require('uuid');
 
-// --- Função Auxiliar para Conversão de JSON (Mantida para 'ultimaAlteracao') ---
+// --- Função Auxiliar para Conversão de JSON ---
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
     if (typeof field === 'object') return field; 
@@ -19,40 +19,39 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-// --- (CORRIGIDO) Função Auxiliar para formatar a multa para o frontend ---
-// Ela pega os dados do JOIN e os transforma nos objetos JSON esperados
-// E TRADUZ os nomes das colunas do banco (ex: paymentStatus) para os nomes do frontend (ex: status)
+// --- Formatação para Frontend ---
 const formatFineForFrontend = (fine) => {
     if (!fine) return null;
 
-    // Renomeia os campos do banco para os campos do frontend
     const {
         paymentStatus,
         localInfracao,
         codigoInfracao,
+        descontarFuncionario, // Mapeamento legado se houver
+        multaNomeFuncionario, // Mapeamento legado se houver
         ...rest
     } = fine;
 
     const newFine = {
         ...rest,
-        status: paymentStatus,         // Traduz paymentStatus -> status
-        local: localInfracao,          // Traduz localInfracao -> local
-        codigoInfração: codigoInfracao,  // Traduz codigoInfracao -> codigoInfração
+        status: paymentStatus,
+        local: localInfracao,
+        codigoInfração: codigoInfracao,
+        // Garante que os booleanos sejam retornados corretamente
+        discountFromEmployee: !!fine.discountFromEmployee,
+        alreadyInEmployeeName: !!fine.alreadyInEmployeeName
     };
 
-    // 1. Cria os objetos esperados pelo frontend
     newFine.vehicleInfo = {
-        registroInterno: fine.vehicleRegistroInterno, // Pego do JOIN
-        placa: fine.vehiclePlaca                 // Pego do JOIN
+        registroInterno: fine.vehicleRegistroInterno,
+        placa: fine.vehiclePlaca
     };
     newFine.employeeInfo = {
-        nome: fine.employeeName                   // Pego do JOIN
+        nome: fine.employeeName
     };
 
-    // 2. Parseia o JSON que já existe (ultimaAlteracao)
     newFine.ultimaAlteracao = parseJsonSafe(fine.ultimaAlteracao, 'ultimaAlteracao');
 
-    // 3. Remove os campos "planos" para evitar duplicidade
     delete newFine.vehicleRegistroInterno;
     delete newFine.vehiclePlaca;
     delete newFine.employeeName;
@@ -60,10 +59,9 @@ const formatFineForFrontend = (fine) => {
     return newFine;
 };
 
-// --- READ: Obter todas as multas (Corrigido com JOIN) ---
+// --- READ: Obter todas as multas ---
 const getAllFines = async (req, res) => {
     try {
-        // Query que "enriquece" a multa com dados do veículo e funcionário
         const query = `
             SELECT 
                 f.*,
@@ -76,7 +74,6 @@ const getAllFines = async (req, res) => {
             ORDER BY f.dataInfração DESC
         `;
         const [rows] = await db.execute(query);
-        // Formata cada linha (e traduz os campos) para o formato que o frontend espera
         res.json(rows.map(formatFineForFrontend));
     } catch (error) {
         console.error('Erro ao buscar multas:', error);
@@ -84,7 +81,7 @@ const getAllFines = async (req, res) => {
     }
 };
 
-// --- READ: Obter uma única multa por ID (Corrigido com JOIN) ---
+// --- READ: Obter multa por ID ---
 const getFineById = async (req, res) => {
     try {
          const query = `
@@ -102,7 +99,6 @@ const getFineById = async (req, res) => {
         if (rows.length === 0) {
             return res.status(404).json({ error: 'Multa não encontrada' });
         }
-        // Formata a linha (e traduz os campos) para o formato que o frontend espera
         res.json(formatFineForFrontend(rows[0]));
     } catch (error) {
         console.error('Erro ao buscar multa:', error);
@@ -110,17 +106,16 @@ const getFineById = async (req, res) => {
     }
 };
 
-// --- Função auxiliar para buscar infos de Veículo e Funcionário ---
 const getInfoObjects = async (vehicleId, employeeId) => {
     let vehicleInfo = null;
     let employeeInfo = null;
 
     if (vehicleId) {
-        const [vRows] = await db.execute('SELECT registroInterno, placa FROM vehicles WHERE id = ?', [vehicleId]);
+        const [vRows] = await db.execute('SELECT registroInterno, placa, modelo, marca FROM vehicles WHERE id = ?', [vehicleId]);
         if (vRows.length > 0) vehicleInfo = vRows[0];
     }
     if (employeeId) {
-        const [eRows] = await db.execute('SELECT nome FROM employees WHERE id = ?', [employeeId]);
+        const [eRows] = await db.execute('SELECT nome, cpf FROM employees WHERE id = ?', [employeeId]);
         if (eRows.length > 0) employeeInfo = eRows[0];
     }
     
@@ -128,18 +123,14 @@ const getInfoObjects = async (vehicleId, employeeId) => {
 };
 
 
-// --- CREATE: Criar uma nova multa (CORRIGIDO para Erro 500) ---
+// --- CREATE ---
 const createFine = async (req, res) => {
     const dataFromFrontend = req.body;
-    
-    // 1. Gera o ID da multa (o banco de dados é VARCHAR)
     const newFineId = uuidv4();
     
     try {
-        // 2. Busca os dados do veículo e funcionário para popular os campos JSON
         const { vehicleInfo, employeeInfo } = await getInfoObjects(dataFromFrontend.vehicleId, dataFromFrontend.employeeId);
         
-        // 3. Pega o usuário logado (assumindo que o authMiddleware o adiciona)
         let ultimaAlteracao = null;
         if(req.user) {
              ultimaAlteracao = JSON.stringify({
@@ -149,56 +140,50 @@ const createFine = async (req, res) => {
             });
         }
         
-        // 4. *** CORREÇÃO: Traduz os nomes do frontend para os nomes do BD ***
         const dataForDB = {
             id: newFineId,
             vehicleId: dataFromFrontend.vehicleId,
             employeeId: dataFromFrontend.employeeId,
             dataInfração: dataFromFrontend.dataInfração,
-            localInfracao: dataFromFrontend.local, // Traduzido
-            codigoInfracao: dataFromFrontend.codigoInfração, // Traduzido
+            localInfracao: dataFromFrontend.local,
+            codigoInfracao: dataFromFrontend.codigoInfração,
             descricao: dataFromFrontend.descricao,
             valor: dataFromFrontend.valor,
             dataVencimento: dataFromFrontend.dataVencimento,
-            paymentStatus: dataFromFrontend.status, // Traduzido
+            paymentStatus: dataFromFrontend.status,
+            // NOVOS CAMPOS
+            discountFromEmployee: dataFromFrontend.discountFromEmployee ? 1 : 0,
+            alreadyInEmployeeName: dataFromFrontend.alreadyInEmployeeName ? 1 : 0,
+            
             vehicleInfo: vehicleInfo ? JSON.stringify(vehicleInfo) : null,
             employeeInfo: employeeInfo ? JSON.stringify(employeeInfo) : null,
             ultimaAlteracao: ultimaAlteracao
         };
 
-        // 5. Constrói a query de inserção
         const fields = Object.keys(dataForDB);
         const values = Object.values(dataForDB);
         const placeholders = fields.map(() => '?').join(', ');
         const query = `INSERT INTO fines (${fields.join(', ')}) VALUES (${placeholders})`;
 
-        // 6. Executa
         await db.execute(query, values);
 
-        // SOCKET EMIT
         req.io.emit('server:sync', { targets: ['fines'] });
-
-        res.status(201).json({ id: newFineId, ...dataFromFrontend }); // Retorna os dados do frontend
+        res.status(201).json({ id: newFineId, ...dataFromFrontend });
     } catch (error) {
         console.error('Erro ao criar multa:', error);
-        // Loga o erro específico do SQL, se houver
-        if (error.sqlMessage) {
-            console.error('SQL Error:', error.sqlMessage);
-        }
+        if (error.sqlMessage) console.error('SQL Error:', error.sqlMessage);
         res.status(500).json({ error: 'Erro ao criar multa' });
     }
 };
 
-// --- UPDATE: Atualizar uma multa existente (CORRIGIDO para Erro 500) ---
+// --- UPDATE ---
 const updateFine = async (req, res) => {
     const { id } = req.params;
     const dataFromFrontend = req.body;
 
     try {
-        // 1. Busca os dados do veículo e funcionário para ATUALIZAR os campos JSON
         const { vehicleInfo, employeeInfo } = await getInfoObjects(dataFromFrontend.vehicleId, dataFromFrontend.employeeId);
 
-        // 2. Pega o usuário logado
          let ultimaAlteracao = null;
          if(req.user) {
              ultimaAlteracao = JSON.stringify({
@@ -208,56 +193,49 @@ const updateFine = async (req, res) => {
             });
         }
         
-        // 3. *** CORREÇÃO: Traduz os nomes do frontend para os nomes do BD ***
          const dataForDB = {
             vehicleId: dataFromFrontend.vehicleId,
             employeeId: dataFromFrontend.employeeId,
             dataInfração: dataFromFrontend.dataInfração,
-            localInfracao: dataFromFrontend.local, // Traduzido
-            codigoInfracao: dataFromFrontend.codigoInfração, // Traduzido
+            localInfracao: dataFromFrontend.local,
+            codigoInfracao: dataFromFrontend.codigoInfração,
             descricao: dataFromFrontend.descricao,
             valor: dataFromFrontend.valor,
             dataVencimento: dataFromFrontend.dataVencimento,
-            paymentStatus: dataFromFrontend.status, // Traduzido
+            paymentStatus: dataFromFrontend.status,
+            // NOVOS CAMPOS
+            discountFromEmployee: dataFromFrontend.discountFromEmployee ? 1 : 0,
+            alreadyInEmployeeName: dataFromFrontend.alreadyInEmployeeName ? 1 : 0,
+
             vehicleInfo: vehicleInfo ? JSON.stringify(vehicleInfo) : null,
             employeeInfo: employeeInfo ? JSON.stringify(employeeInfo) : null,
             ultimaAlteracao: ultimaAlteracao
         };
 
-        // 4. Constrói a query
         const fields = Object.keys(dataForDB);
-        const values = fields.map(key => dataForDB[key]); // Pega os valores na ordem correta
+        const values = fields.map(key => dataForDB[key]);
         const setClause = fields.map(field => `${field} = ?`).join(', ');
         const query = `UPDATE fines SET ${setClause} WHERE id = ?`;
 
-        // 5. Executa
         await db.execute(query, [...values, id]);
 
-        // SOCKET EMIT
         req.io.emit('server:sync', { targets: ['fines'] });
-
         res.json({ message: 'Multa atualizada com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar multa:', error);
-         // Loga o erro específico do SQL, se houver
-        if (error.sqlMessage) {
-            console.error('SQL Error:', error.sqlMessage);
-        }
+        if (error.sqlMessage) console.error('SQL Error:', error.sqlMessage);
         res.status(500).json({ error: 'Erro ao atualizar multa' });
     }
 };
 
-// --- DELETE: Deletar uma multa (Sem alterações, já estava OK) ---
+// --- DELETE ---
 const deleteFine = async (req, res) => {
     try {
         const [result] = await db.execute('DELETE FROM fines WHERE id = ?', [req.params.id]);
          if (result.affectedRows === 0) {
             return res.status(404).json({ message: 'Multa não encontrada.' });
         }
-        
-        // SOCKET EMIT
         req.io.emit('server:sync', { targets: ['fines'] });
-
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar multa:', error);
