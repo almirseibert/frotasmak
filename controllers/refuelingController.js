@@ -135,8 +135,6 @@ const createRefuelingOrder = async (req, res) => {
              dataAbastecimento = new Date(dateStr);
         }
 
-        // GARANTIA DE NOME DO POSTO
-        // Se o frontend não mandou o nome, buscamos no banco para garantir histórico correto
         let finalPartnerName = data.partnerName;
         if (!finalPartnerName && data.partnerId) {
             const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [data.partnerId]);
@@ -162,11 +160,10 @@ const createRefuelingOrder = async (req, res) => {
             outrosGeraValor: data.outrosGeraValor ? 1 : 0,
             litrosLiberados: safeNum(data.litrosLiberados, true),
             litrosLiberadosArla: safeNum(data.litrosLiberadosArla, true),
-            // Regra unificada: Salva preferencialmente em horimetro se enviado
             odometro: safeNum(data.odometro),
             horimetro: safeNum(data.horimetro), 
-            horimetroDigital: null, // Abolido conforme regra 8
-            horimetroAnalogico: null, // Abolido conforme regra 8
+            horimetroDigital: null,
+            horimetroAnalogico: null,
             outrosValor: safeNum(data.outrosValor, true),
             outros: data.outros || null,
             createdBy: JSON.stringify(data.createdBy || {}),
@@ -182,12 +179,42 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
+        // --- ATUALIZAÇÃO IMEDIATA DO VEÍCULO (EMISSÃO) ---
+        const vehicleUpdate = {};
+        const newOdometro = safeNum(data.odometro);
+        const newHorimetro = safeNum(data.horimetro);
+
+        // Atualiza Odômetro se informado
+        if (newOdometro > 0) {
+            vehicleUpdate.odometro = newOdometro;
+        }
+
+        // Atualiza Horímetro se informado
+        if (newHorimetro > 0) {
+            vehicleUpdate.horimetro = newHorimetro;
+            // Garante limpeza de campos legados (Regra 8, 10, 11)
+            vehicleUpdate.horimetroDigital = null;
+            vehicleUpdate.horimetroAnalogico = null;
+        }
+
+        if (Object.keys(vehicleUpdate).length > 0) {
+            const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
+            await connection.execute(
+                `UPDATE vehicles SET ${vFields} WHERE id = ?`, 
+                [...Object.values(vehicleUpdate), data.vehicleId]
+            );
+        }
+        // ---------------------------------------------------
+
         if (refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
             await updateMonthlyExpense(connection, refuelingData.obraId, refuelingData.partnerId, refuelingData.fuelType, refuelingData.data);
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
+        
+        // Adicionado 'vehicles' nos targets para o frontend atualizar a lista imediatamente
+        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles'] });
+        
         res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
@@ -220,19 +247,15 @@ const updateRefuelingOrder = async (req, res) => {
         
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
         
-        // Atualização Unificada
         if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
         if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
-        // Garantir limpeza de colunas abolidas caso venham no request
         if (data.horimetroDigital !== undefined) updateData.horimetroDigital = null;
         if (data.horimetroAnalogico !== undefined) updateData.horimetroAnalogico = null;
 
         if (data.outrosValor !== undefined) updateData.outrosValor = safeNum(data.outrosValor, true);
         
-        // Atualiza nome do posto se mudar o ID
         if (data.partnerId !== undefined) {
             updateData.partnerId = data.partnerId;
-            // Busca o nome novo
              const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [data.partnerId]);
              if (pRows.length > 0) updateData.partnerName = pRows[0].razaoSocial;
         }
@@ -266,6 +289,24 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
+        // --- ATUALIZAÇÃO DO VEÍCULO NA EDIÇÃO (OPCIONAL MAS RECOMENDADO) ---
+        // Se editaram a leitura na ordem, atualiza o veículo também para manter sincronia
+        const vehicleUpdate = {};
+        if (updateData.odometro > 0) vehicleUpdate.odometro = updateData.odometro;
+        if (updateData.horimetro > 0) {
+            vehicleUpdate.horimetro = updateData.horimetro;
+            vehicleUpdate.horimetroDigital = null;
+            vehicleUpdate.horimetroAnalogico = null;
+        }
+        
+        if (Object.keys(vehicleUpdate).length > 0) {
+             const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
+             // Busca ID do veículo original se não veio no update (não deveria mudar veículo na edição, mas por segurança usamos o original)
+             const vId = oldRefueling.vehicleId;
+             await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), vId]);
+        }
+        // -------------------------------------------------------------------
+
         const currentObra = updateData.obraId || oldRefueling.obraId;
         const currentPartner = updateData.partnerId || oldRefueling.partnerId;
         const currentFuel = updateData.fuelType || oldRefueling.fuelType;
@@ -275,7 +316,6 @@ const updateRefuelingOrder = async (req, res) => {
             await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
         }
 
-        // Recalcula anterior se mudou algo critico
         if (
             (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
             (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
@@ -287,7 +327,7 @@ const updateRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
+        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles'] });
         res.json({ message: 'Ordem atualizada.' });
     } catch (error) {
         await connection.rollback();
@@ -344,29 +384,10 @@ const confirmRefuelingOrder = async (req, res) => {
         const readingVal = safeNum(confirmedReading);
 
         if (readingVal) {
-            // Regra unificada: Verifica se usa KM ou HORAS
-            // Se for caminhão ou máquina pesada (baseado em vehicleRules que deve ser respeitado no frontend e aqui implicitamente), usamos horimetro
-            // Como regra geral, se não for explicitamente odometro, vai para horimetro (coluna unica)
-            
-            // Simplificação baseada na Regra 10 e 11:
-            // Se o veículo tiver campo 'odometro' ativo (leves/trecho), atualiza odometro.
-            // Se não, atualiza 'horimetro'.
-            // Removemos update de horimetroDigital/Analogico
-            
-            // Vamos verificar se no banco tem algum valor de odometro anterior significativo ou se é do tipo que usa odometro
-            // Mas para segurança, vamos confiar no que o frontend mandou ou checar o tipo se possível.
-            // Como não temos vehicleRules aqui, assumimos: se veio como odometro na ordem ou o veiculo tem odometro > 0 e horimetro zerado...
-            
-            // Porem, a melhor logica para a regra "Unica coluna horimetro":
-            // Se o veículo usa Odômetro (Leves/Trecho), atualiza 'odometro'.
-            // Se usa Horas, atualiza 'horimetro'.
-            
-            // Como não temos vehicleGroups aqui hardcoded, vamos inferir ou usar a lógica anterior mas simplificada:
             if (order.odometro > 0 || (vehicle.odometro > 0 && vehicle.tipo !== 'Caminhão')) {
                  vehicleUpdate.odometro = readingVal;
             } else {
                  vehicleUpdate.horimetro = readingVal;
-                 // Zera ou ignora os legados para garantir consistencia
                  vehicleUpdate.horimetroDigital = null;
                  vehicleUpdate.horimetroAnalogico = null;
             }
@@ -396,10 +417,8 @@ const confirmRefuelingOrder = async (req, res) => {
             confirmedBy: JSON.stringify(confirmedBy),
             outrosValor: safeNum(outrosValor, true),
             invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null,
-            // Grava na ordem exatamente onde gravou no veículo
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
-            // Garante que na ordem também fique limpo
             horimetroDigital: null,
             horimetroAnalogico: null
         };
