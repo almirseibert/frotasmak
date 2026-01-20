@@ -1,8 +1,61 @@
 // controllers/refuelingController.js
 const db = require('../database');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 
-// --- HELPER: Conversão Numérica Segura ---
+// --- CONFIGURAÇÃO MULTER (UPLOAD COM AUTO-LIMPEZA) ---
+
+// Função para limpar arquivos antigos (> 30 dias)
+const cleanupOldFiles = (directory) => {
+    fs.readdir(directory, (err, files) => {
+        if (err) return console.error("Erro ao ler diretório para limpeza:", err);
+
+        const now = Date.now();
+        const maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias em milissegundos
+
+        files.forEach(file => {
+            const filePath = path.join(directory, file);
+            fs.stat(filePath, (err, stats) => {
+                if (err) return;
+                if (now - stats.mtime.getTime() > maxAge) {
+                    fs.unlink(filePath, (err) => {
+                        if (err) console.error(`Erro ao deletar arquivo antigo ${file}:`, err);
+                        else console.log(`Arquivo antigo deletado automaticamente: ${file}`);
+                    });
+                }
+            });
+        });
+    });
+};
+
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadPath = path.join(__dirname, '../public/uploads/orders');
+        
+        // Garante que a pasta existe
+        if (!fs.existsSync(uploadPath)){
+            fs.mkdirSync(uploadPath, { recursive: true });
+        }
+        
+        // Executa limpeza assíncrona (não trava o upload)
+        cleanupOldFiles(uploadPath);
+
+        cb(null, uploadPath);
+    },
+    filename: function (req, file, cb) {
+        // SEGURANÇA: Nome único e IMPREVISÍVEL
+        // Ex: order-1705345023945-849384921.pdf
+        // Isso impede que alguém acesse "order_123.pdf" tentando adivinhar números.
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, 'order-' + uniqueSuffix + '.pdf');
+    }
+});
+
+const upload = multer({ storage: storage });
+
+// --- HELPERS EXISTENTES ---
 const safeNum = (val, returnZero = false) => {
     if (val === null || typeof val === 'undefined' || val === '') {
         return returnZero ? 0 : null;
@@ -11,7 +64,6 @@ const safeNum = (val, returnZero = false) => {
     return isNaN(num) ? (returnZero ? 0 : null) : num;
 };
 
-// --- HELPER: Parse JSON Seguro ---
 const parseJsonSafe = (field) => {
     if (!field) return null;
     if (typeof field === 'object') return field;
@@ -22,7 +74,6 @@ const parseJsonSafe = (field) => {
     }
 };
 
-// --- HELPER: Formatação de Resposta ---
 const parseRefuelingRows = (rows) => {
     return rows.map(row => ({
         ...row,
@@ -41,7 +92,6 @@ const parseRefuelingRows = (rows) => {
 const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
     if (!obraId || !partnerId || !fuelType || !dateInput) return;
 
-    // Verifica se a obra existe para evitar erro de FK
     const [obraCheck] = await connection.execute('SELECT id FROM obras WHERE id = ?', [obraId]);
     if (obraCheck.length === 0) return; 
 
@@ -98,6 +148,24 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     }
 };
 
+// --- CONTROLLERS ---
+
+const uploadOrderPdf = async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+        }
+        
+        // Retorna a URL pública baseada no nome gerado aleatoriamente
+        const fileUrl = `/uploads/orders/${req.file.filename}`;
+        
+        res.json({ url: fileUrl });
+    } catch (error) {
+        console.error('Erro no upload do PDF:', error);
+        res.status(500).json({ error: 'Falha ao salvar PDF no servidor.' });
+    }
+};
+
 const getAllRefuelings = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM refuelings ORDER BY id DESC');
@@ -118,7 +186,6 @@ const getRefuelingById = async (req, res) => {
     }
 };
 
-// --- CREATE ---
 const createRefuelingOrder = async (req, res) => {
     const data = req.body;
     const connection = await db.getConnection();
@@ -179,20 +246,14 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
-        // --- ATUALIZAÇÃO IMEDIATA DO VEÍCULO (EMISSÃO) ---
+        // ATUALIZAÇÃO IMEDIATA DO VEÍCULO
         const vehicleUpdate = {};
         const newOdometro = safeNum(data.odometro);
         const newHorimetro = safeNum(data.horimetro);
 
-        // Atualiza Odômetro se informado
-        if (newOdometro > 0) {
-            vehicleUpdate.odometro = newOdometro;
-        }
-
-        // Atualiza Horímetro se informado
+        if (newOdometro > 0) vehicleUpdate.odometro = newOdometro;
         if (newHorimetro > 0) {
             vehicleUpdate.horimetro = newHorimetro;
-            // Garante limpeza de campos legados (Regra 8, 10, 11)
             vehicleUpdate.horimetroDigital = null;
             vehicleUpdate.horimetroAnalogico = null;
         }
@@ -204,17 +265,13 @@ const createRefuelingOrder = async (req, res) => {
                 [...Object.values(vehicleUpdate), data.vehicleId]
             );
         }
-        // ---------------------------------------------------
 
         if (refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
             await updateMonthlyExpense(connection, refuelingData.obraId, refuelingData.partnerId, refuelingData.fuelType, refuelingData.data);
         }
 
         await connection.commit();
-        
-        // Adicionado 'vehicles' nos targets para o frontend atualizar a lista imediatamente
         req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles'] });
-        
         res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
@@ -225,7 +282,6 @@ const createRefuelingOrder = async (req, res) => {
     }
 };
 
-// --- UPDATE ---
 const updateRefuelingOrder = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -289,8 +345,7 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
-        // --- ATUALIZAÇÃO DO VEÍCULO NA EDIÇÃO (OPCIONAL MAS RECOMENDADO) ---
-        // Se editaram a leitura na ordem, atualiza o veículo também para manter sincronia
+        // Atualiza veículo na edição (opcional)
         const vehicleUpdate = {};
         if (updateData.odometro > 0) vehicleUpdate.odometro = updateData.odometro;
         if (updateData.horimetro > 0) {
@@ -301,11 +356,9 @@ const updateRefuelingOrder = async (req, res) => {
         
         if (Object.keys(vehicleUpdate).length > 0) {
              const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
-             // Busca ID do veículo original se não veio no update (não deveria mudar veículo na edição, mas por segurança usamos o original)
              const vId = oldRefueling.vehicleId;
              await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), vId]);
         }
-        // -------------------------------------------------------------------
 
         const currentObra = updateData.obraId || oldRefueling.obraId;
         const currentPartner = updateData.partnerId || oldRefueling.partnerId;
@@ -338,7 +391,6 @@ const updateRefuelingOrder = async (req, res) => {
     }
 };
 
-// --- CONFIRM ---
 const confirmRefuelingOrder = async (req, res) => {
     const { id } = req.params;
     const { 
@@ -347,7 +399,7 @@ const confirmRefuelingOrder = async (req, res) => {
         pricePerLiter, 
         confirmedReading, 
         confirmedBy, 
-        outrosValor,
+        outrosValor, 
         invoiceNumber, 
         updatePartnerPrice 
     } = req.body;
@@ -379,7 +431,6 @@ const confirmRefuelingOrder = async (req, res) => {
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
-        // Atualiza a leitura do veículo - UNIFICADO PARA HORIMETRO
         const vehicleUpdate = {};
         const readingVal = safeNum(confirmedReading);
 
@@ -480,5 +531,7 @@ module.exports = {
     createRefuelingOrder,
     updateRefuelingOrder,
     confirmRefuelingOrder,
-    deleteRefuelingOrder
+    deleteRefuelingOrder,
+    upload,          
+    uploadOrderPdf   
 };

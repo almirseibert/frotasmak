@@ -16,4 +16,8 @@ router.delete('/:id', refuelingController.deleteRefuelingOrder);
 // Rota para confirmar um abastecimento em aberto
 router.put('/:id/confirm', refuelingController.confirmRefuelingOrder);
 
+// NOVA ROTA: Upload de PDF da Ordem
+// O frontend envia o arquivo com o campo 'file'
+router.post('/upload-pdf', refuelingController.upload.single('file'), refuelingController.uploadOrderPdf);
+
 module.exports = router;
