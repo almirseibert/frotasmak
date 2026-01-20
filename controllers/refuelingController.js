@@ -22,7 +22,6 @@ const cleanupOldFiles = (directory) => {
                 if (now - stats.mtime.getTime() > maxAge) {
                     fs.unlink(filePath, (err) => {
                         if (err) console.error(`Erro ao deletar arquivo antigo ${file}:`, err);
-                        else console.log(`Arquivo antigo deletado automaticamente: ${file}`);
                     });
                 }
             });
@@ -32,6 +31,7 @@ const cleanupOldFiles = (directory) => {
 
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
+        // Caminho relativo à pasta de controllers
         const uploadPath = path.join(__dirname, '../public/uploads/orders');
         
         // Garante que a pasta existe
@@ -39,15 +39,13 @@ const storage = multer.diskStorage({
             fs.mkdirSync(uploadPath, { recursive: true });
         }
         
-        // Executa limpeza assíncrona (não trava o upload)
+        // Executa limpeza assíncrona
         cleanupOldFiles(uploadPath);
 
         cb(null, uploadPath);
     },
     filename: function (req, file, cb) {
-        // SEGURANÇA: Nome único e IMPREVISÍVEL
-        // Ex: order-1705345023945-849384921.pdf
-        // Isso impede que alguém acesse "order_123.pdf" tentando adivinhar números.
+        // Nome único e seguro
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         cb(null, 'order-' + uniqueSuffix + '.pdf');
     }
@@ -148,15 +146,14 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     }
 };
 
-// --- CONTROLLERS ---
-
+// --- CONTROLLER DE UPLOAD ---
 const uploadOrderPdf = async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
         }
         
-        // Retorna a URL pública baseada no nome gerado aleatoriamente
+        // Retorna a URL pública. O server.js serve 'public/uploads' em '/uploads'
         const fileUrl = `/uploads/orders/${req.file.filename}`;
         
         res.json({ url: fileUrl });
@@ -165,6 +162,8 @@ const uploadOrderPdf = async (req, res) => {
         res.status(500).json({ error: 'Falha ao salvar PDF no servidor.' });
     }
 };
+
+// --- CRUD EXISTENTE ---
 
 const getAllRefuelings = async (req, res) => {
     try {
@@ -345,7 +344,6 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
-        // Atualiza veículo na edição (opcional)
         const vehicleUpdate = {};
         if (updateData.odometro > 0) vehicleUpdate.odometro = updateData.odometro;
         if (updateData.horimetro > 0) {
@@ -532,6 +530,6 @@ module.exports = {
     updateRefuelingOrder,
     confirmRefuelingOrder,
     deleteRefuelingOrder,
-    upload,          
-    uploadOrderPdf   
+    upload,          // Middleware Multer
+    uploadOrderPdf   // Função Controller
 };
