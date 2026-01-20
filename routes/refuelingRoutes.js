@@ -6,7 +6,8 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 router.use(authMiddleware);
 
-// --- ROTA DE UPLOAD (IMPORTANTE: Antes das rotas com :id) ---
+// --- ROTA DE UPLOAD (MUITO IMPORTANTE: DEVE VIR ANTES DE /:id) ---
+// Se ficar depois, o sistema acha que "upload-pdf" é um ID de abastecimento
 router.post('/upload-pdf', refuelingController.upload.single('file'), refuelingController.uploadOrderPdf);
 
 // Rotas CRUD padrão

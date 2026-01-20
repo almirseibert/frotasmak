@@ -31,7 +31,7 @@ const cleanupOldFiles = (directory) => {
 
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        // Caminho relativo à pasta de controllers
+        // Caminho para salvar os arquivos
         const uploadPath = path.join(__dirname, '../public/uploads/orders');
         
         // Garante que a pasta existe
@@ -45,7 +45,7 @@ const storage = multer.diskStorage({
         cb(null, uploadPath);
     },
     filename: function (req, file, cb) {
-        // Nome único e seguro
+        // Nome único e seguro para o arquivo
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
         cb(null, 'order-' + uniqueSuffix + '.pdf');
     }
@@ -146,7 +146,7 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     }
 };
 
-// --- CONTROLLER DE UPLOAD ---
+// --- CONTROLLER DE UPLOAD (FUNÇÃO NOVA) ---
 const uploadOrderPdf = async (req, res) => {
     try {
         if (!req.file) {
