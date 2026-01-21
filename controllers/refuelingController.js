@@ -302,6 +302,11 @@ const updateRefuelingOrder = async (req, res) => {
         
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
         
+        // --- ALTERAÇÃO AQUI: Permitir atualizar litros abastecidos na edição ---
+        if (data.litrosAbastecidos !== undefined) updateData.litrosAbastecidos = safeNum(data.litrosAbastecidos, true);
+        if (data.litrosAbastecidosArla !== undefined) updateData.litrosAbastecidosArla = safeNum(data.litrosAbastecidosArla, true);
+        // ----------------------------------------------------------------------
+
         if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
         if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
         if (data.horimetroDigital !== undefined) updateData.horimetroDigital = null;
