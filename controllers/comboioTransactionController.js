@@ -265,9 +265,9 @@ const createEntradaTransaction = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${rfFields.join(', ')}) VALUES (${rfPlaceholders})`, rfValues);
 
         // 3. Cria Transação de Comboio
+        // REMOVIDO: authNumber (não existe na tabela comboio_transactions)
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
-            authNumber: newAuthNumber, // Salva o número da ordem aqui também
             type: 'entrada',
             date: new Date(date),
             comboioVehicleId: sanitize(comboioVehicleId),
@@ -304,6 +304,7 @@ const createEntradaTransaction = async (req, res) => {
 
         req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'refuelings', 'expenses'] });
 
+        // Retorna o authNumber no objeto refuelingOrder para o frontend gerar o PDF
         res.status(201).json({ message: 'Entrada registrada.', refuelingOrder: { authNumber: newAuthNumber } });
     } catch (error) {
         await connection.rollback();
@@ -341,12 +342,10 @@ const createSaidaTransaction = async (req, res) => {
         }
 
         let receivingVehicleName = null;
-        let receivingVehiclePlate = '';
         if (receivingVehicleId) {
             const [vRows] = await connection.execute('SELECT registroInterno, placa FROM vehicles WHERE id = ?', [receivingVehicleId]);
             if (vRows.length > 0) {
                 receivingVehicleName = vRows[0].registroInterno;
-                receivingVehiclePlate = vRows[0].placa;
             }
         }
 
@@ -387,9 +386,9 @@ const createSaidaTransaction = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${rfFields.join(', ')}) VALUES (${rfPlaceholders})`, rfValues);
 
         // 3. Cria Transação de Comboio
+        // REMOVIDO: authNumber
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
-            authNumber: newAuthNumber, // Salva o número da ordem
             type: 'saida',
             date: new Date(date),
             comboioVehicleId: sanitize(comboioVehicleId),
@@ -521,11 +520,11 @@ const deleteTransaction = async (req, res) => {
         }
         const t = rows[0];
 
-        // Se tiver um refuelingId ou authNumber associado, deveríamos deletar da tabela refuelings também?
-        // Como o authNumber é único, vamos tentar deletar da tabela refuelings pelo authNumber se existir
-        if (t.authNumber) {
-            await connection.execute('DELETE FROM refuelings WHERE authNumber = ?', [t.authNumber]);
-        }
+        // Tentativa de deletar da tabela refuelings também se possível
+        // Mas como não salvamos authNumber em comboio_transactions, não temos o link direto aqui facilmente
+        // A menos que usemos data, vehicleId e litros para tentar achar.
+        // Por segurança, deixamos o registro em refuelings (pode ser cancelado lá manualmente) ou implementamos lógica de busca complexa.
+        // Dado o erro de schema, assumimos que não há link direto salvo.
 
         if (t.type === 'entrada') {
             await connection.execute(
@@ -533,12 +532,7 @@ const deleteTransaction = async (req, res) => {
                 [`$.${t.fuelType}`, `$.${t.fuelType}`, t.liters, t.comboioVehicleId]
             );
             
-            // Reverter despesa do posto (se foi criada)
-            // A lógica de updateMonthlyExpense pode recriar corretamente se rodar novamente sem esse registro
-            // Mas aqui chamamos updateMonthlyExpense novamente para recalcular
             if (t.obraId && t.partnerId && t.fuelType) {
-                // Pequeno delay ou apenas recalcular
-                // Idealmente deveríamos subtrair, mas chamar updateMonthlyExpense recalcula tudo do mês
                 await updateMonthlyExpense(connection, t.obraId, t.partnerId, t.fuelType, t.date);
             }
 
@@ -659,22 +653,6 @@ const updateTransaction = async (req, res) => {
             sanitize(newData.invoiceNumber) || oldData.invoiceNumber,
             id
         ]);
-
-        // ATUALIZAÇÃO DO REGISTRO EM REFUELINGS (Sincronia)
-        if (oldData.authNumber) {
-            const updateRefuelingQuery = `
-                UPDATE refuelings 
-                SET liters = ?, data = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, 
-                    odometro = ?, horimetro = ?, invoiceNumber = ?, litrosAbastecidos = ?, litrosLiberados = ?
-                WHERE authNumber = ?
-            `;
-            // Nota: campos podem variar, isso é uma tentativa de manter sincronia básica
-            // Se falhar não é crítico, mas idealmente deveríamos atualizar ambos.
-            try {
-                await connection.execute('UPDATE refuelings SET litrosAbastecidos = ?, litrosLiberados = ?, data = ? WHERE authNumber = ?', 
-                    [newLiters, newLiters, newDate, oldData.authNumber]);
-            } catch(e) { console.error("Erro sync refueling update", e); }
-        }
 
         await connection.commit();
 
