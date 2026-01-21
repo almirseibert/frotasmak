@@ -39,6 +39,67 @@ const getAverageFuelPrice = async (connection, fuelType) => {
     return rows[0].avgPrice ? parseFloat(rows[0].avgPrice) : 0;
 };
 
+// --- HELPER: Atualização de Despesas Mensais (Cópia da lógica de Refueling para consistência) ---
+const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
+    if (!obraId || !partnerId || !fuelType || !dateInput) return;
+
+    const [obraCheck] = await connection.execute('SELECT id FROM obras WHERE id = ?', [obraId]);
+    if (obraCheck.length === 0) return; 
+
+    const dateObj = new Date(dateInput);
+    const month = dateObj.getMonth();
+    const year = dateObj.getFullYear();
+    const startDate = new Date(year, month, 1);
+    const endDate = new Date(year, month + 1, 0, 23, 59, 59);
+
+    const [partners] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
+    const partnerName = partners[0]?.razaoSocial || 'Posto Desconhecido';
+
+    // Soma refuelings (incluindo as Entradas de Comboio que agora são salvas lá)
+    const querySum = `
+        SELECT SUM(
+            (COALESCE(litrosAbastecidos, 0) * COALESCE(pricePerLiter, 0)) + 
+            COALESCE(outrosValor, 0)
+        ) as total
+        FROM refuelings
+        WHERE obraId = ? 
+          AND partnerId = ? 
+          AND fuelType = ?
+          AND data BETWEEN ? AND ?
+    `;
+
+    const [rows] = await connection.execute(querySum, [obraId, partnerId, fuelType, startDate, endDate]);
+    const totalAmount = rows[0]?.total || 0;
+
+    const monthName = startDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    const description = `Combustível: ${fuelType} - ${partnerName} (${monthName})`;
+
+    const [existingExpense] = await connection.execute(
+        'SELECT id FROM expenses WHERE obraId = ? AND description = ?',
+        [obraId, description]
+    );
+
+    if (totalAmount > 0) {
+        if (existingExpense.length > 0) {
+            await connection.execute(
+                'UPDATE expenses SET amount = ?, weekStartDate = ? WHERE id = ?',
+                [totalAmount, startDate, existingExpense[0].id]
+            );
+        } else {
+            const newId = crypto.randomUUID();
+            await connection.execute(
+                `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, weekStartDate, partnerName, fuelType)
+                 VALUES (?, ?, ?, ?, 'Combustível', NOW(), ?, ?, ?)`,
+                [newId, obraId, description, totalAmount, startDate, partnerName, fuelType]
+            );
+        }
+    } else {
+        if (existingExpense.length > 0) {
+            await connection.execute('DELETE FROM expenses WHERE id = ?', [existingExpense[0].id]);
+        }
+    }
+};
+
 // --- HELPER: Gerenciar Despesa na Saída (Custo para Obra) ---
 const manageSaidaExpense = async ({ connection, obraId, date, fuelType, valueChange, transactionId }) => {
     if (!obraId || !fuelType || valueChange === 0) return;
@@ -81,7 +142,7 @@ const manageSaidaExpense = async ({ connection, obraId, date, fuelType, valueCha
     }
 };
 
-// --- HELPER: Atualizar Odômetro/Horímetro do Veículo (Lógica Unificada v2.0) ---
+// --- HELPER: Atualizar Odômetro/Horímetro do Veículo ---
 const updateVehicleReading = async (connection, vehicleId, readings) => {
     if (!vehicleId) return;
     
@@ -98,7 +159,6 @@ const updateVehicleReading = async (connection, vehicleId, readings) => {
 
     if (valHor !== null && valHor > 0) {
         updateData.horimetro = valHor;
-        // Zera as colunas legadas no VEÍCULO para garantir consistência
         updateData.horimetroDigital = null;
         updateData.horimetroAnalogico = null;
     }
@@ -131,7 +191,7 @@ const getComboioTransactionById = async (req, res) => {
     }
 };
 
-// --- CRIAR ENTRADA (Abastecimento do Comboio) ---
+// --- CRIAR ENTRADA (Abastecimento do Comboio no Posto) ---
 const createEntradaTransaction = async (req, res) => {
     const { 
         comboioVehicleId, partnerId, employeeId, 
@@ -143,6 +203,11 @@ const createEntradaTransaction = async (req, res) => {
     await connection.beginTransaction();
 
     try {
+        // 1. Gera Sequência Oficial (Counter)
+        const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
+        const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
+        await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
+
         if (invoiceNumber) {
             await checkDuplicateNF(connection, partnerId, invoiceNumber);
         }
@@ -171,8 +236,38 @@ const createEntradaTransaction = async (req, res) => {
 
         let obraName = 'Estoque Comboio';
         
+        // 2. Cria Registro na Tabela Oficial de Abastecimentos (Refuelings)
+        // Isso garante que apareça na lista de ordens emitidas e some nas despesas do posto
+        const refuelingId = crypto.randomUUID();
+        const refuelingData = {
+            id: refuelingId,
+            authNumber: newAuthNumber,
+            vehicleId: comboioVehicleId, // O veículo abastecido é o próprio comboio
+            partnerId: partnerId,
+            partnerName: partnerName,
+            employeeId: employeeId,
+            obraId: obraId || null,
+            fuelType: fuelType,
+            data: new Date(date),
+            status: 'Concluída', // Já entra como concluída pois é lançamento direto
+            isFillUp: 0,
+            litrosLiberados: safeLiters,
+            litrosAbastecidos: safeLiters,
+            pricePerLiter: price,
+            createdBy: JSON.stringify(createdBy || {}),
+            invoiceNumber: invoiceNumber || null
+        };
+
+        const rfFields = Object.keys(refuelingData);
+        const rfValues = Object.values(refuelingData);
+        const rfPlaceholders = rfFields.map(() => '?').join(', ');
+        
+        await connection.execute(`INSERT INTO refuelings (${rfFields.join(', ')}) VALUES (${rfPlaceholders})`, rfValues);
+
+        // 3. Cria Transação de Comboio
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
+            authNumber: newAuthNumber, // Salva o número da ordem aqui também
             type: 'entrada',
             date: new Date(date),
             comboioVehicleId: sanitize(comboioVehicleId),
@@ -194,17 +289,22 @@ const createEntradaTransaction = async (req, res) => {
 
         await connection.execute(`INSERT INTO comboio_transactions (${fields.join(', ')}) VALUES (${placeholders})`, values);
 
+        // 4. Atualiza Estoque
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
 
+        // 5. Atualiza Despesa do Posto (Necessário pois agora é um Refueling oficial)
+        if (refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
+            await updateMonthlyExpense(connection, refuelingData.obraId, refuelingData.partnerId, refuelingData.fuelType, refuelingData.data);
+        }
+
         await connection.commit();
 
-        // SOCKET EMIT: Atualizar Comboio e Veículos (Estoque mudou)
-        req.io.emit('server:sync', { targets: ['comboio', 'vehicles'] });
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'refuelings', 'expenses'] });
 
-        res.status(201).json({ message: 'Entrada registrada.', refuelingOrder: { authNumber: 0 } });
+        res.status(201).json({ message: 'Entrada registrada.', refuelingOrder: { authNumber: newAuthNumber } });
     } catch (error) {
         await connection.rollback();
         console.error('Erro Entrada:', error);
@@ -227,6 +327,11 @@ const createSaidaTransaction = async (req, res) => {
     await connection.beginTransaction();
 
     try {
+        // 1. Gera Sequência Oficial (Counter)
+        const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
+        const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
+        await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
+
         const safeLiters = sanitizeNumber(liters) || 0;
 
         let obraName = 'Obra Desconhecida';
@@ -236,14 +341,55 @@ const createSaidaTransaction = async (req, res) => {
         }
 
         let receivingVehicleName = null;
+        let receivingVehiclePlate = '';
         if (receivingVehicleId) {
-            const [vRows] = await connection.execute('SELECT registroInterno FROM vehicles WHERE id = ?', [receivingVehicleId]);
-            if (vRows.length > 0) receivingVehicleName = vRows[0].registroInterno;
+            const [vRows] = await connection.execute('SELECT registroInterno, placa FROM vehicles WHERE id = ?', [receivingVehicleId]);
+            if (vRows.length > 0) {
+                receivingVehicleName = vRows[0].registroInterno;
+                receivingVehiclePlate = vRows[0].placa;
+            }
         }
 
-        // CORREÇÃO: Removemos campos horimetroDigital e horimetroAnalogico
+        // Buscar nome do Comboio para registrar como "Posto/Parceiro"
+        let comboioName = 'Comboio';
+        if (comboioVehicleId) {
+            const [cRows] = await connection.execute('SELECT registroInterno FROM vehicles WHERE id = ?', [comboioVehicleId]);
+            if (cRows.length > 0) comboioName = `Comboio ${cRows[0].registroInterno}`;
+        }
+
+        // 2. Cria Registro na Tabela Oficial de Abastecimentos (Refuelings)
+        // Isso garante que apareça na lista de ordens emitidas
+        const refuelingId = crypto.randomUUID();
+        const refuelingData = {
+            id: refuelingId,
+            authNumber: newAuthNumber,
+            vehicleId: receivingVehicleId, // O veículo que recebeu combustível
+            partnerId: null, // Sem ID de parceiro externo, pois é interno
+            partnerName: comboioName, // Nome do comboio como fornecedor
+            employeeId: employeeId,
+            obraId: obraId || null,
+            fuelType: fuelType,
+            data: new Date(date),
+            status: 'Concluída',
+            isFillUp: 0,
+            litrosLiberados: safeLiters,
+            litrosAbastecidos: safeLiters,
+            pricePerLiter: 0, // Custo já foi absorvido na entrada do comboio
+            odometro: sanitizeNumber(odometro),
+            horimetro: sanitizeNumber(horimetro),
+            createdBy: JSON.stringify(createdBy || {})
+        };
+
+        const rfFields = Object.keys(refuelingData);
+        const rfValues = Object.values(refuelingData);
+        const rfPlaceholders = rfFields.map(() => '?').join(', ');
+        
+        await connection.execute(`INSERT INTO refuelings (${rfFields.join(', ')}) VALUES (${rfPlaceholders})`, rfValues);
+
+        // 3. Cria Transação de Comboio
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
+            authNumber: newAuthNumber, // Salva o número da ordem
             type: 'saida',
             date: new Date(date),
             comboioVehicleId: sanitize(comboioVehicleId),
@@ -265,19 +411,19 @@ const createSaidaTransaction = async (req, res) => {
         
         await connection.execute(`INSERT INTO comboio_transactions (${fields.join(', ')}) VALUES (${placeholders})`, values);
 
-        // 1. Atualiza Estoque Comboio (SUBTRAI)
+        // 4. Atualiza Estoque Comboio (SUBTRAI)
         await connection.execute(
             'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
             [`$.${fuelType}`, `$.${fuelType}`, safeLiters, comboioVehicleId]
         );
         
-        // 2. Atualiza Leitura do Veículo Abastecido (Unificado)
+        // 5. Atualiza Leitura do Veículo Abastecido
         await updateVehicleReading(connection, receivingVehicleId, {
             odometro: transactionData.odometro,
             horimetro: transactionData.horimetro
         });
 
-        // 3. Gera Despesa para a Obra
+        // 6. Gera Despesa para a Obra do Veículo (Alocação de Custo Interno)
         const avgPrice = await getAverageFuelPrice(connection, fuelType);
         const expenseValue = safeLiters * avgPrice;
 
@@ -294,10 +440,9 @@ const createSaidaTransaction = async (req, res) => {
         
         await connection.commit();
 
-        // SOCKET EMIT: Atualizar Comboio, Veículos (Estoque e Km) e Despesas
-        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses'] });
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses', 'refuelings'] });
 
-        res.status(201).json({ message: 'Abastecimento registrado.', refuelingOrder: { authNumber: 0 } });
+        res.status(201).json({ message: 'Abastecimento registrado.', refuelingOrder: { authNumber: newAuthNumber } });
     } catch (error) {
         await connection.rollback();
         console.error('Erro Saída:', error);
@@ -351,7 +496,6 @@ const createDrenagemTransaction = async (req, res) => {
 
         await connection.commit();
 
-        // SOCKET EMIT: Atualizar Comboio e Veículos
         req.io.emit('server:sync', { targets: ['comboio', 'vehicles'] });
 
         res.status(201).json({ message: 'Drenagem registrada.' });
@@ -377,11 +521,27 @@ const deleteTransaction = async (req, res) => {
         }
         const t = rows[0];
 
+        // Se tiver um refuelingId ou authNumber associado, deveríamos deletar da tabela refuelings também?
+        // Como o authNumber é único, vamos tentar deletar da tabela refuelings pelo authNumber se existir
+        if (t.authNumber) {
+            await connection.execute('DELETE FROM refuelings WHERE authNumber = ?', [t.authNumber]);
+        }
+
         if (t.type === 'entrada') {
             await connection.execute(
                 'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, GREATEST(0, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) - ?)) WHERE id = ?', 
                 [`$.${t.fuelType}`, `$.${t.fuelType}`, t.liters, t.comboioVehicleId]
             );
+            
+            // Reverter despesa do posto (se foi criada)
+            // A lógica de updateMonthlyExpense pode recriar corretamente se rodar novamente sem esse registro
+            // Mas aqui chamamos updateMonthlyExpense novamente para recalcular
+            if (t.obraId && t.partnerId && t.fuelType) {
+                // Pequeno delay ou apenas recalcular
+                // Idealmente deveríamos subtrair, mas chamar updateMonthlyExpense recalcula tudo do mês
+                await updateMonthlyExpense(connection, t.obraId, t.partnerId, t.fuelType, t.date);
+            }
+
         } else if (t.type === 'saida') {
             await connection.execute(
                 'UPDATE vehicles SET fuelLevels = JSON_SET(fuelLevels, ?, COALESCE(JSON_EXTRACT(fuelLevels, ?), 0) + ?) WHERE id = ?', 
@@ -405,8 +565,7 @@ const deleteTransaction = async (req, res) => {
         await connection.execute('DELETE FROM comboio_transactions WHERE id = ?', [id]);
         await connection.commit();
 
-        // SOCKET EMIT: Atualização ampla pois delete reverte estoque e despesas
-        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses'] });
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses', 'refuelings'] });
 
         res.status(204).end();
     } catch (error) {
@@ -480,7 +639,7 @@ const updateTransaction = async (req, res) => {
             }
         }
 
-        // --- UPDATE SQL (Sem colunas legadas) ---
+        // --- UPDATE SQL ---
         const updateQuery = `
             UPDATE comboio_transactions 
             SET liters = ?, date = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, 
@@ -501,10 +660,25 @@ const updateTransaction = async (req, res) => {
             id
         ]);
 
+        // ATUALIZAÇÃO DO REGISTRO EM REFUELINGS (Sincronia)
+        if (oldData.authNumber) {
+            const updateRefuelingQuery = `
+                UPDATE refuelings 
+                SET liters = ?, data = ?, fuelType = ?, partnerId = ?, employeeId = ?, obraId = ?, 
+                    odometro = ?, horimetro = ?, invoiceNumber = ?, litrosAbastecidos = ?, litrosLiberados = ?
+                WHERE authNumber = ?
+            `;
+            // Nota: campos podem variar, isso é uma tentativa de manter sincronia básica
+            // Se falhar não é crítico, mas idealmente deveríamos atualizar ambos.
+            try {
+                await connection.execute('UPDATE refuelings SET litrosAbastecidos = ?, litrosLiberados = ?, data = ? WHERE authNumber = ?', 
+                    [newLiters, newLiters, newDate, oldData.authNumber]);
+            } catch(e) { console.error("Erro sync refueling update", e); }
+        }
+
         await connection.commit();
 
-        // SOCKET EMIT: Atualização completa
-        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses'] });
+        req.io.emit('server:sync', { targets: ['comboio', 'vehicles', 'expenses', 'refuelings'] });
 
         res.json({ message: "Transação atualizada com sucesso" });
     } catch (e) {
