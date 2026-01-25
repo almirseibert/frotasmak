@@ -37,7 +37,15 @@ const parseVehicleJsonFields = (vehicle) => {
 
 const getAllVehicles = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM vehicles');
+        // CORREÇÃO CRÍTICA: Adicionada subquery para contar checklists
+        // Isso permite que o frontend saiba se deve pintar o botão de roxo
+        const query = `
+            SELECT v.*, 
+            (SELECT COUNT(*) FROM checklists c WHERE c.vehicle_id = v.id) as checklistCount 
+            FROM vehicles v
+        `;
+        
+        const [rows] = await db.execute(query);
         const vehicles = rows.map(parseVehicleJsonFields);
         res.json(vehicles);
     } catch (error) {
@@ -71,12 +79,11 @@ const getVehicleById = async (req, res) => {
 const createVehicle = async (req, res) => {
     const data = req.body;
     
-    // Tratamento de JSONs
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     delete data.history; 
+    delete data.checklistCount; // Remove campo virtual se vier no body
 
-    // SQL Dump confirma que ID é varchar(255), então randomUUID é seguro e correto
     data.id = randomUUID();
     
     Object.keys(data).forEach(key => data[key] === undefined && delete data[key]);
@@ -88,10 +95,7 @@ const createVehicle = async (req, res) => {
 
     try {
         await db.execute(query, values);
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles'] });
-
         res.status(201).json({ ...req.body, id: data.id }); 
     } catch (error) {
         console.error('Erro ao criar veículo:', error);
@@ -109,6 +113,7 @@ const updateVehicle = async (req, res) => {
     if (data.operationalAssignment) data.operationalAssignment = JSON.stringify(data.operationalAssignment);
     
     delete data.history;
+    delete data.checklistCount;
 
     const fields = Object.keys(data).filter(key => key !== 'id');
     const values = fields.map(field => data[field]);
@@ -119,18 +124,13 @@ const updateVehicle = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles'] });
-
         res.json({ message: 'Veículo atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar veículo:', error);
         res.status(500).json({ error: 'Erro ao atualizar veículo: ' + error.message });
     }
 };
-
-// --- UPLOAD DE IMAGEM ---
 
 const uploadVehicleImage = async (req, res) => {
     const { id } = req.params; 
@@ -162,9 +162,7 @@ const uploadVehicleImage = async (req, res) => {
         await connection.execute('UPDATE vehicles SET fotoURL = ? WHERE id = ?', [fotoURL, id]);
         await connection.commit();
 
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles'] });
-
         res.json({ message: 'Upload bem-sucedido!', fotoURL: fotoURL });
 
     } catch (error) {
@@ -188,13 +186,13 @@ const deleteVehicle = async (req, res) => {
             await connection.execute(`DELETE FROM revisions WHERE id IN (${placeholders})`, revisionIds);
         }
         
+        // Também deleta checklists associados para manter integridade
+        await connection.execute('DELETE FROM checklists WHERE vehicle_id = ?', [req.params.id]);
+
         await connection.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
         
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles', 'revisions'] });
-
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
@@ -205,12 +203,10 @@ const deleteVehicle = async (req, res) => {
     }
 };
 
-// --- ALOCAÇÃO EM OBRA (CORRIGIDO PARA O SCHEMA DO BANCO) ---
+// --- ALOCAÇÃO EM OBRA ---
 
 const allocateToObra = async (req, res) => {
     const { id } = req.params; 
-    console.log(`[Alocação Obra] Veículo ${id}:`, req.body);
-
     const { obraId, employeeId, dataEntrada, readingType, readingValue, observacoes } = req.body;
     
     if (!obraId || !employeeId) {
@@ -221,8 +217,6 @@ const allocateToObra = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        // CORREÇÃO BASEADA NO SQL: IDs são varchar(255), não convertemos para int.
-        // Isso evita que IDs alfanuméricos como '0ddviJWArUNC2o5i0goq' quebrem.
         const obraIdStr = String(obraId);
         const employeeIdStr = String(employeeId);
         const readingVal = parseFloat(readingValue) || 0;
@@ -239,7 +233,6 @@ const allocateToObra = async (req, res) => {
             throw new Error("Obra, Funcionário ou Veículo não encontrado (ID inválido).");
         }
         
-        // 1. Histórico Geral (ID é Auto Increment no banco, não enviamos)
         const newHistoryEntry = {
             vehicleId: id,
             historyType: 'obra',
@@ -264,7 +257,6 @@ const allocateToObra = async (req, res) => {
             historyValues
         );
         
-        // 2. Atualizar Veículo
         const vehicleUpdateData = {
             obraAtualId: obraIdStr,
             status: 'Em Obra',
@@ -288,14 +280,12 @@ const allocateToObra = async (req, res) => {
             [...updateValues, id]
         );
         
-        // 3. Atualizar Funcionário
         try {
             await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'obra' }), employeeIdStr]);
         } catch (empError) {
             console.warn("Aviso: Falha ao atualizar funcionário:", empError.message);
         }
 
-        // 4. Histórico de Obras (ID é varchar(255) no banco, geramos UUID)
         const newObraHistoryEntryData = {
             id: randomUUID(),
             obraId: obraIdStr,
@@ -308,12 +298,10 @@ const allocateToObra = async (req, res) => {
             employeeName: employee.nome || 'Funcionário',
             dataEntrada: new Date(dataEntrada || new Date()),
             dataSaida: null,
-            
             odometroEntrada: readingType === 'odometro' ? readingVal : 0,
             odometroSaida: 0, 
             horimetroEntrada: readingType === 'horimetro' ? readingVal : 0,
             horimetroSaida: 0, 
-            
             observacoes: observacoes || ''
         };
         
@@ -327,16 +315,12 @@ const allocateToObra = async (req, res) => {
         );
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
-        // Atualiza tanto a lista de veículos quanto os detalhes da obra
         req.io.emit('server:sync', { targets: ['vehicles', 'obras'] });
-
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
         console.error("Erro CRÍTICO ao alocar (Obra):", error);
-        res.status(500).json({ error: 'Falha ao alocar veículo.', details: error.message, sqlMessage: error.sqlMessage });
+        res.status(500).json({ error: 'Falha ao alocar veículo.', details: error.message });
     } finally {
         connection.release();
     }
@@ -359,7 +343,6 @@ const deallocateFromObra = async (req, res) => {
             if (vRows.length > 0) targetObraId = vRows[0].obraAtualId;
         }
 
-        // Histórico Geral
         const [historyRows] = await connection.execute(
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
             [id, 'obra']
@@ -386,7 +369,6 @@ const deallocateFromObra = async (req, res) => {
             );
         }
 
-        // Veículo
         const vehicleUpdateData = {
             obraAtualId: null, 
             status: 'Disponível', 
@@ -410,7 +392,6 @@ const deallocateFromObra = async (req, res) => {
              } catch (e) { console.warn("Erro ao liberar funcionário", e.message); }
         }
         
-        // Histórico Obras (Garantindo que targetObraId é string para match)
         if (targetObraId) {
             const obraHistoryUpdateFields = ['dataSaida = ?'];
             const obraHistoryUpdateValues = [exitTimestamp];
@@ -455,15 +436,12 @@ const deallocateFromObra = async (req, res) => {
         }
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles', 'obras'] });
-
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
         console.error("Erro CRÍTICO ao desalocar:", error);
-        res.status(500).json({ error: 'Falha ao desalocar veículo.', details: error.message, sqlMessage: error.sqlMessage });
+        res.status(500).json({ error: 'Falha ao desalocar veículo.', details: error.message });
     } finally {
         connection.release();
     }
@@ -484,9 +462,7 @@ const assignToOperational = async (req, res) => {
             [now, id]
         );
         
-        // CORREÇÃO: IDs como string para compatibilidade total
         const employeeIdStr = String(employeeId);
-
         const [selectedEmployeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdStr]);
         const employeeName = selectedEmployeeRows[0]?.nome;
         
@@ -543,10 +519,7 @@ const assignToOperational = async (req, res) => {
         await connection.execute('UPDATE employees SET alocadoEm = ? WHERE id = ?', [JSON.stringify({ veiculoId: id, assignmentType: 'operacional' }), employeeIdStr]);
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles'] });
-
         res.status(200).json({ message: 'Veículo alocado para operação.' });
     } catch (error) {
         await connection.rollback();
@@ -596,10 +569,7 @@ const unassignFromOperational = async (req, res) => {
         }
         
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles'] });
-
         res.status(200).json({ message: 'Alocação operacional finalizada.' });
     } catch (error) {
         await connection.rollback();
@@ -658,10 +628,7 @@ const startMaintenance = async (req, res) => {
         await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles'] });
-
         res.status(200).json({ message: 'Status de manutenção atualizado.' });
     } catch (error) {
         await connection.rollback();
@@ -696,10 +663,7 @@ const endMaintenance = async (req, res) => {
         await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['vehicles'] });
-
         res.status(200).json({ message: 'Manutenção finalizada.' });
     } catch (error) {
         await connection.rollback();
