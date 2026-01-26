@@ -1,4 +1,4 @@
-const db = require('../config/database'); // Ajuste o caminho conforme sua estrutura
+const db = require('../database'); // <--- CORREÇÃO: Caminho correto (era ../config/database)
 const fs = require('fs');
 const path = require('path');
 
@@ -7,6 +7,7 @@ exports.getChecklistsByVehicle = async (req, res) => {
     const { vehicleId } = req.params;
 
     try {
+        // Busca checklists ordenados por data
         const [rows] = await db.execute(
             `SELECT id, data_checklist, pdf_path, observacoes, created_at 
              FROM checklists 
@@ -23,6 +24,8 @@ exports.getChecklistsByVehicle = async (req, res) => {
 
 // Receber upload do checklist (Mobile -> Web)
 exports.uploadChecklist = async (req, res) => {
+    // console.log("Recebendo upload...", req.body, req.file); // Debug se necessário
+
     const { vehicleId, date, items, observacoes, mobileId } = req.body;
     const file = req.file; // Arquivo PDF vindo do Multer
 
@@ -31,7 +34,6 @@ exports.uploadChecklist = async (req, res) => {
     }
 
     // Caminho relativo para salvar no banco (ex: /uploads/checklists/arquivo.pdf)
-    // Assumindo que o Multer já salvou o arquivo na pasta correta
     const pdfPath = `/uploads/checklists/${file.filename}`;
 
     try {
@@ -45,9 +47,15 @@ exports.uploadChecklist = async (req, res) => {
             message: "Checklist sincronizado com sucesso!", 
             id: result.insertId 
         });
+        
+        // Notifica o frontend em tempo real (se Socket.io estiver configurado)
+        if (req.io) {
+            req.io.emit('server:sync', { targets: ['vehicles', 'checklists'] });
+        }
+
     } catch (error) {
-        console.error("Erro ao salvar checklist:", error);
-        // Se der erro no banco, pode ser boa prática apagar o arquivo enviado para não deixar lixo
+        console.error("Erro ao salvar checklist no banco:", error);
+        // Se der erro no banco, apaga o arquivo físico para não deixar lixo
         if (file && file.path) {
             fs.unlink(file.path, (err) => { if (err) console.error("Erro ao apagar arquivo órfão:", err); });
         }
