@@ -4,8 +4,8 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const db = require('./database');
-const http = require('http'); // <--- 1. Importar módulo HTTP nativo
-const { Server } = require("socket.io"); // <--- 2. Importar Socket.io
+const http = require('http'); 
+const { Server } = require("socket.io");
 
 // Importa o multer
 const multer = require('multer');
@@ -35,19 +35,22 @@ const updateRoutes = require('./routes/updateRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const tireRoutes = require('./routes/tireRoutes');
 
-// --- NOVA ROTA DE FATURAMENTO ---
+// Rota de Faturamento
 const billingRoutes = require('./routes/billingRoutes');
+
+// --- NOVA ROTA DE CHECKLISTS (CRUCIAL PARA O APP) ---
+const checklistRoutes = require('./routes/checklistRoutes');
 
 const app = express();
 const port = process.env.PORT || 3001;
 
-// <--- 3. Criar o servidor HTTP explicitamente usando o app do Express
+// Criar o servidor HTTP
 const server = http.createServer(app);
 
-// <--- 4. Configurar o Socket.io com CORS (Permite conexão do Frontend)
+// Configurar o Socket.io
 const io = new Server(server, {
     cors: {
-        origin: "*", // Aceita conexões de qualquer origem (ideal para dev/fases iniciais)
+        origin: "*", 
         methods: ["GET", "POST", "PUT", "DELETE"]
     }
 });
@@ -55,9 +58,10 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json()); 
 
-app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+// Configuração correta para servir arquivos estáticos (PDFs e Imagens)
+app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
 
-// <--- 5. Middleware para disponibilizar o 'io' em todas as requisições (req.io)
+// Middleware para disponibilizar o 'io'
 app.use((req, res, next) => {
     req.io = io;
     next();
@@ -74,10 +78,10 @@ apiRouter.get('/', (req, res) => {
 apiRouter.use('/auth', authRoutes);
 apiRouter.use('/registrationRequests', registrationRequestRoutes);
 
-// Middleware de Autenticação
+// Middleware de Autenticação (Protege tudo abaixo)
 apiRouter.use(authMiddleware);
 
-// Rota de Upload
+// Rota de Upload Genérica
 apiRouter.use('/upload', uploadRoutes);
 
 // Rotas Protegidas
@@ -98,22 +102,23 @@ apiRouter.use('/expenses', expensesRoutes);
 apiRouter.use('/users', userRoutes);
 apiRouter.use('/updates', updateRoutes);
 apiRouter.use('/tires', tireRoutes);
-
-// --- REGISTRO DA ROTA DE FATURAMENTO ---
 apiRouter.use('/billing', billingRoutes);
+
+// --- REGISTRO DA ROTA DE CHECKLISTS ---
+// Isso cria a URL /api/checklists que o app está tentando acessar
+apiRouter.use('/checklists', checklistRoutes); 
 
 app.use('/api', apiRouter);
 
-// <--- 6. (Opcional) Log de conexões Socket para Debug
+// Log Socket
 io.on('connection', (socket) => {
     console.log('🔌 Cliente conectado via Socket:', socket.id);
-    
     socket.on('disconnect', () => {
         console.log('❌ Cliente desconectado:', socket.id);
     });
 });
 
-// Inicialização do Banco de Dados (Verificação de Conexão Apenas)
+// DB Check
 db.getConnection()
     .then(connection => {
         console.log('Conexão com o banco de dados estabelecida com sucesso!');
@@ -123,7 +128,7 @@ db.getConnection()
         console.error('Erro ao conectar ao banco de dados:', err.stack);
     });
 
-// <--- 7. IMPORTANTE: Mude app.listen para server.listen
 server.listen(port, () => {
     console.log(`🚀 Servidor rodando (HTTP + Socket.io) na porta ${port}`);
+    console.log(`🔗 API Checklists acessível em /api/checklists`);
 });
