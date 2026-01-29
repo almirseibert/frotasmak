@@ -25,10 +25,10 @@ const cleanCpf = (cpf) => cpf ? cpf.replace(/\D/g, '') : '';
 // --- LISTAR TODOS ---
 const getAllEmployees = async (req, res) => {
     try {
+        // Seleciona * para pegar inclusive alocadoEm se existir
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
         
         const cleanRows = rows.map(emp => {
-            // Tratamento para status que venha como JSON incorreto
             let statusLimpo = emp.status;
             if (statusLimpo && typeof statusLimpo === 'string' && statusLimpo.includes('{')) {
                 try { statusLimpo = JSON.parse(statusLimpo).status || 'ativo'; } catch(e) { statusLimpo = 'ativo'; }
@@ -91,7 +91,6 @@ const createEmployee = async (req, res) => {
         const epi = JSON.stringify(data.epi || {});
         const certificados = JSON.stringify(data.certificados || []);
         
-        // CNH Híbrida: Salva no JSON e nas colunas antigas
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
         const cnhNumero = data.cnhNumero || cnhObj.numero || null;
@@ -115,13 +114,11 @@ const createEmployee = async (req, res) => {
             ]
         );
 
-        // Cria usuário automaticamente
         const cpfLimpo = cleanCpf(data.cpf);
         if (cpfLimpo) {
             const userEmail = `${cpfLimpo}@frotamak.com`;
-            const userPassword = cpfLimpo; 
             const salt = await bcrypt.genSalt(10);
-            const hashedPassword = await bcrypt.hash(userPassword, salt);
+            const hashedPassword = await bcrypt.hash(cpfLimpo, salt);
             const newUserId = uuidv4();
 
             const [existingUsers] = await connection.execute('SELECT id FROM users WHERE email = ?', [userEmail]);
@@ -176,7 +173,6 @@ const updateEmployee = async (req, res) => {
             aso, epi, cnhJson, certificados, data.dataDesligamento || null
         ];
 
-        // Atualiza status apenas se vier uma string limpa
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
              statusUpdateClause = ", status = ?";
              params.push(data.status);
@@ -228,16 +224,18 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
-// --- HISTÓRICO COMPLETO (Corrigido para incluir alocadoEm e eventos) ---
+// --- HISTÓRICO COMPLETO (Corrigido para incluir alocadoEm e tabelas específicas) ---
 const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Busca eventos de RH (Admissão/Desligamento) - Tabela employee_events_history
+        // 1. Busca eventos de RH da tabela específica (employee_events_history)
+        // Usa LEFT JOIN se necessário, mas aqui faremos direto
         const [rhEvents] = await db.execute(
             "SELECT * FROM employee_events_history WHERE employeeId = ? ORDER BY eventDate DESC", [id]
         );
 
-        // 2. Busca histórico de Obras - Tabela obras_historico_veiculos
+        // 2. Busca histórico de Obras (obras_historico_veiculos)
+        // NOTA: Apesar do nome, esta tabela conecta funcionário a obra em alguns contextos legados
         const [obraHistory] = await db.execute(
             `SELECT h.*, o.nome as obraNome 
              FROM obras_historico_veiculos h
@@ -246,7 +244,7 @@ const getEmployeeHistory = async (req, res) => {
              ORDER BY h.dataEntrada DESC`, [id]
         );
 
-        // 3. Busca histórico de Alocação em Veículos (Tabela Nova)
+        // 3. Busca histórico de Alocação em Veículos (vehicle_operational_assignment)
         const [operationalHistory] = await db.execute(
             `SELECT a.*, v.placa, v.modelo, v.registroInterno 
              FROM vehicle_operational_assignment a
@@ -256,15 +254,19 @@ const getEmployeeHistory = async (req, res) => {
             [id]
         );
 
-        // 4. Busca Alocação Manual Legada (coluna alocadoEm)
-        const [employeeData] = await db.execute("SELECT alocadoEm, nome FROM employees WHERE id = ?", [id]);
+        // 4. Busca Alocação Manual Legada (coluna alocadoEm da tabela employees)
         let legacyAllocation = null;
-        if (employeeData.length > 0 && employeeData[0].alocadoEm) {
-            legacyAllocation = {
-                type: 'legado',
-                description: `Alocação Fixa/Manual: ${employeeData[0].alocadoEm}`,
-                date: new Date().toISOString() // Data atual apenas para referência
-            };
+        try {
+            const [employeeData] = await db.execute("SELECT alocadoEm FROM employees WHERE id = ?", [id]);
+            if (employeeData.length > 0 && employeeData[0].alocadoEm) {
+                legacyAllocation = {
+                    type: 'legado',
+                    description: `Alocação Fixa/Manual: ${employeeData[0].alocadoEm}`,
+                    date: new Date().toISOString() // Data referência
+                };
+            }
+        } catch (err) {
+            console.warn("Coluna alocadoEm pode não existir ou erro ao buscar:", err.message);
         }
 
         // Formata para o padrão unificado
