@@ -18,18 +18,26 @@ router.get('/me', authMiddleware, async (req, res) => {
     if (!userId) return res.status(401).json({ error: 'Token inválido.' });
 
     try {
-        const [rows] = await db.query('SELECT * FROM users WHERE id = ?', [userId]);
+        // CORREÇÃO: Busca campos novos de bloqueio e tentativas
+        const [rows] = await db.query(
+            `SELECT id, name, email, role, user_type, status, 
+                    canAccessRefueling, 
+                    bloqueado_abastecimento, 
+                    tentativas_falhas_abastecimento 
+             FROM users WHERE id = ?`, 
+            [userId]
+        );
         const user = rows[0];
 
         if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
-
-        delete user.password; 
 
         // Normalização de campos para o frontend
         const userProfile = {
             ...user,
             role: user.role || user.user_type, // Garante compatibilidade
             canAccessRefueling: user.canAccessRefueling === 1,
+            bloqueado_abastecimento: user.bloqueado_abastecimento === 1, // Garante booleano
+            tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento || 0
         };
 
         res.json(userProfile);

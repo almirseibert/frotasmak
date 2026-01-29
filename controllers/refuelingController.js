@@ -152,10 +152,7 @@ const uploadOrderPdf = async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
         }
-        
-        // Retorna a URL pública. O server.js serve 'public/uploads' em '/uploads'
         const fileUrl = `/uploads/orders/${req.file.filename}`;
-        
         res.json({ url: fileUrl });
     } catch (error) {
         console.error('Erro no upload do PDF:', error);
@@ -245,7 +242,6 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
-        // ATUALIZAÇÃO IMEDIATA DO VEÍCULO
         const vehicleUpdate = {};
         const newOdometro = safeNum(data.odometro);
         const newHorimetro = safeNum(data.horimetro);
@@ -301,11 +297,8 @@ const updateRefuelingOrder = async (req, res) => {
         if (data.status) updateData.status = data.status;
         
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
-        
-        // --- ALTERAÇÃO AQUI: Permitir atualizar litros abastecidos na edição ---
         if (data.litrosAbastecidos !== undefined) updateData.litrosAbastecidos = safeNum(data.litrosAbastecidos, true);
         if (data.litrosAbastecidosArla !== undefined) updateData.litrosAbastecidosArla = safeNum(data.litrosAbastecidosArla, true);
-        // ----------------------------------------------------------------------
 
         if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
         if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
@@ -480,12 +473,21 @@ const confirmRefuelingOrder = async (req, res) => {
         const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
         await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
 
+        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO ---
+        if (order.createdFromSolicitacaoId) {
+            await connection.execute(
+                'UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?',
+                [order.createdFromSolicitacaoId]
+            );
+        }
+        // -------------------------------------------
+
         if (order.obraId && order.partnerId && order.fuelType) {
             await updateMonthlyExpense(connection, order.obraId, order.partnerId, order.fuelType, order.data);
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'partners'] });
+        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'partners', 'solicitacoes'] });
         res.json({ message: 'Abastecimento confirmado com sucesso.' });
 
     } catch (error) {
@@ -512,12 +514,22 @@ const deleteRefuelingOrder = async (req, res) => {
 
         await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
 
+        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO ---
+        if (ref.createdFromSolicitacaoId) {
+            // Se a ordem foi excluída, marcamos a solicitação como NEGADA para que o usuário saiba que foi cancelada
+            await connection.execute(
+                'UPDATE solicitacoes_abastecimento SET status = "NEGADO", motivo_negativa = "Ordem Excluída Manualmente pelo Gestor" WHERE id = ?',
+                [ref.createdFromSolicitacaoId]
+            );
+        }
+        // -------------------------------------------
+
         if (ref.obraId && ref.partnerId && ref.fuelType) {
             await updateMonthlyExpense(connection, ref.obraId, ref.partnerId, ref.fuelType, ref.data);
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses'] });
+        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'solicitacoes'] });
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
@@ -535,6 +547,6 @@ module.exports = {
     updateRefuelingOrder,
     confirmRefuelingOrder,
     deleteRefuelingOrder,
-    upload,          // Middleware Multer
-    uploadOrderPdf   // Função Controller
+    upload,          
+    uploadOrderPdf   
 };

@@ -21,13 +21,18 @@ const login = async (req, res) => {
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
 
-        // --- VERIFICAÇÃO DE STATUS ---
-        // Verifica o campo 'status' para ver se está ativo
-        // Aceita 'ativo' (minúsculo ou maiúsculo) para compatibilidade
+        // --- VERIFICAÇÃO DE STATUS GERAL ---
         const status = user.status ? user.status.toLowerCase() : '';
-        
         if (status === 'inativo') {
             return res.status(403).json({ message: 'Sua conta aguarda aprovação do administrador.' });
+        }
+
+        // --- NOVA VERIFICAÇÃO: BLOQUEIO DE ABASTECIMENTO ---
+        // Regra: Se o usuário excedeu 3 tentativas falhas na solicitação, ele é travado.
+        if (user.bloqueado_abastecimento === 1) {
+            return res.status(403).json({ 
+                message: 'Usuário BLOQUEADO para abastecimentos. Entre em contato com o administrador para desbloqueio.' 
+            });
         }
 
         const isMatch = await bcrypt.compare(password, user.password);
@@ -48,10 +53,12 @@ const login = async (req, res) => {
         );
 
         res.json({ token, user: { 
+            id: user.id, // Importante retornar o ID para o front
             name: user.name, 
             email: user.email, 
             role: user.role || user.user_type,
-            canAccessRefueling: user.canAccessRefueling === 1
+            canAccessRefueling: user.canAccessRefueling === 1,
+            bloqueado_abastecimento: user.bloqueado_abastecimento // Retorna flag para UI
         }});
 
     } catch (error) {
@@ -80,21 +87,22 @@ const register = async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, salt);
         const newUserId = uuidv4();
 
-        // Insere na tabela USERS com status INATIVO
-        // CORREÇÃO: Removido 'user_status' que não existe na tabela. Usamos apenas 'status'.
+        // Insere na tabela USERS com status INATIVO e novos campos padrão
         await db.query(
             `INSERT INTO users (
                 id, name, email, password, 
                 role, user_type, 
                 status, 
                 canAccessRefueling, 
+                tentativas_falhas_abastecimento,
+                bloqueado_abastecimento,
                 data_criacao
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())`,
             [
                 newUserId, name, email, hashedPassword, 
-                'guest', 'guest', // Role e User Type inicial como guest
-                'inativo', // Status inativo
-                0 // canAccessRefueling false
+                'guest', 'guest', 
+                'inativo', 
+                0
             ] 
         );
 
@@ -102,7 +110,6 @@ const register = async (req, res) => {
 
     } catch (error) {
         console.error('Erro no registro:', error);
-        // Log detalhado do erro SQL se disponível
         if (error.sqlMessage) console.error('SQL Error:', error.sqlMessage);
         
         res.status(500).json({ message: 'Erro ao processar cadastro. Tente novamente.' });
