@@ -25,19 +25,53 @@ const cleanCpf = (cpf) => cpf ? cpf.replace(/\D/g, '') : '';
 // --- LISTAR TODOS ---
 const getAllEmployees = async (req, res) => {
     try {
+        // 1. Busca Funcionários
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
+
+        // 2. Busca datas de saída/fim de alocações passadas para calcular disponibilidade
+        // Busca última data de desmobilização de obras
+        const [lastObraDates] = await db.query(`
+            SELECT employeeId, MAX(dataSaida) as lastDate 
+            FROM obras_historico_veiculos 
+            WHERE dataSaida IS NOT NULL 
+            GROUP BY employeeId
+        `);
+        
+        // Busca última data de desmobilização de veículos operacionais
+        const [lastOpDates] = await db.query(`
+            SELECT employeeId, MAX(endDate) as lastDate 
+            FROM vehicle_operational_assignment 
+            WHERE endDate IS NOT NULL 
+            GROUP BY employeeId
+        `);
+
+        // Função auxiliar para achar a data mais recente entre as duas tabelas
+        const getLastAllocationDate = (empId) => {
+            const obraDateStr = lastObraDates.find(x => x.employeeId === empId)?.lastDate;
+            const opDateStr = lastOpDates.find(x => x.employeeId === empId)?.lastDate;
+            
+            if (!obraDateStr && !opDateStr) return null;
+            
+            const obraDate = obraDateStr ? new Date(obraDateStr) : new Date(0);
+            const opDate = opDateStr ? new Date(opDateStr) : new Date(0);
+            
+            return obraDate > opDate ? obraDate : opDate;
+        };
         
         const cleanRows = rows.map(emp => {
             let statusLimpo = emp.status;
-            // Correção para status sujo com JSON stringificado
             if (statusLimpo && typeof statusLimpo === 'string' && statusLimpo.includes('{')) {
                 try { statusLimpo = JSON.parse(statusLimpo).status || 'ativo'; } catch(e) { statusLimpo = 'ativo'; }
             }
 
+            // Pega a última data de alocação para calcular dias disponível
+            const lastAllocationEnd = getLastAllocationDate(emp.id);
+
             return {
                 ...emp,
                 status: statusLimpo || 'ativo',
-                alocadoEm: parseJsonSafe(emp.alocadoEm), // Importante para o frontend saber alocação manual
+                lastAllocationEnd: lastAllocationEnd, // Enviado para o frontend calcular os dias
+                alocadoEm: parseJsonSafe(emp.alocadoEm),
                 aso: parseJsonSafe(emp.aso),
                 epi: parseJsonSafe(emp.epi),
                 cnh: parseJsonSafe(emp.cnh) || { 
@@ -115,7 +149,6 @@ const createEmployee = async (req, res) => {
             ]
         );
 
-        // Criação automática de usuário se tiver CPF
         const cpfLimpo = cleanCpf(data.cpf);
         if (cpfLimpo) {
             const userEmail = `${cpfLimpo}@frotamak.com`;
@@ -175,7 +208,6 @@ const updateEmployee = async (req, res) => {
             aso, epi, cnhJson, certificados, data.dataDesligamento || null
         ];
 
-        // Proteção para não sobrescrever status com lixo, apenas string limpa
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
              statusUpdateClause = ", status = ?";
              params.push(data.status);
@@ -227,17 +259,12 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
-// --- HISTÓRICO COMPLETO (RESTAURADO) ---
+// --- HISTÓRICO COMPLETO (COM JOIN CORRIGIDO) ---
 const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Busca eventos de RH (Admissão, Desligamento)
-        const [rhEvents] = await db.execute(
-            "SELECT * FROM employee_events_history WHERE employeeId = ? ORDER BY eventDate DESC", [id]
-        );
-
-        // 2. Busca histórico de Obras (obras_historico_veiculos)
-        // Faz JOIN para trazer o nome da obra e do veículo
+        // 1. Busca histórico de Obras (obras_historico_veiculos)
+        // Faz JOIN para trazer o nome da obra e do veículo corretamente
         const [obraHistory] = await db.execute(
             `SELECT h.*, o.nome as obraNome, v.placa, v.modelo, v.registroInterno as veiculoRegistro
              FROM obras_historico_veiculos h
@@ -247,7 +274,7 @@ const getEmployeeHistory = async (req, res) => {
              ORDER BY h.dataEntrada DESC`, [id]
         );
 
-        // 3. Busca histórico de Alocação Operacional (vehicle_operational_assignment)
+        // 2. Busca histórico de Alocação Operacional (vehicle_operational_assignment)
         const [operationalHistory] = await db.execute(
             `SELECT a.*, v.placa, v.modelo, v.registroInterno 
              FROM vehicle_operational_assignment a
@@ -257,39 +284,14 @@ const getEmployeeHistory = async (req, res) => {
             [id]
         );
 
-        // 4. Busca Alocação Manual Legada (coluna alocadoEm da tabela employees)
-        let legacyAllocation = [];
-        try {
-            const [employeeData] = await db.execute("SELECT alocadoEm FROM employees WHERE id = ?", [id]);
-            if (employeeData.length > 0 && employeeData[0].alocadoEm) {
-                const alocadoEm = parseJsonSafe(employeeData[0].alocadoEm);
-                if (alocadoEm) {
-                    legacyAllocation.push({
-                        type: 'legado',
-                        description: typeof alocadoEm === 'string' ? alocadoEm : (alocadoEm.description || 'Alocação Manual Registrada'),
-                        date: new Date().toISOString()
-                    });
-                }
-            }
-        } catch (err) {
-            console.warn("Erro ao buscar alocadoEm:", err.message);
-        }
-
-        // Unifica os dados para o Frontend
+        // Retorna unificado para o frontend (que agora vai mostrar apenas o que interessa)
         const unifiedHistory = {
-            rh: rhEvents.map(e => ({
-                id: e.id,
-                type: 'rh',
-                date: e.eventDate,
-                description: e.eventType === 'desligamento' ? 'Desligamento' : (e.eventType === 'readmissao' ? 'Readmissão' : 'Evento RH'),
-                notes: e.notes
-            })),
             obras: obraHistory.map(h => ({
                 id: h.id,
                 type: 'obra',
                 obraNome: h.obraNome || 'Obra Desconhecida',
                 role: h.tipo || 'Alocação em Obra',
-                vehicleInfo: h.modelo ? `${h.modelo} (${h.veiculoRegistro})` : null,
+                vehicleInfo: h.modelo ? `RE: ${h.veiculoRegistro || 'S/N'} - ${h.modelo}` : null,
                 startDate: h.dataEntrada,
                 endDate: h.dataSaida
             })),
@@ -301,8 +303,7 @@ const getEmployeeHistory = async (req, res) => {
                 registroInterno: h.registroInterno,
                 assignedAt: h.startDate,
                 subGroup: h.subGroup
-            })),
-            outros: legacyAllocation
+            }))
         };
 
         res.json(unifiedHistory);
