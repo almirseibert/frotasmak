@@ -27,9 +27,7 @@ const getAllEmployees = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
         
-        // Processa para garantir que o frontend receba JSONs limpos
         const cleanRows = rows.map(emp => {
-            // Se o status for um JSON stringificado (bug antigo), limpa ele
             let statusLimpo = emp.status;
             if (statusLimpo && typeof statusLimpo === 'string' && statusLimpo.includes('{')) {
                 try { statusLimpo = JSON.parse(statusLimpo).status || 'ativo'; } catch(e) { statusLimpo = 'ativo'; }
@@ -40,7 +38,7 @@ const getAllEmployees = async (req, res) => {
                 status: statusLimpo || 'ativo',
                 aso: parseJsonSafe(emp.aso),
                 epi: parseJsonSafe(emp.epi),
-                cnh: parseJsonSafe(emp.cnh) || { // Garante que CNH tenha dados mesmo se vier das colunas planas
+                cnh: parseJsonSafe(emp.cnh) || { 
                     numero: emp.cnhNumero,
                     categoria: emp.cnhCategoria,
                     validade: emp.cnhVencimento
@@ -63,7 +61,6 @@ const getEmployeeById = async (req, res) => {
         if (rows.length === 0) return res.status(404).json({ error: 'Funcionário não encontrado' });
         
         const emp = rows[0];
-        // Tratamento similar ao getAll
         res.json({
             ...emp,
             aso: parseJsonSafe(emp.aso),
@@ -89,22 +86,18 @@ const createEmployee = async (req, res) => {
     try {
         const newId = uuidv4();
         
-        // Prepara JSONs
         const aso = JSON.stringify(data.aso || {});
         const epi = JSON.stringify(data.epi || {});
         const certificados = JSON.stringify(data.certificados || []);
         
-        // CNH: Salva tanto no JSON quanto nas colunas planas (Legado + Moderno)
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
-        // Usa os valores diretos se enviados, ou extrai do objeto cnh
         const cnhNumero = data.cnhNumero || cnhObj.numero || null;
         const cnhCategoria = data.cnhCategoria || cnhObj.categoria || null;
         const cnhVencimento = data.cnhVencimento || cnhObj.validade || null;
 
         const status = 'ativo';
 
-        // Query ajustada para incluir colunas CNH legadas
         await connection.execute(
             `INSERT INTO employees (
                 id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, telefone, contato, email, 
@@ -120,7 +113,6 @@ const createEmployee = async (req, res) => {
             ]
         );
 
-        // --- Criação Automática de Usuário (Mantida do código novo) ---
         const cpfLimpo = cleanCpf(data.cpf);
         if (cpfLimpo) {
             const userEmail = `${cpfLimpo}@frotamak.com`;
@@ -166,14 +158,12 @@ const updateEmployee = async (req, res) => {
         const epi = JSON.stringify(data.epi || {});
         const certificados = JSON.stringify(data.certificados || []);
         
-        // CNH Híbrida
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
         const cnhNumero = data.cnhNumero || cnhObj.numero || null;
         const cnhCategoria = data.cnhCategoria || cnhObj.categoria || null;
         const cnhVencimento = data.cnhVencimento || cnhObj.validade || null;
 
-        // Proteção de Status (Evita sobrescrever status com JSON sujo)
         let statusUpdateClause = "";
         let params = [
             data.nome, data.vulgo, data.registroInterno, data.cpf, data.rg, data.dataNascimento, data.funcao, 
@@ -183,14 +173,12 @@ const updateEmployee = async (req, res) => {
             aso, epi, cnhJson, certificados, data.dataDesligamento || null
         ];
 
-        // Se o payload vier com status explícito (string simples), atualizamos. 
-        // Se não, mantemos o que está no banco para evitar bugs.
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
              statusUpdateClause = ", status = ?";
              params.push(data.status);
         }
 
-        params.push(id); // ID para o WHERE
+        params.push(id);
 
         await connection.execute(
             `UPDATE employees SET 
@@ -204,7 +192,6 @@ const updateEmployee = async (req, res) => {
             params
         );
 
-        // Inativação de usuário se necessário
         if (data.status === 'inativo') {
             await connection.execute(
                 `UPDATE users SET status = 'inativo', canAccessRefueling = 0 WHERE employeeId = ?`,
@@ -237,16 +224,17 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
-// --- HISTÓRICO RESTAURADO (Lógica Antiga + Nova) ---
+// --- HISTÓRICO COMPLETO (Corrigido para incluir todas as fontes) ---
 const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Busca eventos de RH (Admissão/Desligamento) - Tabela Antiga
+        // 1. Busca eventos de RH (Admissão/Desligamento) - Tabela employee_events_history
         const [rhEvents] = await db.execute(
             "SELECT * FROM employee_events_history WHERE employeeId = ? ORDER BY eventDate DESC", [id]
         );
 
-        // 2. Busca histórico de Obras (Alocação em Obra) - Tabela Antiga
+        // 2. Busca histórico de Obras - Tabela obras_historico_veiculos
+        // (Nota: esta tabela muitas vezes liga employeeId a obra, mesmo que o nome tenha 'veiculos')
         const [obraHistory] = await db.execute(
             `SELECT h.*, o.nome as obraNome 
              FROM obras_historico_veiculos h
@@ -255,7 +243,7 @@ const getEmployeeHistory = async (req, res) => {
              ORDER BY h.dataEntrada DESC`, [id]
         );
 
-        // 3. Busca histórico Operacional (Alocação em Veículo/Subgrupo) - Tabela Nova
+        // 3. Busca histórico de Alocação em Veículos (Moderno)
         const [operationalHistory] = await db.execute(
             `SELECT a.*, v.placa, v.modelo, v.registroInterno 
              FROM vehicle_operational_assignment a
@@ -265,12 +253,24 @@ const getEmployeeHistory = async (req, res) => {
             [id]
         );
 
+        // 4. Busca Alocação Manual Legada (coluna alocadoEm da tabela employees)
+        // Alguns registros antigos podem ter apenas essa string
+        const [employeeData] = await db.execute("SELECT alocadoEm FROM employees WHERE id = ?", [id]);
+        let legacyAllocation = null;
+        if (employeeData.length > 0 && employeeData[0].alocadoEm) {
+            legacyAllocation = {
+                type: 'legado',
+                description: `Alocação Fixa/Manual: ${employeeData[0].alocadoEm}`,
+                date: new Date() // Data atual ou null, pois é um estado fixo
+            };
+        }
+
         // Formata para o padrão unificado
         const unifiedHistory = {
             rh: rhEvents.map(e => ({
                 type: 'rh',
                 date: e.eventDate,
-                description: e.eventType === 'desligamento' ? 'Desligamento' : 'Admissão/Readmissão',
+                description: e.eventType === 'desligamento' ? 'Desligamento' : (e.eventType === 'readmissao' ? 'Readmissão' : 'Evento RH'),
                 notes: e.notes
             })),
             obras: obraHistory.map(h => ({
@@ -287,17 +287,19 @@ const getEmployeeHistory = async (req, res) => {
                 registroInterno: h.registroInterno,
                 assignedAt: h.startDate,
                 subGroup: h.subGroup
-            }))
+            })),
+            outros: legacyAllocation ? [legacyAllocation] : []
         };
 
         res.json(unifiedHistory);
     } catch (error) {
         console.error("Erro histórico funcionário:", error);
-        res.status(500).json({ error: "Erro ao buscar histórico." });
+        // Não quebra a requisição se uma coluna específica (como alocadoEm) não existir
+        res.status(500).json({ error: "Erro ao buscar histórico completo." });
     }
 };
 
-// --- ATUALIZAR STATUS (MANTIDO DO ANTIGO) ---
+// --- ATUALIZAR STATUS ---
 const updateEmployeeStatus = async (req, res) => {
     const { id } = req.params;
     const { status, date } = req.body;
@@ -314,13 +316,11 @@ const updateEmployeeStatus = async (req, res) => {
         let notes = '';
 
         if (status === 'ativo') {
-            // Readmissão: Atualiza dataAdmissao e limpa desligamento
             queryEmployee = 'UPDATE employees SET status = ?, dataAdmissao = ?, dataDesligamento = NULL WHERE id = ?';
             paramsEmployee = ['ativo', date, id];
             eventType = 'readmissao';
             notes = 'Funcionário readmitido via Sistema.';
         } else {
-            // Desligamento
             queryEmployee = 'UPDATE employees SET status = ?, dataDesligamento = ? WHERE id = ?';
             paramsEmployee = ['inativo', date, id];
             eventType = 'desligamento';
@@ -355,7 +355,6 @@ const updateEmployeeStatus = async (req, res) => {
     }
 };
 
-// --- SYNC USERS (MANTIDO) ---
 const syncActiveEmployeesToUsers = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
