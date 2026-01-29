@@ -4,8 +4,10 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const db = require('./database');
-const http = require('http'); 
-const { Server } = require("socket.io"); 
+const http = require('http'); // <--- 1. Importar módulo HTTP nativo
+const { Server } = require("socket.io"); // <--- 2. Importar Socket.io
+
+// Importa o multer
 const multer = require('multer');
 
 // Middlewares
@@ -32,20 +34,22 @@ const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const tireRoutes = require('./routes/tireRoutes');
-const billingRoutes = require('./routes/billingRoutes');
 
-// --- NOVAS ROTAS (FUNCIONALIDADE SOLICITAÇÃO ABASTECIMENTO) ---
-// Certifique-se de criar este arquivo na próxima etapa
-const solicitacaoRoutes = require('./routes/solicitacaoRoutes'); 
+// --- NOVAS ROTAS ---
+// Certifique-se de que estes arquivos existem no diretório 'routes'
+const solicitacaoRoutes = require('./routes/solicitacaoRoutes');
+const billingRoutes = require('./routes/billingRoutes');
 
 const app = express();
 const port = process.env.PORT || 3001;
 
+// <--- 3. Criar o servidor HTTP explicitamente usando o app do Express
 const server = http.createServer(app);
 
+// <--- 4. Configurar o Socket.io com CORS (Permite conexão do Frontend)
 const io = new Server(server, {
     cors: {
-        origin: "*", 
+        origin: "*", // Aceita conexões de qualquer origem (ideal para dev/fases iniciais)
         methods: ["GET", "POST", "PUT", "DELETE"]
     }
 });
@@ -55,7 +59,7 @@ app.use(express.json());
 
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
-// Middleware Socket.io
+// <--- 5. Middleware para disponibilizar o 'io' em todas as requisições (req.io)
 app.use((req, res, next) => {
     req.io = io;
     next();
@@ -96,22 +100,23 @@ apiRouter.use('/expenses', expensesRoutes);
 apiRouter.use('/users', userRoutes);
 apiRouter.use('/updates', updateRoutes);
 apiRouter.use('/tires', tireRoutes);
-apiRouter.use('/billing', billingRoutes);
 
-// --- REGISTRO DA ROTA DE SOLICITAÇÃO DE ABASTECIMENTO ---
+// --- REGISTRO DAS NOVAS ROTAS ---
+apiRouter.use('/billing', billingRoutes);
 apiRouter.use('/solicitacoes', solicitacaoRoutes);
 
 app.use('/api', apiRouter);
 
-// Socket Connection Log
+// <--- 6. (Opcional) Log de conexões Socket para Debug
 io.on('connection', (socket) => {
     console.log('🔌 Cliente conectado via Socket:', socket.id);
+    
     socket.on('disconnect', () => {
         console.log('❌ Cliente desconectado:', socket.id);
     });
 });
 
-// DB Check
+// Inicialização do Banco de Dados (Verificação de Conexão Apenas)
 db.getConnection()
     .then(connection => {
         console.log('Conexão com o banco de dados estabelecida com sucesso!');
@@ -121,6 +126,9 @@ db.getConnection()
         console.error('Erro ao conectar ao banco de dados:', err.stack);
     });
 
+// <--- 7. IMPORTANTE: Mude app.listen para server.listen
 server.listen(port, () => {
     console.log(`🚀 Servidor rodando (HTTP + Socket.io) na porta ${port}`);
+    console.log(`- Rotas de Billing registradas em /api/billing`);
+    console.log(`- Rotas de Solicitações registradas em /api/solicitacoes`);
 });
