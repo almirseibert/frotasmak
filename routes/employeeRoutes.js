@@ -5,6 +5,10 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 router.use(authMiddleware);
 
+// --- ROTA DE MIGRAÇÃO (SINCRONIZAÇÃO) ---
+// Deve vir antes das rotas com :id para evitar conflito
+router.post('/sync-users', employeeController.syncActiveEmployeesToUsers);
+
 // Rotas CRUD padrão
 router.get('/', employeeController.getAllEmployees);
 router.get('/:id', employeeController.getEmployeeById);
