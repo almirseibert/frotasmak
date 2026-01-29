@@ -28,6 +28,7 @@ const getAllEmployees = async (req, res) => {
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
         
         const cleanRows = rows.map(emp => {
+            // Tratamento para status que venha como JSON incorreto
             let statusLimpo = emp.status;
             if (statusLimpo && typeof statusLimpo === 'string' && statusLimpo.includes('{')) {
                 try { statusLimpo = JSON.parse(statusLimpo).status || 'ativo'; } catch(e) { statusLimpo = 'ativo'; }
@@ -90,6 +91,7 @@ const createEmployee = async (req, res) => {
         const epi = JSON.stringify(data.epi || {});
         const certificados = JSON.stringify(data.certificados || []);
         
+        // CNH Híbrida: Salva no JSON e nas colunas antigas
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
         const cnhNumero = data.cnhNumero || cnhObj.numero || null;
@@ -113,6 +115,7 @@ const createEmployee = async (req, res) => {
             ]
         );
 
+        // Cria usuário automaticamente
         const cpfLimpo = cleanCpf(data.cpf);
         if (cpfLimpo) {
             const userEmail = `${cpfLimpo}@frotamak.com`;
@@ -173,6 +176,7 @@ const updateEmployee = async (req, res) => {
             aso, epi, cnhJson, certificados, data.dataDesligamento || null
         ];
 
+        // Atualiza status apenas se vier uma string limpa
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
              statusUpdateClause = ", status = ?";
              params.push(data.status);
@@ -224,7 +228,7 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
-// --- HISTÓRICO COMPLETO (Corrigido para incluir todas as fontes) ---
+// --- HISTÓRICO COMPLETO (Corrigido para incluir alocadoEm e eventos) ---
 const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
@@ -234,7 +238,6 @@ const getEmployeeHistory = async (req, res) => {
         );
 
         // 2. Busca histórico de Obras - Tabela obras_historico_veiculos
-        // (Nota: esta tabela muitas vezes liga employeeId a obra, mesmo que o nome tenha 'veiculos')
         const [obraHistory] = await db.execute(
             `SELECT h.*, o.nome as obraNome 
              FROM obras_historico_veiculos h
@@ -243,7 +246,7 @@ const getEmployeeHistory = async (req, res) => {
              ORDER BY h.dataEntrada DESC`, [id]
         );
 
-        // 3. Busca histórico de Alocação em Veículos (Moderno)
+        // 3. Busca histórico de Alocação em Veículos (Tabela Nova)
         const [operationalHistory] = await db.execute(
             `SELECT a.*, v.placa, v.modelo, v.registroInterno 
              FROM vehicle_operational_assignment a
@@ -253,15 +256,14 @@ const getEmployeeHistory = async (req, res) => {
             [id]
         );
 
-        // 4. Busca Alocação Manual Legada (coluna alocadoEm da tabela employees)
-        // Alguns registros antigos podem ter apenas essa string
-        const [employeeData] = await db.execute("SELECT alocadoEm FROM employees WHERE id = ?", [id]);
+        // 4. Busca Alocação Manual Legada (coluna alocadoEm)
+        const [employeeData] = await db.execute("SELECT alocadoEm, nome FROM employees WHERE id = ?", [id]);
         let legacyAllocation = null;
         if (employeeData.length > 0 && employeeData[0].alocadoEm) {
             legacyAllocation = {
                 type: 'legado',
                 description: `Alocação Fixa/Manual: ${employeeData[0].alocadoEm}`,
-                date: new Date() // Data atual ou null, pois é um estado fixo
+                date: new Date().toISOString() // Data atual apenas para referência
             };
         }
 
@@ -294,7 +296,6 @@ const getEmployeeHistory = async (req, res) => {
         res.json(unifiedHistory);
     } catch (error) {
         console.error("Erro histórico funcionário:", error);
-        // Não quebra a requisição se uma coluna específica (como alocadoEm) não existir
         res.status(500).json({ error: "Erro ao buscar histórico completo." });
     }
 };
