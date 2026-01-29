@@ -25,11 +25,11 @@ const cleanCpf = (cpf) => cpf ? cpf.replace(/\D/g, '') : '';
 // --- LISTAR TODOS ---
 const getAllEmployees = async (req, res) => {
     try {
-        // Seleciona * para pegar inclusive alocadoEm se existir
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
         
         const cleanRows = rows.map(emp => {
             let statusLimpo = emp.status;
+            // Correção para status sujo com JSON stringificado
             if (statusLimpo && typeof statusLimpo === 'string' && statusLimpo.includes('{')) {
                 try { statusLimpo = JSON.parse(statusLimpo).status || 'ativo'; } catch(e) { statusLimpo = 'ativo'; }
             }
@@ -37,6 +37,7 @@ const getAllEmployees = async (req, res) => {
             return {
                 ...emp,
                 status: statusLimpo || 'ativo',
+                alocadoEm: parseJsonSafe(emp.alocadoEm), // Importante para o frontend saber alocação manual
                 aso: parseJsonSafe(emp.aso),
                 epi: parseJsonSafe(emp.epi),
                 cnh: parseJsonSafe(emp.cnh) || { 
@@ -114,6 +115,7 @@ const createEmployee = async (req, res) => {
             ]
         );
 
+        // Criação automática de usuário se tiver CPF
         const cpfLimpo = cleanCpf(data.cpf);
         if (cpfLimpo) {
             const userEmail = `${cpfLimpo}@frotamak.com`;
@@ -173,6 +175,7 @@ const updateEmployee = async (req, res) => {
             aso, epi, cnhJson, certificados, data.dataDesligamento || null
         ];
 
+        // Proteção para não sobrescrever status com lixo, apenas string limpa
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
              statusUpdateClause = ", status = ?";
              params.push(data.status);
@@ -224,27 +227,27 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
-// --- HISTÓRICO COMPLETO (Corrigido para incluir alocadoEm e tabelas específicas) ---
+// --- HISTÓRICO COMPLETO (RESTAURADO) ---
 const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Busca eventos de RH da tabela específica (employee_events_history)
-        // Usa LEFT JOIN se necessário, mas aqui faremos direto
+        // 1. Busca eventos de RH (Admissão, Desligamento)
         const [rhEvents] = await db.execute(
             "SELECT * FROM employee_events_history WHERE employeeId = ? ORDER BY eventDate DESC", [id]
         );
 
         // 2. Busca histórico de Obras (obras_historico_veiculos)
-        // NOTA: Apesar do nome, esta tabela conecta funcionário a obra em alguns contextos legados
+        // Faz JOIN para trazer o nome da obra e do veículo
         const [obraHistory] = await db.execute(
-            `SELECT h.*, o.nome as obraNome 
+            `SELECT h.*, o.nome as obraNome, v.placa, v.modelo, v.registroInterno as veiculoRegistro
              FROM obras_historico_veiculos h
              LEFT JOIN obras o ON h.obraId = o.id
+             LEFT JOIN vehicles v ON h.veiculoId = v.id
              WHERE h.employeeId = ? 
              ORDER BY h.dataEntrada DESC`, [id]
         );
 
-        // 3. Busca histórico de Alocação em Veículos (vehicle_operational_assignment)
+        // 3. Busca histórico de Alocação Operacional (vehicle_operational_assignment)
         const [operationalHistory] = await db.execute(
             `SELECT a.*, v.placa, v.modelo, v.registroInterno 
              FROM vehicle_operational_assignment a
@@ -255,36 +258,43 @@ const getEmployeeHistory = async (req, res) => {
         );
 
         // 4. Busca Alocação Manual Legada (coluna alocadoEm da tabela employees)
-        let legacyAllocation = null;
+        let legacyAllocation = [];
         try {
             const [employeeData] = await db.execute("SELECT alocadoEm FROM employees WHERE id = ?", [id]);
             if (employeeData.length > 0 && employeeData[0].alocadoEm) {
-                legacyAllocation = {
-                    type: 'legado',
-                    description: `Alocação Fixa/Manual: ${employeeData[0].alocadoEm}`,
-                    date: new Date().toISOString() // Data referência
-                };
+                const alocadoEm = parseJsonSafe(employeeData[0].alocadoEm);
+                if (alocadoEm) {
+                    legacyAllocation.push({
+                        type: 'legado',
+                        description: typeof alocadoEm === 'string' ? alocadoEm : (alocadoEm.description || 'Alocação Manual Registrada'),
+                        date: new Date().toISOString()
+                    });
+                }
             }
         } catch (err) {
-            console.warn("Coluna alocadoEm pode não existir ou erro ao buscar:", err.message);
+            console.warn("Erro ao buscar alocadoEm:", err.message);
         }
 
-        // Formata para o padrão unificado
+        // Unifica os dados para o Frontend
         const unifiedHistory = {
             rh: rhEvents.map(e => ({
+                id: e.id,
                 type: 'rh',
                 date: e.eventDate,
                 description: e.eventType === 'desligamento' ? 'Desligamento' : (e.eventType === 'readmissao' ? 'Readmissão' : 'Evento RH'),
                 notes: e.notes
             })),
             obras: obraHistory.map(h => ({
+                id: h.id,
                 type: 'obra',
                 obraNome: h.obraNome || 'Obra Desconhecida',
-                role: h.tipo || 'Alocação',
+                role: h.tipo || 'Alocação em Obra',
+                vehicleInfo: h.modelo ? `${h.modelo} (${h.veiculoRegistro})` : null,
                 startDate: h.dataEntrada,
                 endDate: h.dataSaida
             })),
             veiculos: operationalHistory.map(h => ({
+                id: h.id,
                 type: 'veiculo',
                 modelo: h.modelo,
                 placa: h.placa,
@@ -292,7 +302,7 @@ const getEmployeeHistory = async (req, res) => {
                 assignedAt: h.startDate,
                 subGroup: h.subGroup
             })),
-            outros: legacyAllocation ? [legacyAllocation] : []
+            outros: legacyAllocation
         };
 
         res.json(unifiedHistory);
