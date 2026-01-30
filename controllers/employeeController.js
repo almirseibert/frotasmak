@@ -438,7 +438,7 @@ const syncActiveEmployeesToUsers = async (req, res) => {
                 const hash = await bcrypt.hash(cpfLimpo, 10);
                 await connection.execute(
                     `INSERT INTO users (id, name, email, password, role, user_type, status, canAccessRefueling, employeeId, data_criacao) 
-                     VALUES (?, ?, ?, ?, 'user', 'user', 'ativo', 1, ?, NOW())`,
+                     VALUES (?, ?, ?, ?, 'operador', 'operador', 'ativo', 1, ?, NOW())`,
                     [newUserId, emp.nome, userEmail, hash, emp.id]
                 );
                 count++;
