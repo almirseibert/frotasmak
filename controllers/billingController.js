@@ -59,8 +59,22 @@ const upsertDailyLog = async (req, res) => {
     }
 
     try {
-        // Se tem ID, é atualização
-        if (data.id) {
+        // --- LÓGICA ANTI-DUPLICAÇÃO ---
+        // Se não veio ID no payload, verificamos se JÁ EXISTE um registo para este veículo nesta data.
+        let targetId = data.id;
+
+        if (!targetId) {
+            const checkQuery = 'SELECT id FROM daily_work_logs WHERE vehicleId = ? AND date = ? LIMIT 1';
+            const [existing] = await db.query(checkQuery, [data.vehicleId, data.date]);
+            
+            if (existing && existing.length > 0) {
+                // Se encontrou, assumimos o ID existente para fazer UPDATE em vez de INSERT
+                targetId = existing[0].id;
+            }
+        }
+
+        // Se tem ID (vinda do front ou descoberta acima), é ATUALIZAÇÃO
+        if (targetId) {
             const query = `
                 UPDATE daily_work_logs 
                 SET vehicleId = ?, employeeId = ?, date = ?, 
@@ -78,16 +92,16 @@ const upsertDailyLog = async (req, res) => {
                 data.afternoonEnd || null, 
                 data.totalHours || 0, 
                 data.observation || null,
-                data.id
+                targetId // Usa o ID descoberto ou fornecido
             ]);
             
             // EMITIR EVENTO SOCKET.IO
             if (req.io) req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
 
-            res.json({ message: 'Registro atualizado com sucesso.' });
+            res.json({ message: 'Registro atualizado com sucesso.', id: targetId });
 
         } else {
-            // Criação
+            // Criação (apenas se realmente não existir)
             const newId = uuidv4();
             const { 
                 obraId, vehicleId, employeeId, date, 
