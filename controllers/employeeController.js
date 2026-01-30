@@ -51,7 +51,7 @@ const getAllEmployees = async (req, res) => {
 
             // C. Popula o mapa de alocações
             [...activeObraAllocations, ...activeOpAllocations].forEach(alloc => {
-                const desc = alloc.registroInterno ? `RE: ${alloc.registroInterno}` : (alloc.placa || alloc.modelo);
+                const desc = alloc.registroInterno ? `${alloc.registroInterno}` : (alloc.placa || alloc.modelo);
                 
                 if (!allocationMap[alloc.employeeId]) {
                     allocationMap[alloc.employeeId] = [];
@@ -344,7 +344,7 @@ const getEmployeeHistory = async (req, res) => {
                 type: 'obra',
                 obraNome: h.obraNome || 'Obra Desconhecida',
                 role: h.tipo || 'Alocação',
-                vehicleInfo: h.modelo ? `RE: ${h.veiculoRegistro || 'S/N'} - ${h.modelo}` : null,
+                vehicleInfo: h.modelo ? `${h.veiculoRegistro || 'S/N'} - ${h.modelo}` : null,
                 startDate: h.dataEntrada,
                 endDate: h.dataSaida
             })),
