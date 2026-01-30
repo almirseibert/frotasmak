@@ -25,30 +25,42 @@ const cleanCpf = (cpf) => cpf ? cpf.replace(/\D/g, '') : '';
 // --- LISTAR TODOS ---
 const getAllEmployees = async (req, res) => {
     try {
-        // 1. Busca Funcionários
+        // 1. Busca Funcionários (Principal)
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
 
         // 2. Busca datas de saída/fim de alocações passadas para calcular disponibilidade
-        // Busca última data de desmobilização de obras
-        const [lastObraDates] = await db.query(`
-            SELECT employeeId, MAX(dataSaida) as lastDate 
-            FROM obras_historico_veiculos 
-            WHERE dataSaida IS NOT NULL 
-            GROUP BY employeeId
-        `);
-        
-        // Busca última data de desmobilização de veículos operacionais
-        const [lastOpDates] = await db.query(`
-            SELECT employeeId, MAX(endDate) as lastDate 
-            FROM vehicle_operational_assignment 
-            WHERE endDate IS NOT NULL 
-            GROUP BY employeeId
-        `);
+        // Envolvido em try/catch para não quebrar a página se a tabela estiver vazia ou com erro
+        let lastObraDates = [];
+        let lastOpDates = [];
+
+        try {
+            const [obraRes] = await db.query(`
+                SELECT employeeId, MAX(dataSaida) as lastDate 
+                FROM obras_historico_veiculos 
+                WHERE dataSaida IS NOT NULL 
+                GROUP BY employeeId
+            `);
+            lastObraDates = obraRes;
+        } catch (err) {
+            console.warn("Aviso: Não foi possível buscar datas de obras:", err.message);
+        }
+
+        try {
+            const [opRes] = await db.query(`
+                SELECT employeeId, MAX(endDate) as lastDate 
+                FROM vehicle_operational_assignment 
+                WHERE endDate IS NOT NULL 
+                GROUP BY employeeId
+            `);
+            lastOpDates = opRes;
+        } catch (err) {
+            console.warn("Aviso: Não foi possível buscar datas operacionais:", err.message);
+        }
 
         // Função auxiliar para achar a data mais recente entre as duas tabelas
         const getLastAllocationDate = (empId) => {
-            const obraDateStr = lastObraDates.find(x => x.employeeId === empId)?.lastDate;
-            const opDateStr = lastOpDates.find(x => x.employeeId === empId)?.lastDate;
+            const obraDateStr = lastObraDates.find(x => String(x.employeeId) === String(empId))?.lastDate;
+            const opDateStr = lastOpDates.find(x => String(x.employeeId) === String(empId))?.lastDate;
             
             if (!obraDateStr && !opDateStr) return null;
             
@@ -86,6 +98,7 @@ const getAllEmployees = async (req, res) => {
         res.json(cleanRows);
     } catch (error) {
         console.error('Erro ao buscar funcionários:', error);
+        // Mesmo com erro, tenta retornar algo legível ou status 500
         res.status(500).json({ error: 'Erro ao buscar dados.' });
     }
 };
@@ -259,38 +272,43 @@ const deleteEmployee = async (req, res) => {
     }
 };
 
-// --- HISTÓRICO COMPLETO (COM JOIN CORRIGIDO) ---
+// --- HISTÓRICO COMPLETO ---
 const getEmployeeHistory = async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Busca histórico de Obras (obras_historico_veiculos)
-        // Faz JOIN para trazer o nome da obra e do veículo corretamente
-        const [obraHistory] = await db.execute(
-            `SELECT h.*, o.nome as obraNome, v.placa, v.modelo, v.registroInterno as veiculoRegistro
-             FROM obras_historico_veiculos h
-             LEFT JOIN obras o ON h.obraId = o.id
-             LEFT JOIN vehicles v ON h.veiculoId = v.id
-             WHERE h.employeeId = ? 
-             ORDER BY h.dataEntrada DESC`, [id]
-        );
+        let obraHistory = [];
+        let operationalHistory = [];
 
-        // 2. Busca histórico de Alocação Operacional (vehicle_operational_assignment)
-        const [operationalHistory] = await db.execute(
-            `SELECT a.*, v.placa, v.modelo, v.registroInterno 
-             FROM vehicle_operational_assignment a
-             LEFT JOIN vehicles v ON a.vehicleId = v.id
-             WHERE a.employeeId = ?
-             ORDER BY a.startDate DESC`,
-            [id]
-        );
+        // Proteção contra falhas nas tabelas
+        try {
+            const [rows] = await db.execute(
+                `SELECT h.*, o.nome as obraNome, v.placa, v.modelo, v.registroInterno as veiculoRegistro
+                 FROM obras_historico_veiculos h
+                 LEFT JOIN obras o ON h.obraId = o.id
+                 LEFT JOIN vehicles v ON h.veiculoId = v.id
+                 WHERE h.employeeId = ? 
+                 ORDER BY h.dataEntrada DESC`, [id]
+            );
+            obraHistory = rows;
+        } catch (e) { console.warn("Erro ao buscar histórico obras:", e.message); }
 
-        // Retorna unificado para o frontend (que agora vai mostrar apenas o que interessa)
+        try {
+            const [rows] = await db.execute(
+                `SELECT a.*, v.placa, v.modelo, v.registroInterno 
+                 FROM vehicle_operational_assignment a
+                 LEFT JOIN vehicles v ON a.vehicleId = v.id
+                 WHERE a.employeeId = ?
+                 ORDER BY a.startDate DESC`, [id]
+            );
+            operationalHistory = rows;
+        } catch (e) { console.warn("Erro ao buscar histórico operacional:", e.message); }
+
         const unifiedHistory = {
             obras: obraHistory.map(h => ({
                 id: h.id,
                 type: 'obra',
                 obraNome: h.obraNome || 'Obra Desconhecida',
-                role: h.tipo || 'Alocação em Obra',
+                role: h.tipo || 'Alocação',
                 vehicleInfo: h.modelo ? `RE: ${h.veiculoRegistro || 'S/N'} - ${h.modelo}` : null,
                 startDate: h.dataEntrada,
                 endDate: h.dataSaida
