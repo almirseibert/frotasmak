@@ -28,8 +28,45 @@ const getAllEmployees = async (req, res) => {
         // 1. Busca Funcionários (Principal)
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
 
-        // 2. Busca datas de saída/fim de alocações passadas para calcular disponibilidade
-        // Envolvido em try/catch para não quebrar a página se a tabela estiver vazia ou com erro
+        // 2. Busca ALOCAÇÕES ATIVAS (Para exibir o RE correto na listagem)
+        // Isso cruza dados de Obras e Operacional para saber onde o funcionário está AGORA.
+        let allocationMap = {};
+
+        try {
+            // A. Busca alocações em Obras (onde dataSaida é NULL)
+            const [activeObraAllocations] = await db.query(`
+                SELECT h.employeeId, v.registroInterno, v.modelo, v.placa, o.nome as obraNome
+                FROM obras_historico_veiculos h
+                INNER JOIN vehicles v ON h.veiculoId = v.id
+                LEFT JOIN obras o ON h.obraId = o.id
+                WHERE h.dataSaida IS NULL
+            `);
+
+            // B. Busca alocações Operacionais (Tabela vehicle_operational_assignment)
+            const [activeOpAllocations] = await db.query(`
+                SELECT a.employeeId, v.registroInterno, v.modelo, v.placa, 'Operacional' as subGroup
+                FROM vehicle_operational_assignment a
+                INNER JOIN vehicles v ON a.vehicleId = v.id
+            `);
+
+            // C. Popula o mapa de alocações
+            [...activeObraAllocations, ...activeOpAllocations].forEach(alloc => {
+                const desc = alloc.registroInterno ? `RE: ${alloc.registroInterno}` : (alloc.placa || alloc.modelo);
+                
+                if (!allocationMap[alloc.employeeId]) {
+                    allocationMap[alloc.employeeId] = [];
+                }
+                // Evita duplicatas se o banco estiver sujo
+                if (!allocationMap[alloc.employeeId].includes(desc)) {
+                    allocationMap[alloc.employeeId].push(desc);
+                }
+            });
+
+        } catch (err) {
+            console.warn("Aviso: Erro ao buscar alocações ativas:", err.message);
+        }
+
+        // 3. Busca datas para cálculo de disponibilidade (Lógica antiga mantida)
         let lastObraDates = [];
         let lastOpDates = [];
 
@@ -41,9 +78,7 @@ const getAllEmployees = async (req, res) => {
                 GROUP BY employeeId
             `);
             lastObraDates = obraRes;
-        } catch (err) {
-            console.warn("Aviso: Não foi possível buscar datas de obras:", err.message);
-        }
+        } catch (err) { console.warn("Aviso data obra:", err.message); }
 
         try {
             const [opRes] = await db.query(`
@@ -52,12 +87,9 @@ const getAllEmployees = async (req, res) => {
                 WHERE endDate IS NOT NULL 
                 GROUP BY employeeId
             `);
-            lastOpDates = opRes;
-        } catch (err) {
-            console.warn("Aviso: Não foi possível buscar datas operacionais:", err.message);
-        }
+            lastOpDates = opRes; // Nota: vehicle_operational_assignment pode não ter endDate dependendo da versão, mas mantive a query
+        } catch (err) { /* Silencia erro se tabela não tiver endDate */ }
 
-        // Função auxiliar para achar a data mais recente entre as duas tabelas
         const getLastAllocationDate = (empId) => {
             const obraDateStr = lastObraDates.find(x => String(x.employeeId) === String(empId))?.lastDate;
             const opDateStr = lastOpDates.find(x => String(x.employeeId) === String(empId))?.lastDate;
@@ -76,13 +108,17 @@ const getAllEmployees = async (req, res) => {
                 try { statusLimpo = JSON.parse(statusLimpo).status || 'ativo'; } catch(e) { statusLimpo = 'ativo'; }
             }
 
-            // Pega a última data de alocação para calcular dias disponível
-            const lastAllocationEnd = getLastAllocationDate(emp.id);
+            const currentAllocations = allocationMap[emp.id];
+            const allocationData = {
+                isAllocated: !!currentAllocations,
+                description: currentAllocations ? currentAllocations.join(', ') : null
+            };
 
             return {
                 ...emp,
                 status: statusLimpo || 'ativo',
-                lastAllocationEnd: lastAllocationEnd, // Enviado para o frontend calcular os dias
+                lastAllocationEnd: getLastAllocationDate(emp.id),
+                alocacaoAtual: allocationData, // Novo campo enviado ao frontend
                 alocadoEm: parseJsonSafe(emp.alocadoEm),
                 aso: parseJsonSafe(emp.aso),
                 epi: parseJsonSafe(emp.epi),
@@ -98,7 +134,6 @@ const getAllEmployees = async (req, res) => {
         res.json(cleanRows);
     } catch (error) {
         console.error('Erro ao buscar funcionários:', error);
-        // Mesmo com erro, tenta retornar algo legível ou status 500
         res.status(500).json({ error: 'Erro ao buscar dados.' });
     }
 };
