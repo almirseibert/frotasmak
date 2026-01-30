@@ -39,10 +39,51 @@ const getDailyLogs = async (req, res) => {
             query += ' WHERE ' + conditions.join(' AND ');
         }
 
-        query += ' ORDER BY l.date DESC, v.registroInterno ASC';
+        // NOTA: Removemos o ORDER BY do SQL para fazer a ordenação e limpeza no JS
+        // Isso garante que peguemos os dados brutos para filtrar duplicatas
 
         const [rows] = await db.query(query, params);
-        res.json(rows);
+
+        // --- LÓGICA DE DEDUPLICAÇÃO (Limpeza Visual) ---
+        // Cria um mapa onde a CHAVE é "ID_Veiculo + Data"
+        // Se houver duplicatas, o último lido (teoricamente o último inserido) sobrescreve o anterior.
+        const uniqueMap = new Map();
+
+        rows.forEach(row => {
+            // Garante que a data seja uma string YYYY-MM-DD para a chave
+            let dateStr = row.date;
+            if (row.date instanceof Date) {
+                 dateStr = row.date.toISOString().split('T')[0];
+            } else if (typeof row.date === 'string' && row.date.includes('T')) {
+                 dateStr = row.date.split('T')[0];
+            }
+
+            const key = `${row.vehicleId}-${dateStr}`;
+            
+            // Sobrescreve sempre. Assim, se existirem 3 registros do mesmo dia,
+            // ficará apenas o último processado na lista.
+            uniqueMap.set(key, row);
+        });
+
+        // Converte o mapa de volta para array (agora sem duplicatas)
+        const uniqueRows = Array.from(uniqueMap.values());
+
+        // --- REORDENAÇÃO ---
+        // Como removemos o ORDER BY do SQL e usamos Map, precisamos reordenar agora
+        uniqueRows.sort((a, b) => {
+            const dateA = new Date(a.date);
+            const dateB = new Date(b.date);
+            
+            // 1. Data Decrescente (Mais recente primeiro)
+            if (dateB - dateA !== 0) return dateB - dateA;
+            
+            // 2. Registro Interno Crescente (A-Z)
+            const regA = a.registroInterno || '';
+            const regB = b.registroInterno || '';
+            return regA.localeCompare(regB);
+        });
+
+        res.json(uniqueRows);
 
     } catch (error) {
         console.error('Erro ao buscar logs diários:', error);
@@ -59,11 +100,12 @@ const upsertDailyLog = async (req, res) => {
     }
 
     try {
-        // --- LÓGICA ANTI-DUPLICAÇÃO ---
-        // Se não veio ID no payload, verificamos se JÁ EXISTE um registo para este veículo nesta data.
+        // --- LÓGICA ANTI-DUPLICAÇÃO (Proteção de Escrita) ---
+        // Se não veio ID no payload, verificamos se JÁ EXISTE um registro para este veículo nesta data.
         let targetId = data.id;
 
         if (!targetId) {
+            // Verifica duplicidade no banco
             const checkQuery = 'SELECT id FROM daily_work_logs WHERE vehicleId = ? AND date = ? LIMIT 1';
             const [existing] = await db.query(checkQuery, [data.vehicleId, data.date]);
             
@@ -101,7 +143,7 @@ const upsertDailyLog = async (req, res) => {
             res.json({ message: 'Registro atualizado com sucesso.', id: targetId });
 
         } else {
-            // Criação (apenas se realmente não existir)
+            // Criação (apenas se realmente não existir e não foi encontrado acima)
             const newId = uuidv4();
             const { 
                 obraId, vehicleId, employeeId, date, 
