@@ -53,7 +53,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage: storage });
 
-// --- HELPERS EXISTENTES ---
+// --- HELPERS ---
 const safeNum = (val, returnZero = false) => {
     if (val === null || typeof val === 'undefined' || val === '') {
         return returnZero ? 0 : null;
@@ -112,6 +112,7 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
           AND partnerId = ? 
           AND fuelType = ?
           AND data BETWEEN ? AND ?
+          AND status = 'Concluída' -- Importante: Somar apenas concluídas para não duplicar valores pendentes
     `;
 
     const [rows] = await connection.execute(querySum, [obraId, partnerId, fuelType, startDate, endDate]);
@@ -146,7 +147,7 @@ const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dat
     }
 };
 
-// --- CONTROLLER DE UPLOAD (FUNÇÃO NOVA) ---
+// --- CONTROLLER DE UPLOAD ---
 const uploadOrderPdf = async (req, res) => {
     try {
         if (!req.file) {
@@ -160,7 +161,7 @@ const uploadOrderPdf = async (req, res) => {
     }
 };
 
-// --- CRUD EXISTENTE ---
+// --- CRUD ---
 
 const getAllRefuelings = async (req, res) => {
     try {
@@ -242,6 +243,7 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
+        // Atualização de Leitura do Veículo
         const vehicleUpdate = {};
         const newOdometro = safeNum(data.odometro);
         const newHorimetro = safeNum(data.horimetro);
@@ -249,7 +251,7 @@ const createRefuelingOrder = async (req, res) => {
         if (newOdometro > 0) vehicleUpdate.odometro = newOdometro;
         if (newHorimetro > 0) {
             vehicleUpdate.horimetro = newHorimetro;
-            vehicleUpdate.horimetroDigital = null;
+            vehicleUpdate.horimetroDigital = null; // Unificação
             vehicleUpdate.horimetroAnalogico = null;
         }
 
@@ -261,12 +263,13 @@ const createRefuelingOrder = async (req, res) => {
             );
         }
 
-        if (refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
+        // Se a ordem já nascer concluída (raro via API direta, mas possível), atualiza despesas
+        if (refuelingData.status === 'Concluída' && refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
             await updateMonthlyExpense(connection, refuelingData.obraId, refuelingData.partnerId, refuelingData.fuelType, refuelingData.data);
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles'] });
+        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses'] });
         res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
@@ -342,6 +345,7 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
+        // Atualização de Veículo na Edição (Opcional, mas mantém consistência)
         const vehicleUpdate = {};
         if (updateData.odometro > 0) vehicleUpdate.odometro = updateData.odometro;
         if (updateData.horimetro > 0) {
@@ -356,15 +360,18 @@ const updateRefuelingOrder = async (req, res) => {
              await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), vId]);
         }
 
+        // Recalcular Despesas Mensais
         const currentObra = updateData.obraId || oldRefueling.obraId;
         const currentPartner = updateData.partnerId || oldRefueling.partnerId;
         const currentFuel = updateData.fuelType || oldRefueling.fuelType;
         const currentDate = updateData.data || oldRefueling.data;
 
+        // Atualiza a despesa do "destino" (seja novo valor ou atual)
         if (currentObra && currentPartner && currentFuel) {
             await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
         }
 
+        // Se houve mudança de chaves (Obra/Posto/Combustível), atualiza também a despesa de "origem" para remover o valor antigo
         if (
             (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
             (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
@@ -411,6 +418,7 @@ const confirmRefuelingOrder = async (req, res) => {
         }
         const order = orders[0];
 
+        // Validação de Duplicidade de NF
         if (invoiceNumber) {
             const nfStr = invoiceNumber.toString().trim();
             if (nfStr) {
@@ -424,6 +432,7 @@ const confirmRefuelingOrder = async (req, res) => {
             }
         }
 
+        // Atualização do Veículo
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
@@ -445,6 +454,7 @@ const confirmRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), order.vehicleId]);
         }
 
+        // Atualização de Preço do Posto (Opcional via checkbox)
         const safePrice = safeNum(pricePerLiter, true);
         
         if (order.partnerId && safePrice > 0 && order.fuelType && updatePartnerPrice === true) {
@@ -456,6 +466,7 @@ const confirmRefuelingOrder = async (req, res) => {
             await connection.execute(priceQuery, [order.partnerId, order.fuelType, safePrice]);
         }
 
+        // Atualiza Ordem
         const orderUpdate = {
             status: 'Concluída',
             litrosAbastecidos: safeNum(litrosAbastecidos, true),
@@ -473,15 +484,16 @@ const confirmRefuelingOrder = async (req, res) => {
         const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
         await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
 
-        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO ---
+        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO (Baixa Automática) ---
         if (order.createdFromSolicitacaoId) {
             await connection.execute(
                 'UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?',
                 [order.createdFromSolicitacaoId]
             );
         }
-        // -------------------------------------------
+        // ---------------------------------------------------------------
 
+        // Atualiza Despesas
         if (order.obraId && order.partnerId && order.fuelType) {
             await updateMonthlyExpense(connection, order.obraId, order.partnerId, order.fuelType, order.data);
         }
@@ -514,15 +526,15 @@ const deleteRefuelingOrder = async (req, res) => {
 
         await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
 
-        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO ---
+        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO (Estorno) ---
         if (ref.createdFromSolicitacaoId) {
             // Se a ordem foi excluída, marcamos a solicitação como NEGADA para que o usuário saiba que foi cancelada
             await connection.execute(
-                'UPDATE solicitacoes_abastecimento SET status = "NEGADO", motivo_negativa = "Ordem Excluída Manualmente pelo Gestor" WHERE id = ?',
+                'UPDATE solicitacoes_abastecimento SET status = "NEGADO", motivo_negativa = "Ordem Excluída Manualmente pelo Gestor (Estorno)" WHERE id = ?',
                 [ref.createdFromSolicitacaoId]
             );
         }
-        // -------------------------------------------
+        // ------------------------------------------------------
 
         if (ref.obraId && ref.partnerId && ref.fuelType) {
             await updateMonthlyExpense(connection, ref.obraId, ref.partnerId, ref.fuelType, ref.data);

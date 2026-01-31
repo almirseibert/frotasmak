@@ -14,24 +14,28 @@ const login = async (req, res) => {
     }
 
     try {
-        const [rows] = await db.query('SELECT * FROM users WHERE email = ?', [email]);
+        // Busca usuário e status de bloqueio
+        const [rows] = await db.query(
+            'SELECT id, name, email, password, role, user_type, status, canAccessRefueling, bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE email = ?', 
+            [email]
+        );
         const user = rows[0];
 
         if (!user) {
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
 
-        // --- VERIFICAÇÃO DE STATUS GERAL ---
-        const status = user.status ? user.status.toLowerCase() : '';
-        if (status === 'inativo') {
+        // --- VERIFICAÇÃO DE STATUS GERAL DA CONTA ---
+        const statusConta = user.status ? user.status.toLowerCase() : '';
+        if (statusConta === 'inativo') {
             return res.status(403).json({ message: 'Sua conta aguarda aprovação do administrador.' });
         }
 
-        // --- NOVA VERIFICAÇÃO: BLOQUEIO DE ABASTECIMENTO ---
-        // Regra: Se o usuário excedeu 3 tentativas falhas na solicitação, ele é travado.
+        // --- VERIFICAÇÃO: BLOQUEIO DE ABASTECIMENTO (REGRA DE 3 TENTATIVAS) ---
         if (user.bloqueado_abastecimento === 1) {
             return res.status(403).json({ 
-                message: 'Usuário BLOQUEADO para abastecimentos. Entre em contato com o administrador para desbloqueio.' 
+                message: 'Usuário BLOQUEADO para abastecimentos. Entre em contato com a gestão de frotas.',
+                isBlocked: true
             });
         }
 
@@ -40,7 +44,7 @@ const login = async (req, res) => {
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
 
-        // Gera token com permissões
+        // Gera token com permissões e flags atualizadas
         const token = jwt.sign(
             { 
                 id: user.id, 
@@ -52,14 +56,19 @@ const login = async (req, res) => {
             { expiresIn: '24h' }
         );
 
-        res.json({ token, user: { 
-            id: user.id, // Importante retornar o ID para o front
-            name: user.name, 
-            email: user.email, 
-            role: user.role || user.user_type,
-            canAccessRefueling: user.canAccessRefueling === 1,
-            bloqueado_abastecimento: user.bloqueado_abastecimento // Retorna flag para UI
-        }});
+        res.json({ 
+            token, 
+            user: { 
+                id: user.id, 
+                name: user.name, 
+                email: user.email, 
+                role: user.role || user.user_type,
+                canAccessRefueling: user.canAccessRefueling === 1,
+                // Novos campos essenciais para o Frontend do Operador
+                bloqueado_abastecimento: user.bloqueado_abastecimento,
+                tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento
+            }
+        });
 
     } catch (error) {
         console.error('Erro no login:', error);
@@ -87,7 +96,7 @@ const register = async (req, res) => {
         const hashedPassword = await bcrypt.hash(password, salt);
         const newUserId = uuidv4();
 
-        // Insere na tabela USERS com status INATIVO e novos campos padrão
+        // Insere na tabela USERS com status INATIVO e inicializa colunas de controle de abastecimento
         await db.query(
             `INSERT INTO users (
                 id, name, email, password, 
