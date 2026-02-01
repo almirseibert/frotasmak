@@ -1,0 +1,172 @@
+const db = require('../database');
+const crypto = require('crypto');
+
+// --- HELPERS LOCAIS (Duplicados intencionalmente para isolamento) ---
+const safeNum = (val) => {
+    if (val === null || val === undefined || val === '') return 0;
+    const n = parseFloat(val);
+    return isNaN(n) ? 0 : n;
+};
+
+const normalizeFuelType = (val) => {
+    if (!val) return null;
+    const v = val.toString().trim().toUpperCase();
+    const map = {
+        'DIESEL S10': 'dieselS10',
+        'DIESEL S500': 'dieselS500',
+        'GASOLINA COMUM': 'gasolinaComum',
+        'GASOLINA ADITIVADA': 'gasolinaAditivada',
+        'ETANOL': 'etanol',
+        'ARLA 32': 'arla32'
+    };
+    return map[v] || val;
+};
+
+// --- FUNÇÕES DO GESTOR/ADMIN ---
+
+const listarTodasSolicitacoes = async (req, res) => {
+    try {
+        // Query expandida para o painel administrativo
+        const query = `
+            SELECT s.*, 
+                   v.placa, v.registroInterno as veiculo_nome, 
+                   o.nome as obra_nome, 
+                   p.razaoSocial as posto_nome,
+                   u.name as solicitante_nome
+            FROM solicitacoes_abastecimento s
+            LEFT JOIN vehicles v ON s.veiculo_id = v.id
+            LEFT JOIN obras o ON s.obra_id = o.id
+            LEFT JOIN partners p ON s.posto_id = p.id
+            LEFT JOIN users u ON s.usuario_id = u.id
+            ORDER BY s.data_solicitacao DESC LIMIT 100
+        `;
+        const [rows] = await db.execute(query);
+        res.json(rows);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Erro ao listar todas solicitações.' });
+    }
+};
+
+const avaliarSolicitacao = async (req, res) => {
+    const { id } = req.params;
+    const { status, motivoNegativa } = req.body; 
+    
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        const [solicitacao] = await connection.execute('SELECT * FROM solicitacoes_abastecimento WHERE id = ? FOR UPDATE', [id]);
+        if (!solicitacao.length) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Solicitação não encontrada' });
+        }
+        
+        const sol = solicitacao[0];
+
+        // --- FLUXO DE REPROVAÇÃO ---
+        if (status === 'NEGADO') {
+            await connection.execute(
+                'UPDATE solicitacoes_abastecimento SET status = ?, motivo_negativa = ?, aprovado_por_usuario_id = ?, data_aprovacao = NOW() WHERE id = ?',
+                ['NEGADO', motivoNegativa, req.user.id, id]
+            );
+            await connection.commit();
+            if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
+            return res.json({ message: 'Solicitação negada.' });
+        }
+
+        // --- FLUXO DE APROVAÇÃO (GERAR ORDEM) ---
+        if (status === 'LIBERADO') {
+            const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
+            const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
+            const newRefuelingId = crypto.randomUUID();
+
+            let partnerName = 'Posto Externo';
+            if (sol.posto_id) {
+                const [p] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [sol.posto_id]);
+                if (p.length > 0) partnerName = p[0].razaoSocial;
+            }
+
+            let employeeId = sol.funcionario_id; 
+            const combustivelFinal = normalizeFuelType(sol.tipo_combustivel);
+
+            // Criação da Ordem Oficial na tabela Refuelings
+            await connection.execute(
+                `INSERT INTO refuelings (
+                    id, authNumber, vehicleId, partnerId, partnerName, 
+                    employeeId, obraId, fuelType, data, status, 
+                    isFillUp, needsArla, isFillUpArla, outrosGeraValor,
+                    litrosLiberados, litrosLiberadosArla, 
+                    odometro, horimetro, 
+                    outros, outrosValor,
+                    createdBy
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 'Aberta', ?, 0, 0, 0, ?, 0, ?, ?, ?, 0, ?)`,
+                [
+                    newRefuelingId, 
+                    newAuthNumber, 
+                    sol.veiculo_id, 
+                    sol.posto_id || null, 
+                    partnerName,
+                    employeeId, 
+                    sol.obra_id, 
+                    combustivelFinal, 
+                    sol.flag_tanque_cheio, 
+                    safeNum(sol.litragem_solicitada),
+                    safeNum(sol.odometro_informado), 
+                    safeNum(sol.horimetro_informado),
+                    sol.observacao || null, 
+                    JSON.stringify({ id: req.user.id, name: req.user.name || 'Gestor' })
+                ]
+            );
+
+            await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
+
+            await connection.execute(
+                'UPDATE solicitacoes_abastecimento SET status = ?, aprovado_por_usuario_id = ?, data_aprovacao = NOW() WHERE id = ?',
+                ['LIBERADO', req.user.id, id]
+            );
+
+            await connection.commit();
+            if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes', 'refuelings'] });
+            return res.json({ message: 'Solicitação liberada! Ordem gerada.', authNumber: newAuthNumber });
+        }
+
+    } catch (error) {
+        await connection.rollback();
+        console.error("Erro Avaliar Admin:", error);
+        res.status(500).json({ error: 'Erro ao avaliar: ' + error.message });
+    } finally {
+        connection.release();
+    }
+};
+
+const confirmarBaixa = async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Confirma que o processo foi concluído (Cupom validado)
+        await db.execute('UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?', [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
+        res.json({ message: 'Baixa confirmada.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao confirmar baixa.' });
+    }
+};
+
+const rejeitarComprovante = async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Volta o status para LIBERADO para que o usuário possa enviar nova foto
+        await db.execute('UPDATE solicitacoes_abastecimento SET status = "LIBERADO" WHERE id = ?', [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
+        res.json({ message: 'Comprovante rejeitado.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao rejeitar.' });
+    }
+};
+
+module.exports = {
+    listarTodasSolicitacoes,
+    avaliarSolicitacao,
+    confirmarBaixa,
+    rejeitarComprovante
+};
