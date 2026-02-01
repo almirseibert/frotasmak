@@ -55,9 +55,6 @@ const criarSolicitacao = async (req, res) => {
             longitude 
         } = req.body;
 
-        // Mapeamento para variáveis locais (camelCase) para consistência interna se necessário, 
-        // ou uso direto das snake_case. Vamos usar as snake_case recebidas para garantir.
-
         const fotoPainel = req.file ? `/uploads/solicitacoes/${req.file.filename}` : null;
 
         // 1. Verificar Bloqueio do Usuário (Consulta Rápida)
@@ -134,10 +131,15 @@ const criarSolicitacao = async (req, res) => {
         await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = 0 WHERE id = ?', [usuarioId]);
 
         // 3. Trava Orçamentária (20% do Contrato)
-        const [obras] = await connection.execute('SELECT valorContrato FROM obras WHERE id = ?', [obra_id]);
+        // FIX: Usamos SELECT * para evitar erro se a coluna 'valorContrato' não existir.
+        const [obras] = await connection.execute('SELECT * FROM obras WHERE id = ?', [obra_id]);
         
-        if (obras.length > 0 && safeNum(obras[0].valorContrato) > 0) {
-            const valorContrato = parseFloat(obras[0].valorContrato);
+        // Tenta localizar o valor do contrato em campos comuns ou assume 0 se não existir
+        const obraData = obras[0] || {};
+        const valorContratoEncontrado = obraData.valorContrato || obraData.valor_contrato || obraData.contractValue || 0;
+
+        if (obras.length > 0 && safeNum(valorContratoEncontrado) > 0) {
+            const valorContrato = parseFloat(valorContratoEncontrado);
             
             // Soma despesas já lançadas na categoria Combustível para esta obra
             const [expenses] = await connection.execute(
@@ -153,10 +155,8 @@ const criarSolicitacao = async (req, res) => {
                 if (precos.length > 0) precoEst = safeNum(precos[0].price);
             }
             
-            // Parse do flag, pois vem como string '1' ou '0' ou 'true' no FormData
+            // Parse do flag
             const isTanqueCheio = (flag_tanque_cheio === '1' || flag_tanque_cheio === 'true' || flag_tanque_cheio === true);
-            const isOutros = (flag_outros === '1' || flag_outros === 'true' || flag_outros === true);
-
             const litragemEstimada = isTanqueCheio ? 200 : safeNum(litragem);
             const custoEstimado = litragemEstimada * precoEst;
             
@@ -173,8 +173,6 @@ const criarSolicitacao = async (req, res) => {
 
         // 4. Análise de Queda de Média (>25%) - Gera Alerta mas NÃO bloqueia
         let alertaMedia = 0;
-        // Busca último abastecimento confirmado deste veículo para comparar
-        // Nota: Isso é apenas um alerta visual para o admin, não impede o insert
         
         // 5. Inserir Solicitação
         const [result] = await connection.execute(
