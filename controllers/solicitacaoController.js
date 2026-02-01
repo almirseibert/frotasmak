@@ -241,6 +241,49 @@ const listarSolicitacoes = async (req, res) => {
     }
 };
 
+// --- ATUALIZAR/AVALIAR SOLICITAÇÃO (ADMIN - PUT /:id) ---
+const atualizarSolicitacao = async (req, res) => {
+    const { id } = req.params;
+    const { status, motivo_negativa } = req.body;
+    
+    // Este método é usado principalmente para o Admin APROVAR ou NEGAR a solicitação
+    
+    try {
+        const updates = [];
+        const values = [];
+
+        if (status) {
+            updates.push('status = ?');
+            values.push(status);
+            
+            if (status === 'AUTORIZADO') {
+                updates.push('data_aprovacao = NOW()');
+            }
+        }
+        
+        if (motivo_negativa !== undefined) {
+            updates.push('motivo_negativa = ?');
+            values.push(motivo_negativa);
+        }
+
+        if (updates.length === 0) {
+            return res.status(400).json({ error: 'Nenhum dado para atualizar.' });
+        }
+
+        const query = `UPDATE solicitacoes_abastecimento SET ${updates.join(', ')} WHERE id = ?`;
+        values.push(id);
+
+        await db.execute(query, values);
+
+        req.io.emit('server:sync', { targets: ['solicitacoes', 'admin_solicitacoes'] });
+        res.json({ message: 'Solicitação atualizada com sucesso.' });
+
+    } catch (error) {
+        console.error('Erro atualizarSolicitacao:', error);
+        res.status(500).json({ error: 'Erro ao atualizar solicitação.' });
+    }
+};
+
 // --- LISTAR MINHAS SOLICITAÇÕES ---
 const listarMinhasSolicitacoes = async (req, res) => {
     try {
@@ -328,8 +371,9 @@ module.exports = {
     getContextoUsuario,
     verificarStatusUsuario,
     criarSolicitacao,
-    listarSolicitacoes, // Adicionado para corrigir o erro na rota GET /
+    listarSolicitacoes, 
     listarMinhasSolicitacoes,
+    atualizarSolicitacao, // ADICIONADO PARA CORRIGIR ERRO PUT /:id
     enviarCupom,
     rejeitarComprovante,
     confirmarBaixa
