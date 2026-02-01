@@ -299,6 +299,7 @@ const confirmarBaixa = async (req, res) => {
 };
 
 module.exports = {
+    upload, // ADICIONADO AQUI PARA CORRIGIR O ERRO NAS ROTAS
     getContextoUsuario,
     verificarStatusUsuario,
     criarSolicitacao,
