@@ -3,8 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 
-// --- CONFIGURAÇÃO MULTER (Uploads Otimizados) ---
-// Mantido aqui pois é o App que faz o upload
+// --- CONFIGURAÇÃO MULTER (Uploads) ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = path.join(__dirname, '../public/uploads/solicitacoes');
@@ -20,10 +19,10 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // Limite 5MB
+    limits: { fileSize: 5 * 1024 * 1024 }
 });
 
-// --- HELPERS LOCAIS ---
+// --- HELPERS ---
 const safeNum = (val) => {
     if (val === null || val === undefined || val === '') return 0;
     const n = parseFloat(val);
@@ -44,7 +43,7 @@ const normalizeFuelType = (val) => {
     return map[v] || val;
 };
 
-// --- FUNÇÕES DO MOTORISTA ---
+// --- FUNÇÕES ---
 
 const criarSolicitacao = async (req, res) => {
     const connection = await db.getConnection();
@@ -57,15 +56,35 @@ const criarSolicitacao = async (req, res) => {
             veiculo_id, obra_id, posto_id, funcionario_id, 
             tipo_combustivel, litragem, flag_tanque_cheio, 
             flag_outros, descricao_outros, horimetro, odometro, 
-            latitude, longitude, observacao 
+            latitude, longitude, observacao,
+            data_abastecimento // Data manual vinda do front
         } = req.body;
 
         const fotoPainel = req.file ? `/uploads/solicitacoes/${req.file.filename}` : null;
         const tipoCombustivelNormalizado = normalizeFuelType(tipo_combustivel);
 
-        // 1. Validar Veículo
+        // 1. Validar Veículo ID
         if (!veiculo_id) throw new Error("ID do veículo não informado.");
         
+        // 2. VERIFICAÇÃO DE PEDIDO EM ABERTO (BLOQUEANTE)
+        // Não permite criar novo se existir um Pendente, Liberado ou Aguardando Baixa para o mesmo veículo
+        const [pedidosAbertos] = await connection.execute(
+            `SELECT id, status, data_solicitacao FROM solicitacoes_abastecimento 
+             WHERE veiculo_id = ? 
+             AND status IN ('PENDENTE', 'LIBERADO', 'AGUARDANDO_BAIXA')`, 
+            [veiculo_id]
+        );
+
+        if (pedidosAbertos.length > 0) {
+            const ped = pedidosAbertos[0];
+            await connection.rollback();
+            if (req.file) fs.unlinkSync(req.file.path);
+            return res.status(400).json({ 
+                error: `BLOQUEIO: Já existe o pedido #${ped.id} (${ped.status}) em aberto para este veículo desde ${new Date(ped.data_solicitacao).toLocaleDateString()}. Finalize-o antes.` 
+            });
+        }
+
+        // 3. Buscar Dados do Veículo (para validações de status)
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [veiculo_id]);
         if (vehicles.length === 0) {
             await connection.rollback();
@@ -74,28 +93,33 @@ const criarSolicitacao = async (req, res) => {
         }
         const veiculo = vehicles[0];
 
-        // 2. Validar Bloqueio Usuário
+        // 4. Validar Status do Veículo (Manutenção/Quebrado)
+        if (['manutencao', 'MANUTENCAO', 'quebrado', 'QUEBRADO'].includes(veiculo.status)) {
+            await connection.rollback();
+            if (req.file) fs.unlinkSync(req.file.path);
+            return res.status(400).json({ error: `VEÍCULO BLOQUEADO: Status atual é ${veiculo.status}. Contate a oficina.` });
+        }
+
+        // 5. Validar Bloqueio Usuário
         const [users] = await connection.execute('SELECT bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE id = ?', [usuarioId]);
         if (!users.length || users[0].bloqueado_abastecimento === 1) {
             await connection.rollback();
             if (req.file) fs.unlinkSync(req.file.path);
-            return res.status(403).json({ error: 'USUÁRIO BLOQUEADO. Contate o administrador.' });
+            return res.status(403).json({ error: 'USUÁRIO BLOQUEADO POR ERROS REPETIDOS. Contate o administrador.' });
         }
 
-        // 3. Validação Leitura (Odômetro/Horímetro)
+        // 6. Validação Leitura (Simples checagem de regressão no backend)
         let erroValidacao = null;
         const novoOdometro = safeNum(odometro);
         const novoHorimetro = safeNum(horimetro);
         const antOdometro = safeNum(veiculo.odometro);
         const antHorimetro = safeNum(veiculo.horimetro || veiculo.horimetroDigital);
 
-        if (novoOdometro > 0) {
-            if (novoOdometro < antOdometro) erroValidacao = `Odômetro menor que o anterior (${antOdometro} Km).`;
-            else if ((novoOdometro - antOdometro) > 2000) erroValidacao = `Salto de Odômetro excessivo.`;
+        if (novoOdometro > 0 && novoOdometro <= antOdometro) {
+            erroValidacao = `Odômetro informado (${novoOdometro}) é menor ou igual ao atual (${antOdometro}).`;
         }
-        if (novoHorimetro > 0) {
-            if (novoHorimetro < antHorimetro) erroValidacao = `Horímetro menor que o anterior (${antHorimetro} h).`;
-            else if ((novoHorimetro - antHorimetro) > 100) erroValidacao = `Salto de Horímetro excessivo.`;
+        if (novoHorimetro > 0 && novoHorimetro <= antHorimetro) {
+            erroValidacao = `Horímetro informado (${novoHorimetro}) é menor ou igual ao atual (${antHorimetro}).`;
         }
 
         if (erroValidacao) {
@@ -105,55 +129,41 @@ const criarSolicitacao = async (req, res) => {
             await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = ?, bloqueado_abastecimento = ? WHERE id = ?', [novasTentativas, bloquear, usuarioId]);
             await connection.commit();
             if (req.file) fs.unlinkSync(req.file.path);
-            return res.status(400).json({ error: `Erro de Leitura: ${erroValidacao} (Tentativa ${novasTentativas}/3).` });
+            return res.status(400).json({ error: `ERRO DE LEITURA: ${erroValidacao} (Erro ${novasTentativas}/3). Cuidado!` });
         }
 
         // Resetar tentativas se deu certo
         await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = 0 WHERE id = ?', [usuarioId]);
 
-        // 4. Trava Orçamentária
-        const [obras] = await connection.execute('SELECT * FROM obras WHERE id = ?', [obra_id]);
-        if (obras.length > 0) {
-            const valorContrato = parseFloat(obras[0].valorContrato || 0);
-            if (valorContrato > 0) {
-                 const [expenses] = await connection.execute("SELECT SUM(amount) as total FROM expenses WHERE obraId = ? AND category = 'Combustível'", [obra_id]);
-                 const totalGasto = safeNum(expenses[0].total);
-                 const custoEst = (flag_tanque_cheio ? 200 : safeNum(litragem)) * 6.50;
-                 if ((totalGasto + custoEst) > (valorContrato * 0.20)) {
-                    await connection.rollback();
-                    if (req.file) fs.unlinkSync(req.file.path);
-                    return res.status(400).json({ error: 'Limite orçamentário (20%) excedido.' });
-                 }
-            }
-        }
+        // 7. Data Efetiva
+        // Se o usuário não enviou data (campo vazio), usa NOW().
+        const dataEfetiva = data_abastecimento ? new Date(data_abastecimento) : new Date();
 
-        // 5. Preparar Dados
+        // 8. Inserir
         let obsFinal = observacao || '';
         const isOutros = (flag_outros === '1' || flag_outros === 'true' || flag_outros === true);
         if (isOutros && descricao_outros) {
             obsFinal = `[Item: ${descricao_outros}] ${obsFinal}`;
         }
         
-        // 6. Inserir
         const [result] = await connection.execute(
             `INSERT INTO solicitacoes_abastecimento 
             (usuario_id, veiculo_id, obra_id, posto_id, funcionario_id, tipo_combustivel, 
             litragem_solicitada, flag_tanque_cheio, flag_outros, 
             horimetro_informado, odometro_informado, foto_painel_path, 
             geo_latitude, geo_longitude, status, alerta_media_consumo, data_solicitacao, observacao)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, NOW(), ?)`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, ?, ?)`,
             [
                 usuarioId, veiculo_id, obra_id, posto_id || null, funcionario_id || null, 
                 tipoCombustivelNormalizado, safeNum(litragem), 
                 (flag_tanque_cheio === '1' || flag_tanque_cheio === 'true') ? 1 : 0, 
                 isOutros ? 1 : 0, novoHorimetro || null, novoOdometro || null, fotoPainel,
-                latitude || null, longitude || null, obsFinal
+                latitude || null, longitude || null, dataEfetiva, obsFinal
             ]
         );
 
         await connection.commit();
         
-        // Socket Notifications
         if (req.io) {
             req.io.emit('server:sync', { targets: ['solicitacoes'] });
             req.io.emit('admin:notificacao', { tipo: 'nova_solicitacao', id: result.insertId });
@@ -199,9 +209,6 @@ const enviarComprovante = async (req, res) => {
         if (!req.file) return res.status(400).json({ error: 'Foto obrigatória.' });
         const fotoPath = `/uploads/solicitacoes/${req.file.filename}`;
         
-        // Verifica se é o dono da solicitação (Segurança extra)
-        // await db.execute('SELECT * FROM solicitacoes_abastecimento WHERE id = ? AND usuario_id = ?', [id, req.user.id]);
-        
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?', [fotoPath, id]);
         
         if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
@@ -226,5 +233,5 @@ module.exports = {
     listarMinhasSolicitacoes,
     enviarComprovante,
     verificarStatusUsuario,
-    upload // Exporta o multer configurado para usar na rota
+    upload
 };
