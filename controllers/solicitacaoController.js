@@ -44,6 +44,7 @@ const criarSolicitacao = async (req, res) => {
             veiculo_id, 
             obra_id, 
             posto_id, 
+            funcionario_id, // Adicionado para capturar o motorista
             tipo_combustivel, 
             litragem, 
             flag_tanque_cheio, 
@@ -52,7 +53,7 @@ const criarSolicitacao = async (req, res) => {
             odometro, 
             latitude, 
             longitude,
-            observacao // Pegando a observação enviada pelo front
+            observacao
         } = req.body;
 
         const fotoPainel = req.file ? `/uploads/solicitacoes/${req.file.filename}` : null;
@@ -161,23 +162,21 @@ const criarSolicitacao = async (req, res) => {
         const isOutros = (flag_outros === '1' || flag_outros === 'true' || flag_outros === true);
 
         // 4. Inserir Solicitação
-        // Tenta incluir observação se a coluna existir (normalmente existe). Se falhar por coluna inexistente, o try-catch captura e avisamos.
-        // Nota: Removi 'observacao' da query direta para evitar erro se a coluna não existir no DB legado.
-        // Se seu DB TIVER a coluna 'observacao', adicione-a abaixo. Por segurança, mantive sem para garantir o insert.
-        // Se quiser arriscar salvar a observação, descomente a linha abaixo e adicione o ? e o valor.
+        // CORREÇÃO: Inclusão do funcionario_id na query de INSERT
         
         const [result] = await connection.execute(
             `INSERT INTO solicitacoes_abastecimento 
-            (usuario_id, veiculo_id, obra_id, posto_id, tipo_combustivel, 
+            (usuario_id, veiculo_id, obra_id, posto_id, funcionario_id, tipo_combustivel, 
             litragem_solicitada, flag_tanque_cheio, flag_outros, 
             horimetro_informado, odometro_informado, foto_painel_path, 
             geo_latitude, geo_longitude, status, alerta_media_consumo, data_solicitacao)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, NOW())`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, NOW())`,
             [
                 usuarioId, 
                 veiculo_id, 
                 obra_id, 
                 posto_id || null, 
+                funcionario_id || null, // Salva o ID do motorista
                 tipo_combustivel,
                 safeNum(litragem), 
                 isTanqueCheio ? 1 : 0, 
@@ -294,7 +293,8 @@ const avaliarSolicitacao = async (req, res) => {
                 if (p.length > 0) partnerName = p[0].razaoSocial;
             }
 
-            // CORREÇÃO: Removido 'createdFromSolicitacaoId' que não existe na tabela 'refuelings'
+            // CORREÇÃO: Agora passamos sol.funcionario_id para o campo employeeId (antes estava null)
+            // Também garantimos o repasse do tipo de combustível
             
             await connection.execute(
                 `INSERT INTO refuelings (
@@ -310,9 +310,9 @@ const avaliarSolicitacao = async (req, res) => {
                     newRefuelingId, 
                     newAuthNumber, 
                     sol.veiculo_id, 
-                    sol.posto_id || null, // Se posto_id for null, entra null
+                    sol.posto_id || null, 
                     partnerName,
-                    null, // employeeId - A solicitação não grava motorista, vai null
+                    sol.funcionario_id || null, // Agora usa o ID gravado na solicitação
                     sol.obra_id, 
                     sol.tipo_combustivel, 
                     sol.flag_tanque_cheio, 
@@ -338,7 +338,6 @@ const avaliarSolicitacao = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error("Erro Avaliar:", error);
-        // Retorna a mensagem real do erro para facilitar debug no front
         res.status(500).json({ error: 'Erro ao avaliar solicitação: ' + error.message });
     } finally {
         connection.release();
