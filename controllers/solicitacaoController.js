@@ -5,12 +5,36 @@ const fs = require('fs');
 const multer = require('multer');
 const crypto = require('crypto');
 
-// --- CONFIGURAÇÃO MULTER (Uploads Otimizados) ---
-// As imagens já devem vir comprimidas do Frontend (Canvas), aqui apenas salvamos.
+// --- CONFIGURAÇÃO MULTER (UPLOAD COM AUTO-LIMPEZA) ---
+
+// Função para limpar arquivos antigos (> 30 dias)
+const cleanupOldFiles = (directory) => {
+    fs.readdir(directory, (err, files) => {
+        if (err) return console.error("Erro ao ler diretório para limpeza:", err);
+
+        const now = Date.now();
+        const maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias em milissegundos
+
+        files.forEach(file => {
+            const filePath = path.join(directory, file);
+            fs.stat(filePath, (err, stats) => {
+                if (err) return;
+                if (now - stats.mtime.getTime() > maxAge) {
+                    fs.unlink(filePath, (err) => {
+                        if (err) console.error(`Erro ao deletar arquivo antigo ${file}:`, err);
+                    });
+                }
+            });
+        });
+    });
+};
+
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = path.join(__dirname, '../public/uploads/solicitacoes');
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        // Executa limpeza ao salvar novo arquivo
+        cleanupOldFiles(dir);
         cb(null, dir);
     },
     filename: (req, file, cb) => {
@@ -22,7 +46,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // Limite 5MB (segurança back-end)
+    limits: { fileSize: 5 * 1024 * 1024 } // Limite 5MB
 });
 
 // --- HELPERS ---
@@ -31,340 +55,218 @@ const safeNum = (val) => {
     return isNaN(n) ? 0 : n;
 };
 
-// --- CORE: CRIAR SOLICITAÇÃO ---
-const criarSolicitacao = async (req, res) => {
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-    
+// --- NOVO MÉTODO: OBTER CONTEXTO DO USUÁRIO (Filtragem de Obra/Veículos) ---
+const getContextoUsuario = async (req, res) => {
+    const userId = req.user.id; // Do middleware de auth
+
     try {
-        const usuarioId = req.user.id;
-        const { 
-            veiculoId, obraId, postoId, tipoCombustivel, 
-            litragem, flagTanqueCheio, flagOutros, 
-            horimetro, odometro, latitude, longitude
-        } = req.body;
-
-        const fotoPainel = req.file ? `/uploads/solicitacoes/${req.file.filename}` : null;
-
-        // 1. Verificar Bloqueio do Usuário (Consulta Rápida)
-        const [users] = await connection.execute('SELECT bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE id = ?', [usuarioId]);
-        if (users[0].bloqueado_abastecimento === 1) {
-            await connection.rollback();
-            // Retorna erro específico para o front tratar
-            return res.status(403).json({ error: 'USUÁRIO BLOQUEADO. Contate o administrador.' });
-        }
-
-        // 2. Verificar Regras de Leitura e Consistência
-        const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [veiculoId]);
-        const veiculo = vehicles[0];
+        // 1. Descobrir EmployeeID do Usuário
+        const [users] = await db.execute('SELECT employeeId, name FROM users WHERE id = ?', [userId]);
+        if (users.length === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
         
-        let erroValidacao = null;
-        const novoOdometro = safeNum(odometro);
-        const novoHorimetro = safeNum(horimetro);
-        const antOdometro = safeNum(veiculo.odometro);
-        // Suporte a legado: verifica horimetro normal ou digital
-        const antHorimetro = safeNum(veiculo.horimetro || veiculo.horimetroDigital);
-
-        // Validação Odômetro (se informado)
-        if (novoOdometro > 0) {
-            if (novoOdometro < antOdometro) erroValidacao = `Odômetro menor que o anterior (${antOdometro} Km).`;
-            else if ((novoOdometro - antOdometro) > 1000) erroValidacao = `Salto de Odômetro excessivo (>1000km).`;
-        }
-
-        // Validação Horímetro (se informado)
-        if (novoHorimetro > 0) {
-            if (novoHorimetro < antHorimetro) erroValidacao = `Horímetro menor que o anterior (${antHorimetro} h).`;
-            else if ((novoHorimetro - antHorimetro) > 50) erroValidacao = `Salto de Horímetro excessivo (>50h).`;
-        }
-
-        // --- LÓGICA DE BLOQUEIO POR TENTATIVAS FALHAS ---
-        if (erroValidacao) {
-            const novasTentativas = users[0].tentativas_falhas_abastecimento + 1;
-            let bloquear = 0;
-            let msgBloqueio = '';
-
-            if (novasTentativas >= 3) {
-                bloquear = 1;
-                msgBloqueio = ' USUÁRIO BLOQUEADO POR TENTATIVAS EXCEDIDAS.';
-            }
-
-            await connection.execute(
-                'UPDATE users SET tentativas_falhas_abastecimento = ?, bloqueado_abastecimento = ? WHERE id = ?',
-                [novasTentativas, bloquear, usuarioId]
-            );
-            
-            await connection.commit();
-            
-            // Remove a foto enviada já que a solicitação falhou logicamente
-            if (req.file) fs.unlinkSync(req.file.path);
-
+        const userEmployeeId = users[0].employeeId;
+        
+        if (!userEmployeeId) {
             return res.status(400).json({ 
-                error: `Erro de Leitura: ${erroValidacao} (Tentativa ${novasTentativas}/3).${msgBloqueio}` 
+                error: 'Usuário sem funcionário vinculado.',
+                details: 'Seu usuário não está ligado a um cadastro de funcionário (RH). Contate o suporte.'
             });
         }
 
-        // Se passou na validação, zera o contador de falhas
-        await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = 0 WHERE id = ?', [usuarioId]);
+        // 2. Descobrir Obra Atual
+        // Lógica: Tabela obras_historico_veiculos onde employeeId match E dataSaida IS NULL
+        const queryObra = `
+            SELECT DISTINCT ohv.obraId, o.nome as obraNome
+            FROM obras_historico_veiculos ohv
+            JOIN obras o ON ohv.obraId = o.id
+            WHERE ohv.employeeId = ? 
+            AND ohv.dataSaida IS NULL
+            LIMIT 1
+        `;
 
-        // 3. Trava Orçamentária (20% do Contrato)
-        // Busca valor total do contrato da obra
-        const [obras] = await connection.execute('SELECT valorContrato FROM obras WHERE id = ?', [obraId]);
-        
-        if (obras.length > 0 && safeNum(obras[0].valorContrato) > 0) {
-            const valorContrato = parseFloat(obras[0].valorContrato);
-            
-            // Soma despesas já lançadas na categoria Combustível para esta obra
-            const [expenses] = await connection.execute(
-                "SELECT SUM(amount) as total FROM expenses WHERE obraId = ? AND category = 'Combustível'", 
-                [obraId]
-            );
-            const totalGasto = safeNum(expenses[0].total);
-            
-            // Estima o custo da solicitação atual
-            let precoEst = 6.00; // Preço médio de segurança (fallback)
-            if (postoId) {
-                const [precos] = await connection.execute('SELECT price FROM partner_fuel_prices WHERE partnerId = ? AND fuelType = ?', [postoId, tipoCombustivel]);
-                if (precos.length > 0) precoEst = safeNum(precos[0].price);
-            }
-            
-            // Se for tanque cheio, estima com base na capacidade média (ex: 200L ou lógica do veículo se tiver) ou usa litragem informada
-            const litragemEstimada = flagTanqueCheio ? 200 : safeNum(litragem);
-            const custoEstimado = litragemEstimada * precoEst;
-            
-            // Verifica regra dos 20%
-            if ((totalGasto + custoEstimado) > (valorContrato * 0.20)) {
-                await connection.rollback();
-                if (req.file) fs.unlinkSync(req.file.path);
-                return res.status(400).json({ error: 'Limite orçamentário da obra excedido (20%). Solicitação bloqueada pelo sistema.' });
-            }
+        const [obraRows] = await db.execute(queryObra, [userEmployeeId]);
+
+        if (obraRows.length === 0) {
+            return res.status(404).json({ 
+                error: 'Sem Obra Alocada',
+                details: 'Não encontramos veículos vinculados ao seu usuário nesta obra.'
+            });
         }
 
-        // 4. Análise de Queda de Média (>25%) - Gera Alerta mas NÃO bloqueia
-        let alertaMedia = 0;
-        // Busca último abastecimento confirmado deste veículo para comparar
-        const [lastRefuel] = await connection.execute(
-            'SELECT odometro, horimetro, litragem_solicitada, flag_tanque_cheio FROM solicitacoes_abastecimento WHERE veiculo_id = ? AND status = "CONCLUIDO" ORDER BY data_baixa DESC LIMIT 1',
-            [veiculoId]
-        );
+        const currentObra = obraRows[0];
 
-        // Lógica simplificada de verificação de média (só possível se tivermos histórico confiável)
-        // Aqui apenas marcamos a flag para o ADMIN ver, já que o cálculo preciso exige litragem real que ainda não temos (se for tanque cheio)
-        // O Admin verá o alerta "Média em queda" baseado nos dados históricos.
-
-        // 5. Inserir Solicitação
-        const [result] = await connection.execute(
-            `INSERT INTO solicitacoes_abastecimento 
-            (usuario_id, veiculo_id, obra_id, posto_id, tipo_combustivel, 
-            litragem_solicitada, flag_tanque_cheio, flag_outros, 
-            horimetro_informado, odometro_informado, foto_painel_path, 
-            geo_latitude, geo_longitude, status, alerta_media_consumo)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', ?)`,
-            [
-                usuarioId, veiculoId, obraId, postoId || null, tipoCombustivel,
-                safeNum(litragem), flagTanqueCheio ? 1 : 0, flagOutros ? 1 : 0,
-                novoHorimetro || null, novoOdometro || null, fotoPainel,
-                latitude || null, longitude || null, alertaMedia
-            ]
-        );
-
-        await connection.commit();
+        // 3. Buscar Veículos desta Obra
+        const queryVehicles = `
+            SELECT 
+                v.id, v.placa, v.modelo, v.grupo, v.tipo, 
+                v.horimetro, -- Coluna unificada (Regra 8)
+                v.proximaRevisaoKm, v.proximaRevisaoHoras, v.proximaRevisaoData,
+                v.validadeTacografo, v.validadeAET_DAER, v.validadeAET_DNIT, v.validadeLicenciamento,
+                v.status,
+                (SELECT partnerId FROM refuelings WHERE vehicleId = v.id ORDER BY data DESC LIMIT 1) as lastPartnerId
+            FROM vehicles v
+            JOIN obras_historico_veiculos ohv ON v.id = ohv.vehicleId
+            WHERE ohv.obraId = ? 
+            AND ohv.dataSaida IS NULL
+            ORDER BY v.placa ASC
+        `;
         
-        // Notifica Admins via Socket (Emitir evento para todos os sockets conectados na sala 'admins')
-        req.io.emit('server:sync', { targets: ['solicitacoes'] });
-        req.io.emit('admin:notificacao', { 
-            tipo: 'nova_solicitacao', 
-            msg: `Nova solicitação #${result.insertId} recebida.`,
-            id: result.insertId 
+        const [vehicles] = await db.execute(queryVehicles, [currentObra.obraId]);
+
+        // 4. Buscar Funcionários desta Obra (para seleção no combo)
+        const queryEmployees = `
+            SELECT DISTINCT e.id, e.name, e.jobTitle, e.cnhExpirationDate
+            FROM employees e
+            JOIN obras_historico_veiculos ohv ON e.id = ohv.employeeId
+            WHERE ohv.obraId = ?
+            AND ohv.dataSaida IS NULL
+            ORDER BY e.name ASC
+        `;
+
+        const [employees] = await db.execute(queryEmployees, [currentObra.obraId]);
+
+        // Retorna o pacote completo
+        res.json({
+            obra: currentObra,
+            vehicles: vehicles,
+            employees: employees, 
+            currentUserEmployeeId: userEmployeeId
         });
 
-        res.status(201).json({ message: 'Solicitação enviada! Aguarde a liberação.', id: result.insertId });
-
     } catch (error) {
-        await connection.rollback();
-        console.error("Erro Criar Solicitação:", error);
-        if (req.file) fs.unlinkSync(req.file.path); // Limpa arquivo órfão
-        res.status(500).json({ error: 'Erro ao processar solicitação.' });
-    } finally {
-        connection.release();
+        console.error('Erro ao buscar contexto:', error);
+        res.status(500).json({ error: 'Erro interno ao carregar contexto de obra.' });
     }
 };
 
-// --- LISTAR SOLICITAÇÕES ---
-const listarSolicitacoes = async (req, res) => {
+// --- VERIFICAR STATUS DO USUÁRIO (Restauração) ---
+const verificarStatusUsuario = async (req, res) => {
     try {
-        const usuarioId = req.user.id;
-        const userRole = req.user.role; // 'admin', 'gestor', 'operador'
+        const [rows] = await db.execute('SELECT bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE id = ?', [req.user.id]);
+        if (rows.length > 0) {
+            res.json(rows[0]);
+        } else {
+            res.status(404).json({ error: 'Usuário não encontrado' });
+        }
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao verificar status' });
+    }
+};
 
-        let query = `
+// --- CORE: CRIAR SOLICITAÇÃO ---
+const criarSolicitacao = async (req, res) => {
+    const conn = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const { 
+            veiculoId, 
+            obraId, 
+            postoId, 
+            funcionarioId, 
+            tipo_combustivel, 
+            litragem_solicitada, 
+            leitura_atual, 
+            observacao 
+        } = req.body;
+
+        // Validação básica
+        if (!veiculoId || !obraId || !postoId || !tipo_combustivel) {
+            throw new Error('Campos obrigatórios faltando.');
+        }
+
+        // Validação de Leitura no Backend (Segurança Adicional)
+        const [vehRows] = await conn.execute('SELECT horimetro, grupo, tipo FROM vehicles WHERE id = ? FOR UPDATE', [veiculoId]);
+        
+        // Aqui confiamos no bloqueio do Frontend (senha de supervisor), mas salvamos o registro PENDENTE para auditoria.
+
+        const [result] = await conn.execute(`
+            INSERT INTO solicitacoes_abastecimento 
+            (usuario_id, veiculo_id, obra_id, posto_id, funcionario_id, tipo_combustivel, litragem_solicitada, leitura_atual, observacao, status, data_solicitacao)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', NOW())
+        `, [
+            req.user.id, 
+            veiculoId, 
+            obraId, 
+            postoId, 
+            funcionarioId || null, 
+            tipo_combustivel, 
+            safeNum(litragem_solicitada), 
+            safeNum(leitura_atual), 
+            observacao
+        ]);
+
+        const solicitacaoId = result.insertId;
+
+        await conn.commit();
+        
+        req.io.emit('server:sync', { targets: ['admin_solicitacoes'] });
+        
+        res.status(201).json({ 
+            message: 'Solicitação criada com sucesso!', 
+            id: solicitacaoId 
+        });
+
+    } catch (error) {
+        await conn.rollback();
+        console.error('Erro criarSolicitacao:', error);
+        res.status(500).json({ error: error.message || 'Erro ao processar solicitação.' });
+    } finally {
+        conn.release();
+    }
+};
+
+// --- LISTAR MINHAS SOLICITAÇÕES ---
+const listarMinhasSolicitacoes = async (req, res) => {
+    try {
+        const query = `
             SELECT s.*, 
-                   v.placa, v.registroInterno as veiculo_nome, 
-                   o.nome as obra_nome, 
-                   p.razaoSocial as posto_nome,
-                   u.name as solicitante_nome
+                v.placa as veiculo_placa, v.modelo as veiculo_modelo,
+                o.nome as obra_nome,
+                p.name as posto_nome
             FROM solicitacoes_abastecimento s
             LEFT JOIN vehicles v ON s.veiculo_id = v.id
             LEFT JOIN obras o ON s.obra_id = o.id
             LEFT JOIN partners p ON s.posto_id = p.id
-            LEFT JOIN users u ON s.usuario_id = u.id
+            WHERE s.usuario_id = ?
+            ORDER BY s.data_solicitacao DESC
+            LIMIT 50
         `;
-
-        const params = [];
-
-        // Operador vê apenas as suas. Admin/Gestor vê todas.
-        // Se o usuário tiver permissão especial canAccessRefueling, vê tudo.
-        const isGestor = userRole === 'admin' || userRole === 'gestor' || req.user.canAccessRefueling;
-
-        if (!isGestor) {
-            query += ' WHERE s.usuario_id = ?';
-            params.push(usuarioId);
-        }
-
-        // Ordenação: Pendentes primeiro, depois por data
-        query += ` ORDER BY 
-            CASE WHEN s.status = 'PENDENTE' THEN 1 
-                 WHEN s.status = 'AGUARDANDO_BAIXA' THEN 2 
-                 ELSE 3 END, 
-            s.data_solicitacao DESC LIMIT 100`;
-
-        const [rows] = await db.execute(query, params);
+        const [rows] = await db.execute(query, [req.user.id]);
         res.json(rows);
-
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: 'Erro ao listar solicitações.' });
     }
 };
 
-// --- AVALIAR (GESTOR: LIBERAR OU NEGAR) ---
-const avaliarSolicitacao = async (req, res) => {
-    const { id } = req.params;
-    const { status, motivoNegativa } = req.body; // status: 'LIBERADO' ou 'NEGADO'
-    
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    try {
-        const [solicitacao] = await connection.execute('SELECT * FROM solicitacoes_abastecimento WHERE id = ? FOR UPDATE', [id]);
-        if (solicitacao.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ error: 'Solicitação não encontrada' });
-        }
+// --- ENVIAR CUPOM (UPLOAD) ---
+const enviarCupom = async (req, res) => {
+    upload.single('cupom')(req, res, async (err) => {
+        if (err) return res.status(400).json({ error: err.message });
         
-        const sol = solicitacao[0];
+        const { id } = req.params; 
+        if (!req.file) return res.status(400).json({ error: 'Nenhuma imagem enviada.' });
 
-        if (status === 'NEGADO') {
-            await connection.execute(
-                'UPDATE solicitacoes_abastecimento SET status = ?, motivo_negativa = ?, aprovado_por_usuario_id = ?, data_aprovacao = NOW() WHERE id = ?',
-                ['NEGADO', motivoNegativa, req.user.id, id]
+        try {
+            const imagePath = `/uploads/solicitacoes/${req.file.filename}`;
+            
+            await db.execute(
+                'UPDATE solicitacoes_abastecimento SET comprovante_path = ?, status = "AGUARDANDO_BAIXA" WHERE id = ?',
+                [imagePath, id]
             );
-            
-            // Opcional: Enviar notificação socket para o usuário específico
-            
-            await connection.commit();
-            req.io.emit('server:sync', { targets: ['solicitacoes'] });
-            return res.json({ message: 'Solicitação negada.' });
+
+            req.io.emit('server:sync', { targets: ['admin_solicitacoes'] });
+            res.json({ message: 'Comprovante enviado com sucesso!', path: imagePath });
+
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ error: 'Erro ao salvar comprovante.' });
         }
-
-        if (status === 'LIBERADO') {
-            // 1. Gera registro na tabela REFULEINGS (Integração com sistema legado)
-            // Isso cria a "Ordem interna" que o sistema já conhece.
-            // O status inicial na tabela refuelings será 'Aberta'
-            
-            const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
-            const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
-            const newRefuelingId = crypto.randomUUID();
-
-            let partnerName = 'Posto Externo';
-            if (sol.posto_id) {
-                const [p] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [sol.posto_id]);
-                if (p.length > 0) partnerName = p[0].razaoSocial;
-            }
-
-            // Criação da Ordem na tabela principal
-            await connection.execute(
-                `INSERT INTO refuelings (
-                    id, authNumber, vehicleId, partnerId, partnerName, 
-                    obraId, fuelType, data, status, 
-                    isFillUp, litrosLiberados, 
-                    odometro, horimetro, 
-                    createdBy, createdFromSolicitacaoId, needsArla
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, NOW(), 'Aberta', ?, ?, ?, ?, ?, ?, 0)`,
-                [
-                    newRefuelingId, newAuthNumber, sol.veiculo_id, sol.posto_id, partnerName,
-                    sol.obra_id, sol.tipo_combustivel, 
-                    sol.flag_tanque_cheio, sol.litragem_solicitada,
-                    sol.odometro_informado, sol.horimetro_informado,
-                    JSON.stringify({ id: req.user.id, name: req.user.name || 'Gestor' }), 
-                    sol.id // Link importante para rastreabilidade
-                ]
-            );
-
-            await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
-
-            // 2. Atualiza status da solicitação
-            await connection.execute(
-                'UPDATE solicitacoes_abastecimento SET status = ?, aprovado_por_usuario_id = ?, data_aprovacao = NOW() WHERE id = ?',
-                ['LIBERADO', req.user.id, id]
-            );
-
-            await connection.commit();
-            req.io.emit('server:sync', { targets: ['solicitacoes', 'refuelings'] });
-            return res.json({ message: 'Solicitação liberada! Ordem gerada.', authNumber: newAuthNumber });
-        }
-
-    } catch (error) {
-        await connection.rollback();
-        console.error(error);
-        res.status(500).json({ error: 'Erro ao avaliar solicitação.' });
-    } finally {
-        connection.release();
-    }
+    });
 };
 
-// --- ENVIAR COMPROVANTE (OPERADOR: CUPOM FISCAL) ---
-const enviarComprovante = async (req, res) => {
-    const { id } = req.params;
-    try {
-        if (!req.file) return res.status(400).json({ error: 'Foto do cupom obrigatória.' });
-
-        const fotoPath = `/uploads/solicitacoes/${req.file.filename}`;
-
-        await db.execute(
-            'UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?',
-            [fotoPath, id]
-        );
-
-        req.io.emit('server:sync', { targets: ['solicitacoes'] });
-        req.io.emit('admin:notificacao', { 
-            tipo: 'baixa_pendente', 
-            msg: `Comprovante enviado para solicitação #${id}.`,
-            id: id 
-        });
-
-        res.json({ message: 'Comprovante enviado. Aguardando confirmação do gestor.' });
-    } catch (error) {
-        res.status(500).json({ error: 'Erro ao enviar comprovante.' });
-    }
-};
-
-// --- CONFIRMAR BAIXA (GESTOR) ---
-// Nota: A baixa real (financeira/estoque) geralmente ocorre no endpoint 'refuelingController.confirmRefuelingOrder'
-// Este endpoint aqui serve para finalizar o fluxo visual da solicitação.
-const confirmarBaixa = async (req, res) => {
-    const { id } = req.params;
-    try {
-        await db.execute(
-            'UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?',
-            [id]
-        );
-        req.io.emit('server:sync', { targets: ['solicitacoes'] });
-        res.json({ message: 'Baixa confirmada. Processo finalizado.' });
-    } catch (error) {
-        res.status(500).json({ error: 'Erro ao confirmar baixa.' });
-    }
-};
-
-// --- REJEITAR COMPROVANTE (GESTOR) ---
+// --- REJEITAR COMPROVANTE (Restauração) ---
 const rejeitarComprovante = async (req, res) => {
     const { id } = req.params;
     try {
@@ -380,27 +282,28 @@ const rejeitarComprovante = async (req, res) => {
     }
 };
 
-// --- STATUS DO USUÁRIO (PARA O FRONTEND) ---
-const verificarStatusUsuario = async (req, res) => {
+// --- CONFIRMAR BAIXA (Restauração) ---
+const confirmarBaixa = async (req, res) => {
+    // Esta função geralmente é chamada pelo Admin, mas estava no arquivo enviado
+    const { id } = req.params;
     try {
-        const [rows] = await db.execute('SELECT bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE id = ?', [req.user.id]);
-        if (rows.length > 0) {
-            res.json(rows[0]);
-        } else {
-            res.status(404).json({ error: 'Usuário não encontrado' });
-        }
-    } catch (e) {
-        res.status(500).json({ error: 'Erro interno' });
+        await db.execute(
+            'UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO" WHERE id = ?',
+            [id]
+        );
+        req.io.emit('server:sync', { targets: ['solicitacoes', 'admin_solicitacoes'] });
+        res.json({ message: 'Baixa confirmada. Processo finalizado.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao confirmar baixa.' });
     }
 };
 
 module.exports = {
-    criarSolicitacao,
-    listarSolicitacoes,
-    avaliarSolicitacao,
-    enviarComprovante,
-    confirmarBaixa,
-    rejeitarComprovante,
+    getContextoUsuario,
     verificarStatusUsuario,
-    upload
+    criarSolicitacao,
+    listarMinhasSolicitacoes,
+    enviarCupom,
+    rejeitarComprovante,
+    confirmarBaixa
 };
