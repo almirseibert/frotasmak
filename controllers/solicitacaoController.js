@@ -294,9 +294,7 @@ const avaliarSolicitacao = async (req, res) => {
                 if (p.length > 0) partnerName = p[0].razaoSocial;
             }
 
-            // CORREÇÃO: Preencher TODOS os campos possíveis para evitar erro de constraint (ex: employeeId null)
-            // Como a solicitação não tem employeeId, enviamos NULL (o banco deve aceitar ou precisaremos ajustar)
-            // Também adicionamos os campos de Arla e Outros zerados.
+            // CORREÇÃO: Removido 'createdFromSolicitacaoId' que não existe na tabela 'refuelings'
             
             await connection.execute(
                 `INSERT INTO refuelings (
@@ -306,8 +304,8 @@ const avaliarSolicitacao = async (req, res) => {
                     litrosLiberados, litrosLiberadosArla, 
                     odometro, horimetro, 
                     outros, outrosValor,
-                    createdBy, createdFromSolicitacaoId
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 'Aberta', ?, 0, 0, 0, ?, 0, ?, ?, NULL, 0, ?, ?)`,
+                    createdBy
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 'Aberta', ?, 0, 0, 0, ?, 0, ?, ?, NULL, 0, ?)`,
                 [
                     newRefuelingId, 
                     newAuthNumber, 
@@ -321,8 +319,7 @@ const avaliarSolicitacao = async (req, res) => {
                     safeNum(sol.litragem_solicitada),
                     safeNum(sol.odometro_informado), 
                     safeNum(sol.horimetro_informado),
-                    JSON.stringify({ id: req.user.id, name: req.user.name || 'Gestor' }), 
-                    sol.id
+                    JSON.stringify({ id: req.user.id, name: req.user.name || 'Gestor' })
                 ]
             );
 
