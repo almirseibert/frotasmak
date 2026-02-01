@@ -5,7 +5,7 @@ const fs = require('fs');
 const multer = require('multer');
 const crypto = require('crypto');
 
-// --- CONFIGURAÇÃO MULTER ---
+// --- CONFIGURAÇÃO MULTER (Uploads Otimizados) ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = path.join(__dirname, '../public/uploads/solicitacoes');
@@ -21,7 +21,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 }
+    limits: { fileSize: 5 * 1024 * 1024 } // Limite 5MB
 });
 
 // --- HELPERS ---
@@ -46,7 +46,6 @@ const normalizeFuelType = (val) => {
         'ARLA 32': 'arla32'
     };
 
-    // Retorna o valor mapeado ou o original (caso já esteja correto ou seja desconhecido)
     return map[v] || val;
 };
 
@@ -77,7 +76,7 @@ const criarSolicitacao = async (req, res) => {
 
         const fotoPainel = req.file ? `/uploads/solicitacoes/${req.file.filename}` : null;
 
-        // Normalização do Combustível na Entrada
+        // Normalização do Combustível
         const tipoCombustivelNormalizado = normalizeFuelType(tipo_combustivel);
 
         // 1. Validar Veículo
@@ -125,7 +124,6 @@ const criarSolicitacao = async (req, res) => {
             return res.status(400).json({ error: `Erro de Leitura: ${erroValidacao} (Tentativa ${novasTentativas}/3).` });
         }
 
-        // Resetar tentativas
         await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = 0 WHERE id = ?', [usuarioId]);
 
         // 4. Trava Orçamentária
@@ -135,7 +133,6 @@ const criarSolicitacao = async (req, res) => {
             if (valorContrato > 0) {
                  const [expenses] = await connection.execute("SELECT SUM(amount) as total FROM expenses WHERE obraId = ? AND category = 'Combustível'", [obra_id]);
                  const totalGasto = safeNum(expenses[0].total);
-                 // Estimativa com preço base de segurança
                  const custoEst = (flag_tanque_cheio ? 200 : safeNum(litragem)) * 6.50;
                  if ((totalGasto + custoEst) > (valorContrato * 0.20)) {
                     await connection.rollback();
@@ -152,21 +149,22 @@ const criarSolicitacao = async (req, res) => {
             obsFinal = `[Item: ${descricao_outros}] ${obsFinal}`;
         }
         
-        // 6. Inserir (Usando combustível normalizado)
+        // 6. Inserir (FIX: Adicionado o ? para longitude que faltava)
+        // 18 colunas no INSERT -> 15 placeholers (?) + 3 valores fixos ('PENDENTE', 0, NOW()) = 18 valores.
         const [result] = await connection.execute(
             `INSERT INTO solicitacoes_abastecimento 
             (usuario_id, veiculo_id, obra_id, posto_id, funcionario_id, tipo_combustivel, 
             litragem_solicitada, flag_tanque_cheio, flag_outros, 
             horimetro_informado, odometro_informado, foto_painel_path, 
             geo_latitude, geo_longitude, status, alerta_media_consumo, data_solicitacao, observacao)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, NOW(), ?)`,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, NOW(), ?)`,
             [
                 usuarioId, 
                 veiculo_id, 
                 obra_id, 
                 posto_id || null, 
                 funcionario_id || null, 
-                tipoCombustivelNormalizado, // <--- AQUI: Salva 'dieselS10' no banco
+                tipoCombustivelNormalizado, 
                 safeNum(litragem), 
                 (flag_tanque_cheio === '1' || flag_tanque_cheio === 'true' || flag_tanque_cheio === true) ? 1 : 0, 
                 isOutros ? 1 : 0,
@@ -174,7 +172,7 @@ const criarSolicitacao = async (req, res) => {
                 novoOdometro || null, 
                 fotoPainel,
                 latitude || null, 
-                longitude || null,
+                longitude || null, // Este campo estava sem o '?' correspondente
                 obsFinal
             ]
         );
@@ -272,8 +270,6 @@ const avaliarSolicitacao = async (req, res) => {
             }
 
             let employeeId = sol.funcionario_id; 
-            
-            // SEGURANÇA EXTRA: Normaliza também aqui na aprovação, caso a solicitação tenha sido salva antes do fix
             const combustivelFinal = normalizeFuelType(sol.tipo_combustivel);
 
             await connection.execute(
@@ -294,7 +290,7 @@ const avaliarSolicitacao = async (req, res) => {
                     partnerName,
                     employeeId, 
                     sol.obra_id, 
-                    combustivelFinal, // <--- AQUI: Garante que vai normalizado para a ordem
+                    combustivelFinal, 
                     sol.flag_tanque_cheio, 
                     safeNum(sol.litragem_solicitada),
                     safeNum(sol.odometro_informado), 
