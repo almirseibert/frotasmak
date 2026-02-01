@@ -5,7 +5,7 @@ const fs = require('fs');
 const multer = require('multer');
 const crypto = require('crypto');
 
-// --- CONFIGURAÇÃO MULTER (Uploads Otimizados) ---
+// --- CONFIGURAÇÃO MULTER ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = path.join(__dirname, '../public/uploads/solicitacoes');
@@ -21,7 +21,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // Limite 5MB
+    limits: { fileSize: 5 * 1024 * 1024 }
 });
 
 // --- HELPERS ---
@@ -29,6 +29,25 @@ const safeNum = (val) => {
     if (val === null || val === undefined || val === '') return 0;
     const n = parseFloat(val);
     return isNaN(n) ? 0 : n;
+};
+
+// HELPER: Normaliza o tipo de combustível para o padrão do sistema (camelCase)
+const normalizeFuelType = (val) => {
+    if (!val) return null;
+    const v = val.toString().trim().toUpperCase();
+    
+    // Mapeamento: Display Name -> System Value
+    const map = {
+        'DIESEL S10': 'dieselS10',
+        'DIESEL S500': 'dieselS500',
+        'GASOLINA COMUM': 'gasolinaComum',
+        'GASOLINA ADITIVADA': 'gasolinaAditivada',
+        'ETANOL': 'etanol',
+        'ARLA 32': 'arla32'
+    };
+
+    // Retorna o valor mapeado ou o original (caso já esteja correto ou seja desconhecido)
+    return map[v] || val;
 };
 
 // --- CORE: CRIAR SOLICITAÇÃO ---
@@ -39,153 +58,124 @@ const criarSolicitacao = async (req, res) => {
     try {
         const usuarioId = req.user.id;
         
-        // CORREÇÃO: Ler os campos em snake_case conforme enviado pelo FormData do Frontend
         const { 
             veiculo_id, 
             obra_id, 
             posto_id, 
-            funcionario_id, // Adicionado para capturar o motorista
+            funcionario_id, 
             tipo_combustivel, 
             litragem, 
             flag_tanque_cheio, 
             flag_outros, 
+            descricao_outros, 
             horimetro, 
             odometro, 
             latitude, 
             longitude,
-            observacao
+            observacao 
         } = req.body;
 
         const fotoPainel = req.file ? `/uploads/solicitacoes/${req.file.filename}` : null;
 
-        // 1. Verificar Bloqueio do Usuário
-        const [users] = await connection.execute('SELECT bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE id = ?', [usuarioId]);
+        // Normalização do Combustível na Entrada
+        const tipoCombustivelNormalizado = normalizeFuelType(tipo_combustivel);
+
+        // 1. Validar Veículo
+        if (!veiculo_id) throw new Error("ID do veículo não informado.");
         
-        if (!users.length || users[0].bloqueado_abastecimento === 1) {
-            await connection.rollback();
-            if (req.file) fs.unlinkSync(req.file.path);
-            return res.status(403).json({ error: 'USUÁRIO BLOQUEADO ou inexistente. Contate o administrador.' });
-        }
-
-        // Validação se veiculo_id chegou
-        if (!veiculo_id) {
-            throw new Error("ID do veículo não informado.");
-        }
-
-        // 2. Verificar Regras de Leitura e Consistência
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [veiculo_id]);
-        
         if (vehicles.length === 0) {
             await connection.rollback();
             if (req.file) fs.unlinkSync(req.file.path);
-            return res.status(404).json({ error: 'Veículo não encontrado no sistema.' });
+            return res.status(404).json({ error: 'Veículo não encontrado.' });
+        }
+        const veiculo = vehicles[0];
+
+        // 2. Validar Bloqueio Usuário
+        const [users] = await connection.execute('SELECT bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE id = ?', [usuarioId]);
+        if (!users.length || users[0].bloqueado_abastecimento === 1) {
+            await connection.rollback();
+            if (req.file) fs.unlinkSync(req.file.path);
+            return res.status(403).json({ error: 'USUÁRIO BLOQUEADO. Contate o administrador.' });
         }
 
-        const veiculo = vehicles[0];
-        
+        // 3. Validação Leitura
         let erroValidacao = null;
         const novoOdometro = safeNum(odometro);
         const novoHorimetro = safeNum(horimetro);
         const antOdometro = safeNum(veiculo.odometro);
         const antHorimetro = safeNum(veiculo.horimetro || veiculo.horimetroDigital);
 
-        // Validação Odômetro
         if (novoOdometro > 0) {
             if (novoOdometro < antOdometro) erroValidacao = `Odômetro menor que o anterior (${antOdometro} Km).`;
-            else if ((novoOdometro - antOdometro) > 2000) erroValidacao = `Salto de Odômetro excessivo (>2000km). Verifique a digitação.`;
+            else if ((novoOdometro - antOdometro) > 2000) erroValidacao = `Salto de Odômetro excessivo.`;
         }
-
-        // Validação Horímetro
         if (novoHorimetro > 0) {
             if (novoHorimetro < antHorimetro) erroValidacao = `Horímetro menor que o anterior (${antHorimetro} h).`;
-            else if ((novoHorimetro - antHorimetro) > 100) erroValidacao = `Salto de Horímetro excessivo (>100h). Verifique a digitação.`;
+            else if ((novoHorimetro - antHorimetro) > 100) erroValidacao = `Salto de Horímetro excessivo.`;
         }
 
-        // --- LÓGICA DE BLOQUEIO POR TENTATIVAS FALHAS ---
         if (erroValidacao) {
             const novasTentativas = users[0].tentativas_falhas_abastecimento + 1;
-            let bloquear = 0;
-            let msgBloqueio = '';
-
-            if (novasTentativas >= 3) {
-                bloquear = 1;
-                msgBloqueio = ' USUÁRIO BLOQUEADO POR TENTATIVAS EXCEDIDAS.';
-            }
-
-            await connection.execute(
-                'UPDATE users SET tentativas_falhas_abastecimento = ?, bloqueado_abastecimento = ? WHERE id = ?',
-                [novasTentativas, bloquear, usuarioId]
-            );
+            const bloquear = novasTentativas >= 3 ? 1 : 0;
             
+            await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = ?, bloqueado_abastecimento = ? WHERE id = ?', [novasTentativas, bloquear, usuarioId]);
             await connection.commit();
             if (req.file) fs.unlinkSync(req.file.path);
-
-            return res.status(400).json({ 
-                error: `Erro de Leitura: ${erroValidacao} (Tentativa ${novasTentativas}/3).${msgBloqueio}` 
-            });
+            return res.status(400).json({ error: `Erro de Leitura: ${erroValidacao} (Tentativa ${novasTentativas}/3).` });
         }
 
+        // Resetar tentativas
         await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = 0 WHERE id = ?', [usuarioId]);
 
-        // 3. Trava Orçamentária
+        // 4. Trava Orçamentária
         const [obras] = await connection.execute('SELECT * FROM obras WHERE id = ?', [obra_id]);
-        
-        const obraData = obras[0] || {};
-        const valorContratoEncontrado = obraData.valorContrato || obraData.valor_contrato || obraData.contractValue || 0;
-
-        if (obras.length > 0 && safeNum(valorContratoEncontrado) > 0) {
-            const valorContrato = parseFloat(valorContratoEncontrado);
-            const [expenses] = await connection.execute(
-                "SELECT SUM(amount) as total FROM expenses WHERE obraId = ? AND category = 'Combustível'", 
-                [obra_id]
-            );
-            const totalGasto = safeNum(expenses[0].total);
-            
-            let precoEst = 6.00; 
-            if (posto_id) {
-                const [precos] = await connection.execute('SELECT price FROM partner_fuel_prices WHERE partnerId = ? AND fuelType = ?', [posto_id, tipo_combustivel]);
-                if (precos.length > 0) precoEst = safeNum(precos[0].price);
-            }
-            
-            const isTanqueCheio = (flag_tanque_cheio === '1' || flag_tanque_cheio === 'true' || flag_tanque_cheio === true);
-            const litragemEstimada = isTanqueCheio ? 200 : safeNum(litragem);
-            const custoEstimado = litragemEstimada * precoEst;
-            
-            if ((totalGasto + custoEstimado) > (valorContrato * 0.20)) {
-                await connection.rollback();
-                if (req.file) fs.unlinkSync(req.file.path);
-                return res.status(400).json({ error: 'Limite orçamentário da obra excedido (20%). Solicitação bloqueada pelo sistema.' });
+        if (obras.length > 0) {
+            const valorContrato = parseFloat(obras[0].valorContrato || 0);
+            if (valorContrato > 0) {
+                 const [expenses] = await connection.execute("SELECT SUM(amount) as total FROM expenses WHERE obraId = ? AND category = 'Combustível'", [obra_id]);
+                 const totalGasto = safeNum(expenses[0].total);
+                 // Estimativa com preço base de segurança
+                 const custoEst = (flag_tanque_cheio ? 200 : safeNum(litragem)) * 6.50;
+                 if ((totalGasto + custoEst) > (valorContrato * 0.20)) {
+                    await connection.rollback();
+                    if (req.file) fs.unlinkSync(req.file.path);
+                    return res.status(400).json({ error: 'Limite orçamentário (20%) excedido.' });
+                 }
             }
         }
 
-        const isTanqueCheio = (flag_tanque_cheio === '1' || flag_tanque_cheio === 'true' || flag_tanque_cheio === true);
+        // 5. Preparar Dados
+        let obsFinal = observacao || '';
         const isOutros = (flag_outros === '1' || flag_outros === 'true' || flag_outros === true);
-
-        // 4. Inserir Solicitação
-        // CORREÇÃO: Inclusão do funcionario_id na query de INSERT
+        if (isOutros && descricao_outros) {
+            obsFinal = `[Item: ${descricao_outros}] ${obsFinal}`;
+        }
         
+        // 6. Inserir (Usando combustível normalizado)
         const [result] = await connection.execute(
             `INSERT INTO solicitacoes_abastecimento 
             (usuario_id, veiculo_id, obra_id, posto_id, funcionario_id, tipo_combustivel, 
             litragem_solicitada, flag_tanque_cheio, flag_outros, 
             horimetro_informado, odometro_informado, foto_painel_path, 
-            geo_latitude, geo_longitude, status, alerta_media_consumo, data_solicitacao)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, NOW())`,
+            geo_latitude, geo_longitude, status, alerta_media_consumo, data_solicitacao, observacao)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDENTE', 0, NOW(), ?)`,
             [
                 usuarioId, 
                 veiculo_id, 
                 obra_id, 
                 posto_id || null, 
-                funcionario_id || null, // Salva o ID do motorista
-                tipo_combustivel,
+                funcionario_id || null, 
+                tipoCombustivelNormalizado, // <--- AQUI: Salva 'dieselS10' no banco
                 safeNum(litragem), 
-                isTanqueCheio ? 1 : 0, 
+                (flag_tanque_cheio === '1' || flag_tanque_cheio === 'true' || flag_tanque_cheio === true) ? 1 : 0, 
                 isOutros ? 1 : 0,
                 novoHorimetro || null, 
                 novoOdometro || null, 
                 fotoPainel,
                 latitude || null, 
-                longitude || null
+                longitude || null,
+                obsFinal
             ]
         );
 
@@ -193,26 +183,22 @@ const criarSolicitacao = async (req, res) => {
         
         if (req.io) {
             req.io.emit('server:sync', { targets: ['solicitacoes'] });
-            req.io.emit('admin:notificacao', { 
-                tipo: 'nova_solicitacao', 
-                msg: `Nova solicitação #${result.insertId} recebida.`,
-                id: result.insertId 
-            });
+            req.io.emit('admin:notificacao', { tipo: 'nova_solicitacao', id: result.insertId });
         }
 
-        res.status(201).json({ message: 'Solicitação enviada! Aguarde a liberação.', id: result.insertId });
+        res.status(201).json({ message: 'Solicitação enviada!', id: result.insertId });
 
     } catch (error) {
         await connection.rollback();
-        console.error("Erro Criar Solicitação:", error);
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path); 
-        res.status(500).json({ error: 'Erro ao processar solicitação: ' + error.message });
+        console.error("Erro Criar Solicitacao:", error);
+        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        res.status(500).json({ error: 'Erro no servidor: ' + error.message });
     } finally {
         connection.release();
     }
 };
 
-// --- LISTAR SOLICITAÇÕES ---
+// --- LISTAR ---
 const listarSolicitacoes = async (req, res) => {
     try {
         const usuarioId = req.user.id;
@@ -239,22 +225,15 @@ const listarSolicitacoes = async (req, res) => {
             params.push(usuarioId);
         }
 
-        query += ` ORDER BY 
-            CASE WHEN s.status = 'PENDENTE' THEN 1 
-                 WHEN s.status = 'AGUARDANDO_BAIXA' THEN 2 
-                 ELSE 3 END, 
-            s.data_solicitacao DESC LIMIT 100`;
-
+        query += ` ORDER BY s.data_solicitacao DESC LIMIT 100`;
         const [rows] = await db.execute(query, params);
         res.json(rows);
-
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Erro ao listar solicitações.' });
+        res.status(500).json({ error: 'Erro ao listar.' });
     }
 };
 
-// --- AVALIAR (GESTOR: LIBERAR OU NEGAR) ---
+// --- AVALIAR (GESTOR) ---
 const avaliarSolicitacao = async (req, res) => {
     const { id } = req.params;
     const { status, motivoNegativa } = req.body; 
@@ -264,7 +243,7 @@ const avaliarSolicitacao = async (req, res) => {
 
     try {
         const [solicitacao] = await connection.execute('SELECT * FROM solicitacoes_abastecimento WHERE id = ? FOR UPDATE', [id]);
-        if (solicitacao.length === 0) {
+        if (!solicitacao.length) {
             await connection.rollback();
             return res.status(404).json({ error: 'Solicitação não encontrada' });
         }
@@ -276,7 +255,6 @@ const avaliarSolicitacao = async (req, res) => {
                 'UPDATE solicitacoes_abastecimento SET status = ?, motivo_negativa = ?, aprovado_por_usuario_id = ?, data_aprovacao = NOW() WHERE id = ?',
                 ['NEGADO', motivoNegativa, req.user.id, id]
             );
-            
             await connection.commit();
             if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
             return res.json({ message: 'Solicitação negada.' });
@@ -293,9 +271,11 @@ const avaliarSolicitacao = async (req, res) => {
                 if (p.length > 0) partnerName = p[0].razaoSocial;
             }
 
-            // CORREÇÃO: Agora passamos sol.funcionario_id para o campo employeeId (antes estava null)
-            // Também garantimos o repasse do tipo de combustível
+            let employeeId = sol.funcionario_id; 
             
+            // SEGURANÇA EXTRA: Normaliza também aqui na aprovação, caso a solicitação tenha sido salva antes do fix
+            const combustivelFinal = normalizeFuelType(sol.tipo_combustivel);
+
             await connection.execute(
                 `INSERT INTO refuelings (
                     id, authNumber, vehicleId, partnerId, partnerName, 
@@ -305,20 +285,21 @@ const avaliarSolicitacao = async (req, res) => {
                     odometro, horimetro, 
                     outros, outrosValor,
                     createdBy
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 'Aberta', ?, 0, 0, 0, ?, 0, ?, ?, NULL, 0, ?)`,
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 'Aberta', ?, 0, 0, 0, ?, 0, ?, ?, ?, 0, ?)`,
                 [
                     newRefuelingId, 
                     newAuthNumber, 
                     sol.veiculo_id, 
                     sol.posto_id || null, 
                     partnerName,
-                    sol.funcionario_id || null, // Agora usa o ID gravado na solicitação
+                    employeeId, 
                     sol.obra_id, 
-                    sol.tipo_combustivel, 
+                    combustivelFinal, // <--- AQUI: Garante que vai normalizado para a ordem
                     sol.flag_tanque_cheio, 
                     safeNum(sol.litragem_solicitada),
                     safeNum(sol.odometro_informado), 
                     safeNum(sol.horimetro_informado),
+                    sol.observacao || null, 
                     JSON.stringify({ id: req.user.id, name: req.user.name || 'Gestor' })
                 ]
             );
@@ -338,33 +319,25 @@ const avaliarSolicitacao = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error("Erro Avaliar:", error);
-        res.status(500).json({ error: 'Erro ao avaliar solicitação: ' + error.message });
+        res.status(500).json({ error: 'Erro ao avaliar: ' + error.message });
     } finally {
         connection.release();
     }
 };
 
-// --- ENVIAR COMPROVANTE ---
 const enviarComprovante = async (req, res) => {
     const { id } = req.params;
     try {
-        if (!req.file) return res.status(400).json({ error: 'Foto do cupom obrigatória.' });
+        if (!req.file) return res.status(400).json({ error: 'Foto obrigatória.' });
         const fotoPath = `/uploads/solicitacoes/${req.file.filename}`;
-        await db.execute(
-            'UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?',
-            [fotoPath, id]
-        );
-        if (req.io) {
-            req.io.emit('server:sync', { targets: ['solicitacoes'] });
-            req.io.emit('admin:notificacao', { tipo: 'baixa_pendente', msg: `Comprovante enviado para solicitação #${id}.`, id: id });
-        }
+        await db.execute('UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?', [fotoPath, id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
         res.json({ message: 'Comprovante enviado.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao enviar comprovante.' });
     }
 };
 
-// --- CONFIRMAR BAIXA ---
 const confirmarBaixa = async (req, res) => {
     const { id } = req.params;
     try {
@@ -376,7 +349,6 @@ const confirmarBaixa = async (req, res) => {
     }
 };
 
-// --- REJEITAR COMPROVANTE ---
 const rejeitarComprovante = async (req, res) => {
     const { id } = req.params;
     try {
@@ -384,7 +356,7 @@ const rejeitarComprovante = async (req, res) => {
         if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
         res.json({ message: 'Comprovante rejeitado.' });
     } catch (error) {
-        res.status(500).json({ error: 'Erro ao rejeitar comprovante.' });
+        res.status(500).json({ error: 'Erro ao rejeitar.' });
     }
 };
 
