@@ -216,6 +216,31 @@ const criarSolicitacao = async (req, res) => {
     }
 };
 
+// --- LISTAR TODAS (ADMIN) ---
+const listarSolicitacoes = async (req, res) => {
+    try {
+        const query = `
+            SELECT s.*, 
+                v.placa as veiculo_placa, v.modelo as veiculo_modelo,
+                o.nome as obra_nome,
+                p.name as posto_nome,
+                u.name as usuario_nome
+            FROM solicitacoes_abastecimento s
+            LEFT JOIN vehicles v ON s.veiculo_id = v.id
+            LEFT JOIN obras o ON s.obra_id = o.id
+            LEFT JOIN partners p ON s.posto_id = p.id
+            LEFT JOIN users u ON s.usuario_id = u.id
+            ORDER BY s.data_solicitacao DESC
+            LIMIT 100
+        `;
+        const [rows] = await db.execute(query);
+        res.json(rows);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Erro ao listar solicitações.' });
+    }
+};
+
 // --- LISTAR MINHAS SOLICITAÇÕES ---
 const listarMinhasSolicitacoes = async (req, res) => {
     try {
@@ -299,10 +324,11 @@ const confirmarBaixa = async (req, res) => {
 };
 
 module.exports = {
-    upload, // ADICIONADO AQUI PARA CORRIGIR O ERRO NAS ROTAS
+    upload, 
     getContextoUsuario,
     verificarStatusUsuario,
     criarSolicitacao,
+    listarSolicitacoes, // Adicionado para corrigir o erro na rota GET /
     listarMinhasSolicitacoes,
     enviarCupom,
     rejeitarComprovante,
