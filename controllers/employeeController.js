@@ -18,19 +18,11 @@ const parseJsonSafe = (field) => {
 
 const cleanCpf = (cpf) => cpf ? cpf.replace(/\D/g, '') : '';
 
-/**
- * Converte string vazia para NULL para evitar erro "Incorrect date value" no MySQL
- * Também protege contra undefined.
- */
 const toDateOrNull = (dateStr) => {
     if (!dateStr || dateStr === '') return null;
     return dateStr;
 };
 
-/**
- * Garante que valores undefined virem NULL (para evitar crash do MySQL2)
- * Se for string vazia, mantém vazia ou vira null dependendo da preferência (aqui mantemos null para consistência em campos opcionais)
- */
 const valOrNull = (val) => {
     if (val === undefined || val === '') return null;
     return val;
@@ -160,20 +152,17 @@ const createEmployee = async (req, res) => {
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
         
-        // Tratamento seguro de campos CNH
         const cnhNumero = valOrNull(data.cnhNumero || cnhObj.numero);
         const cnhCategoria = valOrNull(data.cnhCategoria || cnhObj.categoria);
         const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
 
-        // Tratamento de datas
         const dataNascimento = toDateOrNull(data.dataNascimento);
         const dataAdmissao = toDateOrNull(data.dataAdmissao);
         const dataContratacao = dataAdmissao; 
 
         const status = 'ativo';
 
-        // Array de valores com proteção TOTAL contra undefined (valOrNull em tudo que é opcional)
-        // O campo 'telefone' estava vindo undefined do frontend e causando o erro 500
+        // CORREÇÃO: Removemos 'telefone' pois o banco usa 'contato'
         const values = [
             newId, 
             valOrNull(data.nome), 
@@ -183,7 +172,7 @@ const createEmployee = async (req, res) => {
             valOrNull(data.rg), 
             dataNascimento, 
             valOrNull(data.funcao), 
-            valOrNull(data.telefone), // <-- Aqui estava o erro principal
+            // valOrNull(data.telefone), // REMOVIDO: Coluna telefone não existe, usamos contato
             valOrNull(data.contato), 
             valOrNull(data.email),
             valOrNull(data.endereco), 
@@ -200,17 +189,17 @@ const createEmployee = async (req, res) => {
             certificados
         ];
 
+        // Query sem a coluna telefone
         await connection.execute(
             `INSERT INTO employees (
-                id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, telefone, contato, email, 
+                id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, contato, email, 
                 endereco, cidade, dataAdmissao, dataContratacao, status, 
                 cnhNumero, cnhCategoria, cnhVencimento,
                 aso, epi, cnh, certificados
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             values
         );
 
-        // Criação Automática de Usuário
         const cpfLimpo = cleanCpf(data.cpf);
         if (cpfLimpo && cpfLimpo.length > 5) {
             const userEmail = `${cpfLimpo}@frotamak.com`;
@@ -270,7 +259,7 @@ const updateEmployee = async (req, res) => {
 
         let statusUpdateClause = "";
         
-        // Proteção total contra undefined no array de update também
+        // CORREÇÃO: Removemos 'telefone' da atualização
         let params = [
             valOrNull(data.nome), 
             valOrNull(data.vulgo), 
@@ -279,7 +268,7 @@ const updateEmployee = async (req, res) => {
             valOrNull(data.rg), 
             dataNascimento, 
             valOrNull(data.funcao), 
-            valOrNull(data.telefone), // Proteção
+            // valOrNull(data.telefone), // REMOVIDO
             valOrNull(data.contato), 
             valOrNull(data.email), 
             valOrNull(data.endereco), 
@@ -305,7 +294,7 @@ const updateEmployee = async (req, res) => {
         await connection.execute(
             `UPDATE employees SET 
                 nome=?, vulgo=?, registroInterno=?, cpf=?, rg=?, dataNascimento=?, funcao=?, 
-                telefone=?, contato=?, email=?, endereco=?, cidade=?, 
+                contato=?, email=?, endereco=?, cidade=?, 
                 dataAdmissao=?, 
                 cnhNumero=?, cnhCategoria=?, cnhVencimento=?,
                 aso=?, epi=?, cnh=?, certificados=?, dataDesligamento=?
