@@ -20,10 +20,20 @@ const cleanCpf = (cpf) => cpf ? cpf.replace(/\D/g, '') : '';
 
 /**
  * Converte string vazia para NULL para evitar erro "Incorrect date value" no MySQL
+ * Também protege contra undefined.
  */
 const toDateOrNull = (dateStr) => {
     if (!dateStr || dateStr === '') return null;
     return dateStr;
+};
+
+/**
+ * Garante que valores undefined virem NULL (para evitar crash do MySQL2)
+ * Se for string vazia, mantém vazia ou vira null dependendo da preferência (aqui mantemos null para consistência em campos opcionais)
+ */
+const valOrNull = (val) => {
+    if (val === undefined || val === '') return null;
+    return val;
 };
 
 // ===================================================================================
@@ -33,14 +43,10 @@ const toDateOrNull = (dateStr) => {
 // --- LISTAR TODOS ---
 const getAllEmployees = async (req, res) => {
     try {
-        // 1. Busca Funcionários (Principal)
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
 
-        // 2. Busca ALOCAÇÕES ATIVAS (Para exibir o RE correto na listagem)
         let allocationMap = {};
-
         try {
-            // A. Busca alocações em Obras
             const [activeObraAllocations] = await db.query(`
                 SELECT h.employeeId, v.registroInterno, v.modelo, v.placa, o.nome as obraNome
                 FROM obras_historico_veiculos h
@@ -49,62 +55,37 @@ const getAllEmployees = async (req, res) => {
                 WHERE h.dataSaida IS NULL
             `);
 
-            // B. Busca alocações Operacionais
             const [activeOpAllocations] = await db.query(`
                 SELECT a.employeeId, v.registroInterno, v.modelo, v.placa, 'Operacional' as subGroup
                 FROM vehicle_operational_assignment a
                 INNER JOIN vehicles v ON a.vehicleId = v.id
             `);
 
-            // C. Popula o mapa de alocações
             [...activeObraAllocations, ...activeOpAllocations].forEach(alloc => {
                 const desc = alloc.registroInterno ? `${alloc.registroInterno}` : (alloc.placa || alloc.modelo);
-                
-                if (!allocationMap[alloc.employeeId]) {
-                    allocationMap[alloc.employeeId] = [];
-                }
-                if (!allocationMap[alloc.employeeId].includes(desc)) {
-                    allocationMap[alloc.employeeId].push(desc);
-                }
+                if (!allocationMap[alloc.employeeId]) { allocationMap[alloc.employeeId] = []; }
+                if (!allocationMap[alloc.employeeId].includes(desc)) { allocationMap[alloc.employeeId].push(desc); }
             });
+        } catch (err) { console.warn("Aviso: Erro ao buscar alocações ativas:", err.message); }
 
-        } catch (err) {
-            console.warn("Aviso: Erro ao buscar alocações ativas:", err.message);
-        }
-
-        // 3. Busca datas para cálculo de disponibilidade
         let lastObraDates = [];
         let lastOpDates = [];
-
         try {
-            const [obraRes] = await db.query(`
-                SELECT employeeId, MAX(dataSaida) as lastDate 
-                FROM obras_historico_veiculos 
-                WHERE dataSaida IS NOT NULL 
-                GROUP BY employeeId
-            `);
+            const [obraRes] = await db.query(`SELECT employeeId, MAX(dataSaida) as lastDate FROM obras_historico_veiculos WHERE dataSaida IS NOT NULL GROUP BY employeeId`);
             lastObraDates = obraRes;
-        } catch (err) { /* Ignora se tabela não existir */ }
+        } catch (err) { }
 
         try {
-            const [opRes] = await db.query(`
-                SELECT employeeId, MAX(endDate) as lastDate 
-                FROM vehicle_operational_assignment 
-                WHERE endDate IS NOT NULL 
-                GROUP BY employeeId
-            `);
+            const [opRes] = await db.query(`SELECT employeeId, MAX(endDate) as lastDate FROM vehicle_operational_assignment WHERE endDate IS NOT NULL GROUP BY employeeId`);
             lastOpDates = opRes;
-        } catch (err) { /* Ignora se tabela não existir */ }
+        } catch (err) { }
 
         const getLastAllocationDate = (empId) => {
             const obraDateStr = lastObraDates.find(x => String(x.employeeId) === String(empId))?.lastDate;
             const opDateStr = lastOpDates.find(x => String(x.employeeId) === String(empId))?.lastDate;
-            
             if (!obraDateStr && !opDateStr) return null;
-            
             const obraDate = obraDateStr ? new Date(obraDateStr) : new Date(0);
             const opDate = opDateStr ? new Date(opDateStr) : new Date(0);
-            
             return obraDate > opDate ? obraDate : opDate;
         };
         
@@ -155,11 +136,7 @@ const getEmployeeById = async (req, res) => {
             ...emp,
             aso: parseJsonSafe(emp.aso),
             epi: parseJsonSafe(emp.epi),
-            cnh: parseJsonSafe(emp.cnh) || { 
-                numero: emp.cnhNumero, 
-                categoria: emp.cnhCategoria, 
-                validade: emp.cnhVencimento 
-            },
+            cnh: parseJsonSafe(emp.cnh) || { numero: emp.cnhNumero, categoria: emp.cnhCategoria, validade: emp.cnhVencimento },
             certificados: parseJsonSafe(emp.certificados)
         });
     } catch (error) {
@@ -176,7 +153,6 @@ const createEmployee = async (req, res) => {
     try {
         const newId = uuidv4();
         
-        // Tratamento de JSONs
         const aso = JSON.stringify(data.aso || {});
         const epi = JSON.stringify(data.epi || {});
         const certificados = JSON.stringify(data.certificados || []);
@@ -184,22 +160,46 @@ const createEmployee = async (req, res) => {
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
         
-        // Tratamento de Campos CNH
-        const cnhNumero = data.cnhNumero || cnhObj.numero || null;
-        const cnhCategoria = data.cnhCategoria || cnhObj.categoria || null;
-        // Garante que se a data vier vazia string, vire null
+        // Tratamento seguro de campos CNH
+        const cnhNumero = valOrNull(data.cnhNumero || cnhObj.numero);
+        const cnhCategoria = valOrNull(data.cnhCategoria || cnhObj.categoria);
         const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
 
-        // Tratamento de Datas Críticas (Evita erro de string vazia no banco)
+        // Tratamento de datas
         const dataNascimento = toDateOrNull(data.dataNascimento);
         const dataAdmissao = toDateOrNull(data.dataAdmissao);
-        
-        // Sincronia de dataContratacao (Legado)
         const dataContratacao = dataAdmissao; 
 
         const status = 'ativo';
 
-        // 1. Inserção na tabela employees
+        // Array de valores com proteção TOTAL contra undefined (valOrNull em tudo que é opcional)
+        // O campo 'telefone' estava vindo undefined do frontend e causando o erro 500
+        const values = [
+            newId, 
+            valOrNull(data.nome), 
+            valOrNull(data.vulgo), 
+            valOrNull(data.registroInterno), 
+            valOrNull(data.cpf), 
+            valOrNull(data.rg), 
+            dataNascimento, 
+            valOrNull(data.funcao), 
+            valOrNull(data.telefone), // <-- Aqui estava o erro principal
+            valOrNull(data.contato), 
+            valOrNull(data.email),
+            valOrNull(data.endereco), 
+            valOrNull(data.cidade), 
+            dataAdmissao, 
+            dataContratacao, 
+            status,
+            cnhNumero, 
+            cnhCategoria, 
+            cnhVencimento,
+            aso, 
+            epi, 
+            cnhJson, 
+            certificados
+        ];
+
         await connection.execute(
             `INSERT INTO employees (
                 id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, telefone, contato, email, 
@@ -207,21 +207,13 @@ const createEmployee = async (req, res) => {
                 cnhNumero, cnhCategoria, cnhVencimento,
                 aso, epi, cnh, certificados
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [
-                newId, data.nome, data.vulgo, data.registroInterno, data.cpf, data.rg, dataNascimento, data.funcao, data.telefone, data.contato, data.email,
-                data.endereco, data.cidade, dataAdmissao, dataContratacao, status,
-                cnhNumero, cnhCategoria, cnhVencimento,
-                aso, epi, cnhJson, certificados
-            ]
+            values
         );
 
-        // 2. Criação Automática de Usuário (Login)
-        // Só tenta criar se tiver CPF válido para evitar duplicidade de email '@frotamak.com'
+        // Criação Automática de Usuário
         const cpfLimpo = cleanCpf(data.cpf);
-        if (cpfLimpo && cpfLimpo.length > 5) { // Validação básica de comprimento
+        if (cpfLimpo && cpfLimpo.length > 5) {
             const userEmail = `${cpfLimpo}@frotamak.com`;
-            
-            // Verifica se usuário já existe antes de tentar inserir
             const [existingUsers] = await connection.execute('SELECT id FROM users WHERE email = ?', [userEmail]);
             
             if (existingUsers.length === 0) {
@@ -229,7 +221,6 @@ const createEmployee = async (req, res) => {
                 const hashedPassword = await bcrypt.hash(cpfLimpo, salt);
                 const newUserId = uuidv4();
 
-                // OBS: Certifique-se que a tabela users tem a coluna employeeId
                 await connection.execute(
                     `INSERT INTO users (
                         id, name, email, password, role, user_type, status, canAccessRefueling, employeeId, data_criacao
@@ -240,21 +231,15 @@ const createEmployee = async (req, res) => {
         }
 
         await connection.commit();
-        
-        // Safety check para req.io
-        if (req.io) {
-            req.io.emit('server:sync', { targets: ['employees'] });
-        }
-        
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
         res.status(201).json({ message: 'Funcionário criado com sucesso.', id: newId });
 
     } catch (error) {
         await connection.rollback();
         console.error('Erro CREATE employee:', error);
-        // Retorna a mensagem SQL original para facilitar debugging no frontend
         res.status(500).json({ 
             error: error.message,
-            sqlMessage: error.sqlMessage || 'Erro desconhecido no banco de dados'
+            sqlMessage: error.sqlMessage 
         });
     } finally {
         connection.release();
@@ -275,25 +260,41 @@ const updateEmployee = async (req, res) => {
         
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
-        const cnhNumero = data.cnhNumero || cnhObj.numero || null;
-        const cnhCategoria = data.cnhCategoria || cnhObj.categoria || null;
+        const cnhNumero = valOrNull(data.cnhNumero || cnhObj.numero);
+        const cnhCategoria = valOrNull(data.cnhCategoria || cnhObj.categoria);
         const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
 
-        // Tratamento de datas
         const dataNascimento = toDateOrNull(data.dataNascimento);
         const dataAdmissao = toDateOrNull(data.dataAdmissao);
         const dataDesligamento = toDateOrNull(data.dataDesligamento);
 
         let statusUpdateClause = "";
+        
+        // Proteção total contra undefined no array de update também
         let params = [
-            data.nome, data.vulgo, data.registroInterno, data.cpf, data.rg, dataNascimento, data.funcao, 
-            data.telefone, data.contato, data.email, data.endereco, data.cidade, 
+            valOrNull(data.nome), 
+            valOrNull(data.vulgo), 
+            valOrNull(data.registroInterno), 
+            valOrNull(data.cpf), 
+            valOrNull(data.rg), 
+            dataNascimento, 
+            valOrNull(data.funcao), 
+            valOrNull(data.telefone), // Proteção
+            valOrNull(data.contato), 
+            valOrNull(data.email), 
+            valOrNull(data.endereco), 
+            valOrNull(data.cidade), 
             dataAdmissao, 
-            cnhNumero, cnhCategoria, cnhVencimento,
-            aso, epi, cnhJson, certificados, dataDesligamento
+            cnhNumero, 
+            cnhCategoria, 
+            cnhVencimento,
+            aso, 
+            epi, 
+            cnhJson, 
+            certificados, 
+            dataDesligamento
         ];
 
-        // Só atualiza status via PUT se for enviado explicitamente e não for um objeto JSON sujo
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
              statusUpdateClause = ", status = ?";
              params.push(data.status);
@@ -314,23 +315,17 @@ const updateEmployee = async (req, res) => {
         );
 
         if (data.status === 'inativo') {
-            await connection.execute(
-                `UPDATE users SET status = 'inativo', canAccessRefueling = 0 WHERE employeeId = ?`,
-                [id]
-            );
+            await connection.execute(`UPDATE users SET status = 'inativo', canAccessRefueling = 0 WHERE employeeId = ?`, [id]);
         }
 
         await connection.commit();
-        
-        if (req.io) {
-            req.io.emit('server:sync', { targets: ['employees'] });
-        }
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
         res.json({ message: 'Funcionário atualizado.' });
 
     } catch (error) {
         await connection.rollback();
         console.error('Erro UPDATE employee:', error);
-        res.status(500).json({ error: error.message || 'Erro ao atualizar funcionário.' });
+        res.status(500).json({ error: error.message });
     } finally {
         connection.release();
     }
@@ -341,9 +336,7 @@ const deleteEmployee = async (req, res) => {
     try {
         await db.execute('DELETE FROM employees WHERE id = ?', [id]);
         await db.execute('DELETE FROM users WHERE employeeId = ?', [id]);
-        
         if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
-        
         res.json({ message: 'Funcionário excluído.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao excluir funcionário.' });
@@ -400,10 +393,8 @@ const getEmployeeHistory = async (req, res) => {
                 subGroup: h.subGroup
             }))
         };
-
         res.json(unifiedHistory);
     } catch (error) {
-        console.error("Erro histórico funcionário:", error);
         res.status(500).json({ error: "Erro ao buscar histórico completo." });
     }
 };
@@ -412,7 +403,6 @@ const getEmployeeHistory = async (req, res) => {
 const updateEmployeeStatus = async (req, res) => {
     const { id } = req.params;
     const { status, date } = req.body;
-    
     if (!status || !date) return res.status(400).json({ message: "Status e Data obrigatórios." });
 
     const connection = await db.getConnection();
@@ -437,7 +427,6 @@ const updateEmployeeStatus = async (req, res) => {
         }
 
         await connection.execute(queryEmployee, paramsEmployee);
-
         const eventId = uuidv4();
         await connection.execute(
             `INSERT INTO employee_events_history (id, employeeId, eventType, eventDate, notes) VALUES (?, ?, ?, ?, ?)`,
@@ -445,10 +434,7 @@ const updateEmployeeStatus = async (req, res) => {
         );
 
         if (status === 'inativo') {
-            await connection.execute(
-                `UPDATE users SET status = 'inativo', canAccessRefueling = 0 WHERE employeeId = ?`,
-                [id]
-            );
+            await connection.execute(`UPDATE users SET status = 'inativo', canAccessRefueling = 0 WHERE employeeId = ?`, [id]);
         }
 
         await connection.commit();
@@ -457,7 +443,6 @@ const updateEmployeeStatus = async (req, res) => {
 
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao atualizar status:', error);
         res.status(500).json({ error: 'Erro ao atualizar status.' });
     } finally {
         connection.release();
@@ -472,7 +457,7 @@ const syncActiveEmployeesToUsers = async (req, res) => {
         let count = 0;
         for (const emp of employees) {
             const cpfLimpo = cleanCpf(emp.cpf);
-            if (!cpfLimpo || cpfLimpo.length < 5) continue; // Pula sem CPF
+            if (!cpfLimpo || cpfLimpo.length < 5) continue; 
             
             const userEmail = `${cpfLimpo}@frotamak.com`;
             const [exists] = await connection.execute('SELECT id FROM users WHERE email = ?', [userEmail]);
