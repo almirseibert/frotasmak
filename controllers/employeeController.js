@@ -18,6 +18,14 @@ const parseJsonSafe = (field) => {
 
 const cleanCpf = (cpf) => cpf ? cpf.replace(/\D/g, '') : '';
 
+/**
+ * Converte string vazia para NULL para evitar erro "Incorrect date value" no MySQL
+ */
+const toDateOrNull = (dateStr) => {
+    if (!dateStr || dateStr === '') return null;
+    return dateStr;
+};
+
 // ===================================================================================
 // CONTROLLERS
 // ===================================================================================
@@ -29,11 +37,10 @@ const getAllEmployees = async (req, res) => {
         const [rows] = await db.query('SELECT * FROM employees ORDER BY nome ASC');
 
         // 2. Busca ALOCAÇÕES ATIVAS (Para exibir o RE correto na listagem)
-        // Isso cruza dados de Obras e Operacional para saber onde o funcionário está AGORA.
         let allocationMap = {};
 
         try {
-            // A. Busca alocações em Obras (onde dataSaida é NULL)
+            // A. Busca alocações em Obras
             const [activeObraAllocations] = await db.query(`
                 SELECT h.employeeId, v.registroInterno, v.modelo, v.placa, o.nome as obraNome
                 FROM obras_historico_veiculos h
@@ -42,7 +49,7 @@ const getAllEmployees = async (req, res) => {
                 WHERE h.dataSaida IS NULL
             `);
 
-            // B. Busca alocações Operacionais (Tabela vehicle_operational_assignment)
+            // B. Busca alocações Operacionais
             const [activeOpAllocations] = await db.query(`
                 SELECT a.employeeId, v.registroInterno, v.modelo, v.placa, 'Operacional' as subGroup
                 FROM vehicle_operational_assignment a
@@ -56,7 +63,6 @@ const getAllEmployees = async (req, res) => {
                 if (!allocationMap[alloc.employeeId]) {
                     allocationMap[alloc.employeeId] = [];
                 }
-                // Evita duplicatas se o banco estiver sujo
                 if (!allocationMap[alloc.employeeId].includes(desc)) {
                     allocationMap[alloc.employeeId].push(desc);
                 }
@@ -66,7 +72,7 @@ const getAllEmployees = async (req, res) => {
             console.warn("Aviso: Erro ao buscar alocações ativas:", err.message);
         }
 
-        // 3. Busca datas para cálculo de disponibilidade (Lógica antiga mantida)
+        // 3. Busca datas para cálculo de disponibilidade
         let lastObraDates = [];
         let lastOpDates = [];
 
@@ -78,7 +84,7 @@ const getAllEmployees = async (req, res) => {
                 GROUP BY employeeId
             `);
             lastObraDates = obraRes;
-        } catch (err) { console.warn("Aviso data obra:", err.message); }
+        } catch (err) { /* Ignora se tabela não existir */ }
 
         try {
             const [opRes] = await db.query(`
@@ -87,8 +93,8 @@ const getAllEmployees = async (req, res) => {
                 WHERE endDate IS NOT NULL 
                 GROUP BY employeeId
             `);
-            lastOpDates = opRes; // Nota: vehicle_operational_assignment pode não ter endDate dependendo da versão, mas mantive a query
-        } catch (err) { /* Silencia erro se tabela não tiver endDate */ }
+            lastOpDates = opRes;
+        } catch (err) { /* Ignora se tabela não existir */ }
 
         const getLastAllocationDate = (empId) => {
             const obraDateStr = lastObraDates.find(x => String(x.employeeId) === String(empId))?.lastDate;
@@ -118,7 +124,7 @@ const getAllEmployees = async (req, res) => {
                 ...emp,
                 status: statusLimpo || 'ativo',
                 lastAllocationEnd: getLastAllocationDate(emp.id),
-                alocacaoAtual: allocationData, // Novo campo enviado ao frontend
+                alocacaoAtual: allocationData,
                 alocadoEm: parseJsonSafe(emp.alocadoEm),
                 aso: parseJsonSafe(emp.aso),
                 epi: parseJsonSafe(emp.epi),
@@ -170,18 +176,30 @@ const createEmployee = async (req, res) => {
     try {
         const newId = uuidv4();
         
+        // Tratamento de JSONs
         const aso = JSON.stringify(data.aso || {});
         const epi = JSON.stringify(data.epi || {});
         const certificados = JSON.stringify(data.certificados || []);
         
         const cnhObj = data.cnh || {};
         const cnhJson = JSON.stringify(cnhObj);
+        
+        // Tratamento de Campos CNH
         const cnhNumero = data.cnhNumero || cnhObj.numero || null;
         const cnhCategoria = data.cnhCategoria || cnhObj.categoria || null;
-        const cnhVencimento = data.cnhVencimento || cnhObj.validade || null;
+        // Garante que se a data vier vazia string, vire null
+        const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
+
+        // Tratamento de Datas Críticas (Evita erro de string vazia no banco)
+        const dataNascimento = toDateOrNull(data.dataNascimento);
+        const dataAdmissao = toDateOrNull(data.dataAdmissao);
+        
+        // Sincronia de dataContratacao (Legado)
+        const dataContratacao = dataAdmissao; 
 
         const status = 'ativo';
 
+        // 1. Inserção na tabela employees
         await connection.execute(
             `INSERT INTO employees (
                 id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, telefone, contato, email, 
@@ -190,23 +208,28 @@ const createEmployee = async (req, res) => {
                 aso, epi, cnh, certificados
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
-                newId, data.nome, data.vulgo, data.registroInterno, data.cpf, data.rg, data.dataNascimento, data.funcao, data.telefone, data.contato, data.email,
-                data.endereco, data.cidade, data.dataAdmissao, data.dataAdmissao, status,
+                newId, data.nome, data.vulgo, data.registroInterno, data.cpf, data.rg, dataNascimento, data.funcao, data.telefone, data.contato, data.email,
+                data.endereco, data.cidade, dataAdmissao, dataContratacao, status,
                 cnhNumero, cnhCategoria, cnhVencimento,
                 aso, epi, cnhJson, certificados
             ]
         );
 
+        // 2. Criação Automática de Usuário (Login)
+        // Só tenta criar se tiver CPF válido para evitar duplicidade de email '@frotamak.com'
         const cpfLimpo = cleanCpf(data.cpf);
-        if (cpfLimpo) {
+        if (cpfLimpo && cpfLimpo.length > 5) { // Validação básica de comprimento
             const userEmail = `${cpfLimpo}@frotamak.com`;
-            const salt = await bcrypt.genSalt(10);
-            const hashedPassword = await bcrypt.hash(cpfLimpo, salt);
-            const newUserId = uuidv4();
-
+            
+            // Verifica se usuário já existe antes de tentar inserir
             const [existingUsers] = await connection.execute('SELECT id FROM users WHERE email = ?', [userEmail]);
             
             if (existingUsers.length === 0) {
+                const salt = await bcrypt.genSalt(10);
+                const hashedPassword = await bcrypt.hash(cpfLimpo, salt);
+                const newUserId = uuidv4();
+
+                // OBS: Certifique-se que a tabela users tem a coluna employeeId
                 await connection.execute(
                     `INSERT INTO users (
                         id, name, email, password, role, user_type, status, canAccessRefueling, employeeId, data_criacao
@@ -217,13 +240,22 @@ const createEmployee = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['employees'] });
+        
+        // Safety check para req.io
+        if (req.io) {
+            req.io.emit('server:sync', { targets: ['employees'] });
+        }
+        
         res.status(201).json({ message: 'Funcionário criado com sucesso.', id: newId });
 
     } catch (error) {
         await connection.rollback();
         console.error('Erro CREATE employee:', error);
-        res.status(500).json({ error: error.message });
+        // Retorna a mensagem SQL original para facilitar debugging no frontend
+        res.status(500).json({ 
+            error: error.message,
+            sqlMessage: error.sqlMessage || 'Erro desconhecido no banco de dados'
+        });
     } finally {
         connection.release();
     }
@@ -245,17 +277,23 @@ const updateEmployee = async (req, res) => {
         const cnhJson = JSON.stringify(cnhObj);
         const cnhNumero = data.cnhNumero || cnhObj.numero || null;
         const cnhCategoria = data.cnhCategoria || cnhObj.categoria || null;
-        const cnhVencimento = data.cnhVencimento || cnhObj.validade || null;
+        const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
+
+        // Tratamento de datas
+        const dataNascimento = toDateOrNull(data.dataNascimento);
+        const dataAdmissao = toDateOrNull(data.dataAdmissao);
+        const dataDesligamento = toDateOrNull(data.dataDesligamento);
 
         let statusUpdateClause = "";
         let params = [
-            data.nome, data.vulgo, data.registroInterno, data.cpf, data.rg, data.dataNascimento, data.funcao, 
+            data.nome, data.vulgo, data.registroInterno, data.cpf, data.rg, dataNascimento, data.funcao, 
             data.telefone, data.contato, data.email, data.endereco, data.cidade, 
-            data.dataAdmissao, 
+            dataAdmissao, 
             cnhNumero, cnhCategoria, cnhVencimento,
-            aso, epi, cnhJson, certificados, data.dataDesligamento || null
+            aso, epi, cnhJson, certificados, dataDesligamento
         ];
 
+        // Só atualiza status via PUT se for enviado explicitamente e não for um objeto JSON sujo
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
              statusUpdateClause = ", status = ?";
              params.push(data.status);
@@ -283,13 +321,16 @@ const updateEmployee = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['employees'] });
+        
+        if (req.io) {
+            req.io.emit('server:sync', { targets: ['employees'] });
+        }
         res.json({ message: 'Funcionário atualizado.' });
 
     } catch (error) {
         await connection.rollback();
         console.error('Erro UPDATE employee:', error);
-        res.status(500).json({ error: 'Erro ao atualizar funcionário.' });
+        res.status(500).json({ error: error.message || 'Erro ao atualizar funcionário.' });
     } finally {
         connection.release();
     }
@@ -300,7 +341,9 @@ const deleteEmployee = async (req, res) => {
     try {
         await db.execute('DELETE FROM employees WHERE id = ?', [id]);
         await db.execute('DELETE FROM users WHERE employeeId = ?', [id]);
-        req.io.emit('server:sync', { targets: ['employees'] });
+        
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
+        
         res.json({ message: 'Funcionário excluído.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao excluir funcionário.' });
@@ -314,7 +357,6 @@ const getEmployeeHistory = async (req, res) => {
         let obraHistory = [];
         let operationalHistory = [];
 
-        // Proteção contra falhas nas tabelas
         try {
             const [rows] = await db.execute(
                 `SELECT h.*, o.nome as obraNome, v.placa, v.modelo, v.registroInterno as veiculoRegistro
@@ -410,7 +452,7 @@ const updateEmployeeStatus = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['employees'] });
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
         res.json({ message: `Status atualizado para ${status}.` });
 
     } catch (error) {
@@ -430,9 +472,11 @@ const syncActiveEmployeesToUsers = async (req, res) => {
         let count = 0;
         for (const emp of employees) {
             const cpfLimpo = cleanCpf(emp.cpf);
-            if (!cpfLimpo) continue;
+            if (!cpfLimpo || cpfLimpo.length < 5) continue; // Pula sem CPF
+            
             const userEmail = `${cpfLimpo}@frotamak.com`;
             const [exists] = await connection.execute('SELECT id FROM users WHERE email = ?', [userEmail]);
+            
             if (exists.length === 0) {
                 const newUserId = uuidv4();
                 const hash = await bcrypt.hash(cpfLimpo, 10);
