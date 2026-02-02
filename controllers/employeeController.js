@@ -214,7 +214,7 @@ const createEmployee = async (req, res) => {
                     `INSERT INTO users (
                         id, name, email, password, role, user_type, status, canAccessRefueling, employeeId, data_criacao
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-                    [newUserId, data.nome, userEmail, hashedPassword, 'user', 'user', 'ativo', 1, newId]
+                    [newUserId, data.nome, userEmail, hashedPassword, 'operador', 'operador', 'ativo', 1, newId]
                 );
             }
         }
