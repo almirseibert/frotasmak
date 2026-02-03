@@ -1,7 +1,31 @@
 const db = require('../database');
 const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
 
-// --- HELPERS LOCAIS (Duplicados intencionalmente para isolamento) ---
+// --- CONFIGURAÇÃO MULTER PARA PDFS DE ORDENS ---
+const storagePdf = multer.diskStorage({
+    destination: (req, file, cb) => {
+        // Caminho absoluto baseado na estrutura padrão do container/projeto
+        const dir = path.join(__dirname, '../public/uploads/ordens');
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        // Nome limpo para o arquivo
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname);
+        cb(null, `ordem-${uniqueSuffix}${ext}`);
+    }
+});
+
+const uploadPdf = multer({ 
+    storage: storagePdf,
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
+
+// --- HELPERS LOCAIS ---
 const safeNum = (val) => {
     if (val === null || val === undefined || val === '') return 0;
     const n = parseFloat(val);
@@ -26,7 +50,6 @@ const normalizeFuelType = (val) => {
 
 const listarTodasSolicitacoes = async (req, res) => {
     try {
-        // Query expandida para o painel administrativo
         const query = `
             SELECT s.*, 
                    v.placa, v.registroInterno as veiculo_nome, 
@@ -45,6 +68,20 @@ const listarTodasSolicitacoes = async (req, res) => {
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: 'Erro ao listar todas solicitações.' });
+    }
+};
+
+const uploadPdfGerado = async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+        }
+        // Retorna o caminho relativo para acesso via URL pública
+        const fileUrl = `/uploads/ordens/${req.file.filename}`;
+        res.json({ url: fileUrl });
+    } catch (error) {
+        console.error("Erro no upload do PDF:", error);
+        res.status(500).json({ error: 'Falha ao salvar PDF no servidor.' });
     }
 };
 
@@ -143,7 +180,6 @@ const avaliarSolicitacao = async (req, res) => {
 const confirmarBaixa = async (req, res) => {
     const { id } = req.params;
     try {
-        // Confirma que o processo foi concluído (Cupom validado)
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
         res.json({ message: 'Baixa confirmada.' });
@@ -155,7 +191,6 @@ const confirmarBaixa = async (req, res) => {
 const rejeitarComprovante = async (req, res) => {
     const { id } = req.params;
     try {
-        // Volta o status para LIBERADO para que o usuário possa enviar nova foto
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "LIBERADO" WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
         res.json({ message: 'Comprovante rejeitado.' });
@@ -168,5 +203,7 @@ module.exports = {
     listarTodasSolicitacoes,
     avaliarSolicitacao,
     confirmarBaixa,
-    rejeitarComprovante
+    rejeitarComprovante,
+    uploadPdfGerado,
+    uploadPdf // Exporta o multer configurado
 };

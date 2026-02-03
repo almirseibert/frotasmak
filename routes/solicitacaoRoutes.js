@@ -7,13 +7,14 @@ const solicitacaoAdminController = require('../controllers/solicitacaoAdminContr
 
 const authMiddleware = require('../middlewares/authMiddleware');
 
-// Configuração do Multer (Vem do Controller do App, pois é lá que ocorre o upload)
-const upload = solicitacaoAppController.upload;
+// Multer do App (para fotos de painel e cupom)
+const uploadApp = solicitacaoAppController.upload;
+// Multer do Admin (para PDFs gerados)
+const uploadAdmin = solicitacaoAdminController.uploadPdf;
 
 router.use(authMiddleware);
 
 // --- ROTAS DE LISTAGEM (ROTEAMENTO INTELIGENTE) ---
-// O frontend chama a mesma URL '/solicitacoes', mas o backend decide qual controller usar
 router.get('/', (req, res, next) => {
     const userRole = req.user.role;
     // Definição de quem é gestor
@@ -29,15 +30,16 @@ router.get('/', (req, res, next) => {
 });
 
 // --- ROTAS DO APP (MOTORISTA) ---
-// Criar solicitação e Uploads
-router.post('/', upload.single('foto_painel'), solicitacaoAppController.criarSolicitacao);
-router.put('/:id/comprovante', upload.single('foto_cupom'), solicitacaoAppController.enviarComprovante);
+router.post('/', uploadApp.single('foto_painel'), solicitacaoAppController.criarSolicitacao);
+router.put('/:id/comprovante', uploadApp.single('foto_cupom'), solicitacaoAppController.enviarComprovante);
 router.get('/meus-status', solicitacaoAppController.verificarStatusUsuario);
 
 // --- ROTAS DO ADMIN (GESTOR) ---
-// Avaliação e Baixas
 router.put('/:id/avaliar', solicitacaoAdminController.avaliarSolicitacao);
 router.put('/:id/confirmar-baixa', solicitacaoAdminController.confirmarBaixa);
 router.put('/:id/rejeitar-comprovante', solicitacaoAdminController.rejeitarComprovante);
+
+// NOVA ROTA: Upload de PDF Gerado (Ordem)
+router.post('/upload-pdf-generated', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
 
 module.exports = router;
