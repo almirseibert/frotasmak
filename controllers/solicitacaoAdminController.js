@@ -7,11 +7,12 @@ const multer = require('multer');
 // --- CONFIGURAÇÃO MULTER PARA PDFS DE ORDENS ---
 const storagePdf = multer.diskStorage({
     destination: (req, file, cb) => {
-        // Garante o caminho a partir da raiz do projeto (/usr/src/app no Docker)
+        // Usa process.cwd() para pegar a raiz do projeto (/usr/src/app)
+        // Isso garante que o caminho seja absoluto e correto independente de onde o arquivo está
         const dir = path.join(process.cwd(), 'public', 'uploads', 'ordens');
         
-        // Cria a pasta recursivamente se não existir
         if (!fs.existsSync(dir)) {
+            console.log("Criando diretório de ordens:", dir);
             fs.mkdirSync(dir, { recursive: true });
         }
         cb(null, dir);
@@ -80,7 +81,9 @@ const uploadPdfGerado = async (req, res) => {
             return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
         }
         // Retorna a URL relativa pública para acesso
+        // Ex: /uploads/ordens/ordem-123456789.pdf
         const fileUrl = `/uploads/ordens/${req.file.filename}`;
+        console.log("PDF Salvo com sucesso:", fileUrl);
         res.json({ url: fileUrl });
     } catch (error) {
         console.error("Erro no upload do PDF:", error);
