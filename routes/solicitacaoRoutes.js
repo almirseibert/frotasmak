@@ -14,17 +14,14 @@ const uploadAdmin = solicitacaoAdminController.uploadPdf;
 
 router.use(authMiddleware);
 
-// --- ROTAS DE LISTAGEM (ROTEAMENTO INTELIGENTE) ---
+// --- ROTAS DE LISTAGEM ---
 router.get('/', (req, res, next) => {
     const userRole = req.user.role;
-    // Definição de quem é gestor
     const isGestor = userRole === 'admin' || userRole === 'gestor' || req.user.canAccessRefueling;
 
     if (isGestor) {
-        // Se for gestor, usa o controller de Admin (vê tudo)
         return solicitacaoAdminController.listarTodasSolicitacoes(req, res, next);
     } else {
-        // Se for usuário comum, usa o controller do App (vê apenas as suas)
         return solicitacaoAppController.listarMinhasSolicitacoes(req, res, next);
     }
 });
@@ -39,7 +36,7 @@ router.put('/:id/avaliar', solicitacaoAdminController.avaliarSolicitacao);
 router.put('/:id/confirmar-baixa', solicitacaoAdminController.confirmarBaixa);
 router.put('/:id/rejeitar-comprovante', solicitacaoAdminController.rejeitarComprovante);
 
-// NOVA ROTA: Upload de PDF Gerado (Ordem)
+// NOVA ROTA: Upload de PDF Gerado (usando o controller Admin atualizado)
 router.post('/upload-pdf-generated', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
 
 module.exports = router;
