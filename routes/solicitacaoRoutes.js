@@ -26,6 +26,10 @@ router.get('/', (req, res, next) => {
     }
 });
 
+// NOVA ROTA: Upload de PDF Gerado (usando o controller Admin atualizado)
+router.post('/upload-pdf-generated', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
+router.post('/upload-pdf', refuelingController.upload.single('file'), refuelingController.uploadOrderPdf);
+
 // --- ROTAS DO APP (MOTORISTA) ---
 router.post('/', uploadApp.single('foto_painel'), solicitacaoAppController.criarSolicitacao);
 router.put('/:id/comprovante', uploadApp.single('foto_cupom'), solicitacaoAppController.enviarComprovante);
@@ -35,8 +39,5 @@ router.get('/meus-status', solicitacaoAppController.verificarStatusUsuario);
 router.put('/:id/avaliar', solicitacaoAdminController.avaliarSolicitacao);
 router.put('/:id/confirmar-baixa', solicitacaoAdminController.confirmarBaixa);
 router.put('/:id/rejeitar-comprovante', solicitacaoAdminController.rejeitarComprovante);
-
-// NOVA ROTA: Upload de PDF Gerado (usando o controller Admin atualizado)
-router.post('/upload-pdf-generated', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
 
 module.exports = router;
