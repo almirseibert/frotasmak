@@ -207,6 +207,12 @@ const createRefuelingOrder = async (req, res) => {
             }
         }
 
+        // --- CORREÇÃO: Embedar o ID da Solicitação no JSON createdBy para evitar erro de coluna inexistente ---
+        const createdByData = data.createdBy || {};
+        if (data.solicitacaoId) {
+            createdByData.linkedSolicitacaoId = data.solicitacaoId;
+        }
+
         const refuelingData = {
             id: id,
             authNumber: newAuthNumber,
@@ -230,12 +236,11 @@ const createRefuelingOrder = async (req, res) => {
             horimetroAnalogico: null,
             outrosValor: safeNum(data.outrosValor, true),
             outros: data.outros || null,
-            createdBy: JSON.stringify(data.createdBy || {}),
+            createdBy: JSON.stringify(createdByData), // Salvando aqui o vínculo
             confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
             editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
-            invoiceNumber: data.invoiceNumber || null,
-            // Campo auxiliar para vincular à solicitação original (se existir)
-            createdFromSolicitacaoId: data.solicitacaoId || null
+            invoiceNumber: data.invoiceNumber || null
+            // createdFromSolicitacaoId REMOVIDO PARA CORRIGIR ERRO 500
         };
 
         const fields = Object.keys(refuelingData);
@@ -281,7 +286,7 @@ const createRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes'] }); // Adicionado 'solicitacoes'
+        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes'] }); 
         res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
@@ -497,10 +502,22 @@ const confirmRefuelingOrder = async (req, res) => {
         await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
 
         // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO (Baixa Automática) ---
-        if (order.createdFromSolicitacaoId) {
+        // Verificação Robusta: Procura também no JSON createdBy
+        let linkedSolicitacaoId = null;
+        // 1. Tenta campo legado (se existir em outros)
+        if (order.createdFromSolicitacaoId) linkedSolicitacaoId = order.createdFromSolicitacaoId;
+        // 2. Tenta no JSON createdBy (solução nova)
+        if (!linkedSolicitacaoId && order.createdBy) {
+            try {
+                const cbObj = JSON.parse(order.createdBy);
+                if (cbObj.linkedSolicitacaoId) linkedSolicitacaoId = cbObj.linkedSolicitacaoId;
+            } catch (e) {}
+        }
+
+        if (linkedSolicitacaoId) {
             await connection.execute(
                 'UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?',
-                [order.createdFromSolicitacaoId]
+                [linkedSolicitacaoId]
             );
         }
         // ---------------------------------------------------------------
@@ -539,11 +556,21 @@ const deleteRefuelingOrder = async (req, res) => {
         await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
 
         // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO (Estorno) ---
-        if (ref.createdFromSolicitacaoId) {
+        // Verificação Robusta: Procura também no JSON createdBy
+        let linkedSolicitacaoId = null;
+        if (ref.createdFromSolicitacaoId) linkedSolicitacaoId = ref.createdFromSolicitacaoId;
+        if (!linkedSolicitacaoId && ref.createdBy) {
+            try {
+                const cbObj = JSON.parse(ref.createdBy);
+                if (cbObj.linkedSolicitacaoId) linkedSolicitacaoId = cbObj.linkedSolicitacaoId;
+            } catch (e) {}
+        }
+
+        if (linkedSolicitacaoId) {
             // Se a ordem foi excluída, marcamos a solicitação como NEGADA para que o usuário saiba que foi cancelada
             await connection.execute(
                 'UPDATE solicitacoes_abastecimento SET status = "NEGADO", motivo_negativa = "Ordem Excluída Manualmente pelo Gestor (Estorno)" WHERE id = ?',
-                [ref.createdFromSolicitacaoId]
+                [linkedSolicitacaoId]
             );
         }
         // ------------------------------------------------------
