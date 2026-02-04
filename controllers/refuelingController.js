@@ -233,7 +233,9 @@ const createRefuelingOrder = async (req, res) => {
             createdBy: JSON.stringify(data.createdBy || {}),
             confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
             editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
-            invoiceNumber: data.invoiceNumber || null
+            invoiceNumber: data.invoiceNumber || null,
+            // Campo auxiliar para vincular à solicitação original (se existir)
+            createdFromSolicitacaoId: data.solicitacaoId || null
         };
 
         const fields = Object.keys(refuelingData);
@@ -242,6 +244,16 @@ const createRefuelingOrder = async (req, res) => {
         
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
+
+        // --- INTEGRAÇÃO UNIFICADA: Atualiza a solicitação se o ID for fornecido ---
+        if (data.solicitacaoId) {
+            const userId = data.createdBy && data.createdBy.id ? data.createdBy.id : null;
+            await connection.execute(
+                'UPDATE solicitacoes_abastecimento SET status = "LIBERADO", data_aprovacao = NOW(), aprovado_por_usuario_id = ? WHERE id = ?',
+                [userId, data.solicitacaoId]
+            );
+        }
+        // --------------------------------------------------------------------------
 
         // Atualização de Leitura do Veículo
         const vehicleUpdate = {};
@@ -269,7 +281,7 @@ const createRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses'] });
+        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes'] }); // Adicionado 'solicitacoes'
         res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
     } catch (error) {
         await connection.rollback();
