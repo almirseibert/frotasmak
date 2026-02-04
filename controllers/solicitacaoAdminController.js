@@ -9,7 +9,7 @@ const storagePdf = multer.diskStorage({
     destination: (req, file, cb) => {
         // Usa process.cwd() para pegar a raiz do projeto (/usr/src/app)
         // Isso garante que o caminho seja absoluto e correto independente de onde o arquivo está
-        const dir = path.join(process.cwd(), 'public', 'uploads', 'ordens');
+        const dir = path.join(__dirname, '../public/uploads/orders');
         
         if (!fs.existsSync(dir)) {
             console.log("Criando diretório de ordens:", dir);
@@ -82,7 +82,7 @@ const uploadPdfGerado = async (req, res) => {
         }
         // Retorna a URL relativa pública para acesso
         // Ex: /uploads/ordens/ordem-123456789.pdf
-        const fileUrl = `/uploads/ordens/${req.file.filename}`;
+        const fileUrl = `/uploads/orders${req.file.filename}`;
         console.log("PDF Salvo com sucesso:", fileUrl);
         res.json({ url: fileUrl });
     } catch (error) {
