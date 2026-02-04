@@ -27,8 +27,7 @@ router.get('/', (req, res, next) => {
 });
 
 // NOVA ROTA: Upload de PDF Gerado (usando o controller Admin atualizado)
-router.post('/upload-pdf-generated', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
-router.post('/upload-pdf', refuelingController.upload.single('file'), refuelingController.uploadOrderPdf);
+router.post('/upload-pdf', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
 
 // --- ROTAS DO APP (MOTORISTA) ---
 router.post('/', uploadApp.single('foto_painel'), solicitacaoAppController.criarSolicitacao);
