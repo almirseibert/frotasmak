@@ -26,9 +26,8 @@ router.get('/', (req, res, next) => {
     }
 });
 
-// --- ROTA DE UPLOAD (MUITO IMPORTANTE: DEVE VIR ANTES DE /:id) ---
-// Se ficar depois, o sistema acha que "upload-pdf" é um ID de abastecimento
-router.post('/upload-pdf', solicitacaoAdminController.upload.single('file'), solicitacaoAdminController.uploadOrderPdf);
+// NOVA ROTA: Upload de PDF Gerado (usando o controller Admin atualizado)
+router.post('/upload-pdf', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
 
 // --- ROTAS DO APP (MOTORISTA) ---
 router.post('/', uploadApp.single('foto_painel'), solicitacaoAppController.criarSolicitacao);
