@@ -4,22 +4,50 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 
-// --- CONFIGURAÇÃO MULTER PARA PDFS DE ORDENS ---
+// --- CONFIGURAÇÃO MULTER E LIMPEZA (Copiado de refuelingController) ---
+
+// Função para limpar arquivos antigos (> 30 dias)
+const cleanupOldFiles = (directory) => {
+    fs.readdir(directory, (err, files) => {
+        if (err) return console.error("Erro ao ler diretório para limpeza:", err);
+
+        const now = Date.now();
+        const maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias
+
+        files.forEach(file => {
+            const filePath = path.join(directory, file);
+            fs.stat(filePath, (err, stats) => {
+                if (err) return;
+                if (now - stats.mtime.getTime() > maxAge) {
+                    fs.unlink(filePath, (err) => {
+                        if (err) console.error(`Erro ao deletar arquivo antigo ${file}:`, err);
+                    });
+                }
+            });
+        });
+    });
+};
+
 const storagePdf = multer.diskStorage({
     destination: (req, file, cb) => {
-        // Usa process.cwd() para pegar a raiz do projeto (/usr/src/app)
-        // Isso garante que o caminho seja absoluto e correto independente de onde o arquivo está
+        // Caminho absoluto para garantir compatibilidade
         const dir = path.join(__dirname, '../public/uploads/orders');
         
+        // Garante que a pasta existe
         if (!fs.existsSync(dir)) {
             console.log("Criando diretório de ordens:", dir);
             fs.mkdirSync(dir, { recursive: true });
         }
+
+        // Executa limpeza assíncrona (igual ao refuelingController)
+        cleanupOldFiles(dir);
+
         cb(null, dir);
     },
     filename: (req, file, cb) => {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const ext = path.extname(file.originalname);
+        // Garante a extensão correta
+        const ext = path.extname(file.originalname) || '.pdf'; 
         cb(null, `ordem-${uniqueSuffix}${ext}`);
     }
 });
@@ -80,9 +108,12 @@ const uploadPdfGerado = async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
         }
-        // Retorna a URL relativa pública para acesso
-        // Ex: /uploads/ordens/ordem-123456789.pdf
-        const fileUrl = `/uploads/orders${req.file.filename}`;
+        
+        // CORREÇÃO CRÍTICA AQUI:
+        // Antes estava: `/uploads/orders${req.file.filename}` (faltava a barra)
+        // Agora está correto: `/uploads/orders/${req.file.filename}`
+        const fileUrl = `/uploads/orders/${req.file.filename}`;
+        
         console.log("PDF Salvo com sucesso:", fileUrl);
         res.json({ url: fileUrl });
     } catch (error) {

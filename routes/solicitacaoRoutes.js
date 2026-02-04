@@ -9,7 +9,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
 
 // Multer do App (para fotos de painel e cupom)
 const uploadApp = solicitacaoAppController.upload;
-// Multer do Admin (para PDFs gerados)
+// Multer do Admin (para PDFs gerados) - Agora usa o corrigido
 const uploadAdmin = solicitacaoAdminController.uploadPdf;
 
 router.use(authMiddleware);
@@ -27,6 +27,7 @@ router.get('/', (req, res, next) => {
 });
 
 // NOVA ROTA: Upload de PDF Gerado (usando o controller Admin atualizado)
+// A rota permanece a mesma, mas agora o controller para onde ela aponta está corrigido
 router.post('/upload-pdf', uploadAdmin.single('file'), solicitacaoAdminController.uploadPdfGerado);
 
 // --- ROTAS DO APP (MOTORISTA) ---
