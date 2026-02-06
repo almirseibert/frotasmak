@@ -232,8 +232,6 @@ const createRefuelingOrder = async (req, res) => {
             litrosLiberadosArla: safeNum(data.litrosLiberadosArla, true),
             odometro: safeNum(data.odometro),
             horimetro: safeNum(data.horimetro), 
-            horimetroDigital: null,
-            horimetroAnalogico: null,
             outrosValor: safeNum(data.outrosValor, true),
             outros: data.outros || null,
             createdBy: JSON.stringify(createdByData), // Salvando aqui o vínculo
@@ -268,8 +266,6 @@ const createRefuelingOrder = async (req, res) => {
         if (newOdometro > 0) vehicleUpdate.odometro = newOdometro;
         if (newHorimetro > 0) {
             vehicleUpdate.horimetro = newHorimetro;
-            vehicleUpdate.horimetroDigital = null; // Unificação
-            vehicleUpdate.horimetroAnalogico = null;
         }
 
         if (Object.keys(vehicleUpdate).length > 0) {
@@ -322,8 +318,6 @@ const updateRefuelingOrder = async (req, res) => {
 
         if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
         if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
-        if (data.horimetroDigital !== undefined) updateData.horimetroDigital = null;
-        if (data.horimetroAnalogico !== undefined) updateData.horimetroAnalogico = null;
 
         if (data.outrosValor !== undefined) updateData.outrosValor = safeNum(data.outrosValor, true);
         
@@ -367,8 +361,6 @@ const updateRefuelingOrder = async (req, res) => {
         if (updateData.odometro > 0) vehicleUpdate.odometro = updateData.odometro;
         if (updateData.horimetro > 0) {
             vehicleUpdate.horimetro = updateData.horimetro;
-            vehicleUpdate.horimetroDigital = null;
-            vehicleUpdate.horimetroAnalogico = null;
         }
         
         if (Object.keys(vehicleUpdate).length > 0) {
@@ -461,8 +453,6 @@ const confirmRefuelingOrder = async (req, res) => {
                  vehicleUpdate.odometro = readingVal;
             } else {
                  vehicleUpdate.horimetro = readingVal;
-                 vehicleUpdate.horimetroDigital = null;
-                 vehicleUpdate.horimetroAnalogico = null;
             }
         }
 
@@ -494,8 +484,6 @@ const confirmRefuelingOrder = async (req, res) => {
             invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null,
             ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
             ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
-            horimetroDigital: null,
-            horimetroAnalogico: null
         };
 
         const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
