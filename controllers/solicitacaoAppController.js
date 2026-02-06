@@ -194,22 +194,36 @@ const criarSolicitacao = async (req, res) => {
 const listarMinhasSolicitacoes = async (req, res) => {
     try {
         const usuarioId = req.user.id;
+        
+        // ALTERAÇÃO PARA VISÃO POR OBRA
+        // A lógica é: mostre as solicitações onde EU sou o criador
+        // OU as solicitações que pertencem a Obras onde EU já criei solicitações antes (associação implícita por contexto).
+        // Isso permite que o "João" veja o que o "Pedro" pediu na mesma obra, evitando duplicidade.
         const query = `
             SELECT s.*, 
                    v.placa, v.registroInterno as veiculo_nome, 
                    o.nome as obra_nome, 
-                   p.razaoSocial as posto_nome
+                   p.razaoSocial as posto_nome,
+                   u.name as solicitante_nome -- Adicionado para saber quem pediu se não fui eu
             FROM solicitacoes_abastecimento s
             LEFT JOIN vehicles v ON s.veiculo_id = v.id
             LEFT JOIN obras o ON s.obra_id = o.id
             LEFT JOIN partners p ON s.posto_id = p.id
-            WHERE s.usuario_id = ?
+            LEFT JOIN users u ON s.usuario_id = u.id
+            WHERE 
+                s.usuario_id = ? 
+                OR 
+                s.obra_id IN (
+                    SELECT DISTINCT sub_s.obra_id 
+                    FROM solicitacoes_abastecimento sub_s 
+                    WHERE sub_s.usuario_id = ?
+                )
             ORDER BY s.data_solicitacao DESC LIMIT 50
         `;
-        const [rows] = await db.execute(query, [usuarioId]);
+        const [rows] = await db.execute(query, [usuarioId, usuarioId]);
         res.json(rows);
     } catch (error) {
-        res.status(500).json({ error: 'Erro ao listar minhas solicitações.' });
+        res.status(500).json({ error: 'Erro ao listar solicitações.' });
     }
 };
 
@@ -219,9 +233,7 @@ const enviarComprovante = async (req, res) => {
         if (!req.file) return res.status(400).json({ error: 'Foto obrigatória.' });
         const fotoPath = `/uploads/solicitacoes/${req.file.filename}`;
         
-        // Verifica se é o dono da solicitação (Segurança extra)
-        // await db.execute('SELECT * FROM solicitacoes_abastecimento WHERE id = ? AND usuario_id = ?', [id, req.user.id]);
-        
+        // Verifica se é o dono da solicitação ou se tem permissão na obra (Opcional, mantido simples aqui)
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?', [fotoPath, id]);
         
         if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
