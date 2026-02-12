@@ -34,6 +34,7 @@ const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
 const uploadRoutes = require('./routes/uploadRoutes');
 const tireRoutes = require('./routes/tireRoutes');
+const obraSupervisorRoutes = require('./routes/obraSupervisorRoutes');
 
 // --- NOVAS ROTAS ---
 // Certifique-se de que estes arquivos existem no diretório 'routes'
@@ -100,10 +101,10 @@ apiRouter.use('/expenses', expensesRoutes);
 apiRouter.use('/users', userRoutes);
 apiRouter.use('/updates', updateRoutes);
 apiRouter.use('/tires', tireRoutes);
-
-// --- REGISTRO DAS NOVAS ROTAS ---
+apiRouter.use('/supervisor', obraSupervisorRoutes);
 apiRouter.use('/billing', billingRoutes);
 apiRouter.use('/solicitacoes', solicitacaoRoutes);
+
 
 app.use('/api', apiRouter);
 
