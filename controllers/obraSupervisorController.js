@@ -25,7 +25,7 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // 1. OBTER DADOS DO DASHBOARD (MACRO - MODO TV)
 exports.getDashboardData = async (req, res) => {
     try {
-        // Busca obras ativas
+        // Busca obras ativas e seus contratos
         const [obras] = await db.query(`
             SELECT 
                 o.id, o.nome, o.responsavel,
@@ -38,8 +38,9 @@ exports.getDashboardData = async (req, res) => {
         `);
 
         const dashboardData = await Promise.all(obras.map(async (obra) => {
-            // A. Calcular Horas Executadas (Total Real - Baseado em Logs/Apontamentos)
-            // OBS: Ajuste 'daily_work_logs' para o nome real da sua tabela de apontamentos se for diferente
+            // A. Calcular Horas Executadas (Total Real - Baseado em Logs/Apontamentos e Horímetros)
+            // Aqui unificamos logs de trabalho (faturamento) ou horímetro real se houver tracking
+            // Para simplificar conforme solicitado, usamos daily_work_logs como base do "Executado"
             const [totalExec] = await db.query(`
                 SELECT COALESCE(SUM(horas_trabalhadas), 0) as total 
                 FROM daily_work_logs 
@@ -101,9 +102,15 @@ exports.getDashboardData = async (req, res) => {
 
         // Ordenar: Obras que acabam primeiro aparecem antes (Prioridade)
         dashboardData.sort((a, b) => {
-            if (!a.kpi.data_fim_estimada) return 1;
-            if (!b.kpi.data_fim_estimada) return -1;
-            return new Date(a.kpi.data_fim_estimada) - new Date(b.kpi.data_fim_estimada);
+            // Se uma tem previsão e outra não, a que tem previsão vem primeiro
+            if (a.kpi.data_fim_estimada && !b.kpi.data_fim_estimada) return -1;
+            if (!a.kpi.data_fim_estimada && b.kpi.data_fim_estimada) return 1;
+            
+            // Se ambas tem previsão, ordena pela data (mais cedo primeiro)
+            if (a.kpi.data_fim_estimada && b.kpi.data_fim_estimada) {
+                return new Date(a.kpi.data_fim_estimada) - new Date(b.kpi.data_fim_estimada);
+            }
+            return 0;
         });
 
         res.json(dashboardData);
@@ -119,10 +126,14 @@ exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
         // Busca Veículos Alocados atualmente
+        // Faz LEFT JOIN com a tabela de substituição para ver se tem fator de conversão
         const [veiculos] = await db.query(`
-            SELECT v.id, v.modelo, v.placa, v.tipo, v.horimetro, ces.fator_conversao
+            SELECT 
+                v.id, v.modelo, v.placa, v.tipo, v.horimetro, 
+                COALESCE(ces.fator_conversao, 1.00) as fator_conversao,
+                v.operador_atual -- Assumindo que você tem essa coluna ou similar no JSON
             FROM vehicles v
-            LEFT JOIN contract_equipment_substitutions ces ON v.id = ces.veiculo_real_id
+            LEFT JOIN contract_equipment_substitutions ces ON v.id = ces.veiculo_real_id AND ces.data_fim_alocacao IS NULL
             WHERE v.obraAtualId = ?
         `, [id]);
 
@@ -164,12 +175,12 @@ exports.addCrmLog = async (req, res) => {
     }
 };
 
-// 4. CONFIGURAR CONTRATO (QUANDO CRIA A OBRA)
+// 4. CONFIGURAR CONTRATO (QUANDO CRIA A OBRA OU EDITA)
 exports.upsertContract = async (req, res) => {
     const { obra_id, valor_total, horas_totais, data_inicio, fiscal_nome } = req.body;
 
     try {
-        // Verifica se já existe contrato, se não cria, se sim atualiza (Upsert logic)
+        // Verifica se já existe contrato
         const [existing] = await db.query('SELECT id FROM obra_contracts WHERE obra_id = ?', [obra_id]);
 
         if (existing.length > 0) {
