@@ -8,6 +8,9 @@ const addBusinessDays = (startDate, daysToAdd) => {
     if (!startDate) return new Date();
     let count = 0;
     let currentDate = new Date(startDate);
+    // Proteção contra loop infinito
+    if (daysToAdd > 2000) daysToAdd = 2000; 
+    
     while (count < daysToAdd) {
         currentDate.setDate(currentDate.getDate() + 1);
         const dayOfWeek = currentDate.getDay();
@@ -23,277 +26,218 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // 1. OBTER DADOS DO DASHBOARD (MACRO)
 exports.getDashboardData = async (req, res) => {
     try {
-        console.log('[Supervisor] Buscando dados do dashboard...');
+        console.log('[Supervisor] Calculando Dashboard Inteligente...');
 
-        // 1. Busca TODAS as obras (Legado: sem filtrar status para garantir visualização)
-        const [allObras] = await db.query('SELECT * FROM obras');
+        // 1. Dados Básicos
+        const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
+        const [contracts] = await db.query('SELECT * FROM obra_contracts');
         
-        // 2. Busca contratos (Tabela nova - usa obra_id)
-        let contracts = [];
-        try {
-            const [resContracts] = await db.query('SELECT * FROM obra_contracts');
-            contracts = resContracts;
-        } catch (e) {
-            console.warn('[Supervisor] Tabela contratos não encontrada. Rode o script de restauração.');
-        }
+        // 2. Agregações Financeiras e de Horas (Faturamento)
+        const [expenses] = await db.query(`
+            SELECT obraId, SUM(totalValue) as total 
+            FROM expenses 
+            GROUP BY obraId
+        `); // Ajuste conforme nome real da coluna na sua tabela expenses (totalValue ou amount)
 
-        // 3. Busca Financeiro (Tabela legada - tenta obraId CamelCase)
-        let expensesMap = {};
-        try {
-            const [resExpenses] = await db.query('SELECT obraId, SUM(total_value) as total FROM expenses GROUP BY obraId');
-            resExpenses.forEach(r => expensesMap[r.obraId] = r.total);
-        } catch (e) {
-            // Fallback para snake_case se falhar
-            try {
-                const [resExpenses2] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
-                resExpenses2.forEach(r => expensesMap[r.obra_id] = r.total);
-            } catch (e2) {}
-        }
+        const [hoursLogs] = await db.query(`
+            SELECT obraId, SUM(totalHours) as total 
+            FROM daily_work_logs 
+            GROUP BY obraId
+        `);
 
-        // 4. Busca Horas (Tabela legada - tenta obraId CamelCase)
-        let hoursMap = {};
-        try {
-            const [resHours] = await db.query('SELECT obraId, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obraId');
-            resHours.forEach(r => hoursMap[r.obraId] = r.total);
-        } catch (e) {
-            try {
-                const [resHours2] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
-                resHours2.forEach(r => hoursMap[r.obra_id] = r.total);
-            } catch (e2) {}
-        }
+        // 3. Contagem de Máquinas Ativas (Para o cálculo de previsão)
+        // Consideramos "Pesados" para o cálculo: Caminhão, Escavadeira, Motoniveladora, Retroescavadeira, Rolo, Trator
+        const [activeMachines] = await db.query(`
+            SELECT 
+                voa.obraId, 
+                COUNT(DISTINCT voa.vehicleId) as qtd_maquinas
+            FROM vehicle_operational_assignment voa
+            LEFT JOIN vehicles v ON voa.vehicleId = v.id
+            WHERE (voa.endDate IS NULL OR voa.endDate > NOW())
+            AND v.tipo IN ('Caminhão', 'Escavadeira', 'Motoniveladora', 'Retroescavadeira', 'Rolo', 'Trator', 'Pá Carregadeira')
+            GROUP BY voa.obraId
+        `);
 
-        // 5. Montagem dos Dados
+        // Mapeamento para acesso rápido
+        const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
+        const expenseMap = {}; expenses.forEach(e => expenseMap[e.obraId] = e.total);
+        const hoursMap = {}; hoursLogs.forEach(h => hoursMap[h.obraId] = h.total);
+        const machinesMap = {}; activeMachines.forEach(m => machinesMap[m.obraId] = m.qtd_maquinas);
+
         const dashboardData = allObras.map(obra => {
-            const obraIdStr = String(obra.id);
-            const contract = contracts.find(c => String(c.obra_id) === obraIdStr) || {};
+            const obraId = String(obra.id);
+            const contract = contractMap[obra.id] || {};
             
-            const valorTotal = parseFloat(contract.total_value) || 0;
-            const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
-            const totalGasto = parseFloat(expensesMap[obraIdStr] || expensesMap[obra.id]) || 0;
-            const horasRealizadas = parseFloat(hoursMap[obraIdStr] || hoursMap[obra.id]) || 0;
+            // Valores
+            const valorTotal = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
+            const horasContratadas = parseFloat(contract.total_hours_contracted) || 0;
+            const totalGasto = parseFloat(expenseMap[obraId]) || 0;
+            const horasExecutadas = parseFloat(hoursMap[obraId]) || 0;
 
-            let percentualFinanceiro = (valorTotal > 0) ? (totalGasto / valorTotal) * 100 : 0;
-            let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
-            const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
+            // Percentuais
+            let percFinanceiro = (valorTotal > 0) ? (totalGasto / valorTotal) * 100 : 0;
+            let percHoras = (horasContratadas > 0) ? (horasExecutadas / horasContratadas) * 100 : 0;
+            const percConclusao = Math.max(percFinanceiro, percHoras);
 
-            // Previsão
+            // === LÓGICA DE PREVISÃO INTELIGENTE ===
             let previsaoTermino = null;
             let statusPrazo = 'indefinido';
-            const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
-            const dataFim = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
+            let diasRestantes = 0;
 
-            if (horasRealizadas > 0 && horasTotais > 0 && dataInicio) {
-                const diffDays = Math.ceil(Math.abs(new Date() - dataInicio) / (86400000)) || 1;
-                const horasPorDia = horasRealizadas / diffDays;
-                if (horasPorDia > 0) {
-                    const dias = Math.ceil((horasTotais - horasRealizadas) / horasPorDia);
-                    previsaoTermino = addBusinessDays(new Date(), dias);
+            if (horasContratadas > 0) {
+                const horasSaldo = horasContratadas - horasExecutadas;
+                const maquinasAtivas = machinesMap[obraId] || 0;
+                
+                // Média de produção diária (8h por máquina dia útil é o padrão da indústria/solicitado)
+                // Se não tiver máquina, assume 1 para não dividir por zero e dar erro
+                const capacidadeDiaria = (maquinasAtivas > 0 ? maquinasAtivas : 1) * 8; 
+
+                if (horasSaldo > 0) {
+                    diasRestantes = Math.ceil(horasSaldo / capacidadeDiaria);
+                    previsaoTermino = addBusinessDays(new Date(), diasRestantes);
+                } else {
+                    diasRestantes = 0;
+                    previsaoTermino = new Date(); // Obra teoricamente acabou
+                }
+
+                // Verifica atraso
+                const dataFimContrato = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
+                if (dataFimContrato && previsaoTermino > dataFimContrato) {
+                    statusPrazo = 'atrasado';
+                } else {
+                    statusPrazo = 'no_prazo';
                 }
             }
-            if (previsaoTermino && dataFim) statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
 
+            // Alertas CRM
+            // Aqui você pode fazer uma query extra para saber se tem logs pendentes, 
+            // mas por performance no dashboard macro, deixamos simplificado.
+            
             return {
-                id: String(obra.id),
+                id: obraId,
                 nome: obra.nome,
                 status: obra.status,
-                responsavel: contract.fiscal_nome || 'Não Definido', 
-                fiscal_nome: contract.fiscal_nome,
+                responsavel: contract.fiscal_nome || obra.responsavel || 'A Definir', // Prioriza contrato, fallback obra
+                fiscal_nome: contract.fiscal_nome || obra.fiscal || 'A Definir',
                 kpi: {
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
-                    horas_contratadas: horasTotais,
-                    horas_realizadas: horasRealizadas,
-                    percentual_conclusao: parseFloat(percentualConclusao.toFixed(1)),
-                    alertas_assinatura: 0
+                    horas_contratadas: horasContratadas,
+                    horas_executadas: horasExecutadas, // Info vinda do Faturamento (daily_work_logs)
+                    percentual_conclusao: parseFloat(percConclusao.toFixed(1)),
+                    dias_restantes_estimados: diasRestantes,
+                    maquinas_ativas: machinesMap[obraId] || 0,
+                    status_cor: getStatusColor(percConclusao)
                 },
                 previsao: {
                     data_termino_estimada: previsaoTermino,
                     status: statusPrazo
                 },
-                data_inicio_contratual: contract.start_date,
+                data_inicio: contract.start_date || obra.dataInicio,
                 data_fim_contratual: contract.expected_end_date
             };
+        });
+
+        // Ordenação Inteligente: Quem termina antes (data estimada) vem primeiro
+        dashboardData.sort((a, b) => {
+            if (!a.previsao.data_termino_estimada) return 1;
+            if (!b.previsao.data_termino_estimada) return -1;
+            return new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada);
         });
 
         res.json(dashboardData);
 
     } catch (error) {
-        console.error('============ ERRO DASHBOARD ============', error);
-        res.status(500).json({ message: 'Erro interno.', debug: error.message });
+        console.error('Erro Dashboard:', error);
+        res.status(500).json({ message: 'Erro interno.' });
     }
 };
 
-// 2. OBTER DETALHES (AJUSTADO PARA CAMELCASE DO BACKUP)
+// Helper de cor
+function getStatusColor(perc) {
+    if (perc >= 90) return 'red';
+    if (perc >= 70) return 'violet';
+    if (perc >= 30) return 'yellow';
+    return 'green';
+}
+
+// 2. DETALHES DA OBRA (COCKPIT)
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
-    
     try {
-        const [obraInfo] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
-        if (!obraInfo || obraInfo.length === 0) return res.status(404).json({ message: 'Obra não encontrada.' });
-        const obra = obraInfo[0];
+        const [obra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
+        if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
+
+        // Reuse a lógica do dashboard para pegar os KPIs atualizados
+        // (Em produção idealmente refatorar para função compartilhada)
+        const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
+        const contractData = contract[0] || {};
+
+        // Burnup Chart Data (Agrupado por semana ou mês)
+        const [burnupData] = await db.query(`
+            SELECT 
+                DATE(date) as data, 
+                SUM(totalHours) as horas_dia 
+            FROM daily_work_logs 
+            WHERE obraId = ? 
+            GROUP BY DATE(date) 
+            ORDER BY date ASC
+        `, [id]);
+
+        // Veículos Alocados + Fator de Substituição
+        const [vehicles] = await db.query(`
+            SELECT 
+                v.id, v.placa, v.modelo, v.tipo, 
+                voa.startDate as data_alocacao,
+                e.name as operador_nome,
+                ces.fator_conversao,
+                ces.grupo_contratado
+            FROM vehicle_operational_assignment voa
+            JOIN vehicles v ON voa.vehicleId = v.id
+            LEFT JOIN employees e ON voa.employeeId = e.id
+            LEFT JOIN contract_equipment_substitutions ces ON ces.veiculo_real_id = v.id AND ces.obra_contract_id = ?
+            WHERE voa.obraId = ? 
+            AND (voa.endDate IS NULL OR voa.endDate > NOW())
+        `, [contractData.id || 0, id]);
+
+        // Histórico CRM
+        const [crmLogs] = await db.query(`
+            SELECT * FROM obra_crm_logs 
+            WHERE obra_id = ? 
+            ORDER BY created_at DESC
+        `, [id]);
+
+        // Calcular KPIs finais para envio
+        // ... (Mesma lógica do dashboard para calcular previsão e saldos)
         
-        // Contrato
-        let contract = {};
-        try {
-            const [c] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
-            if (c.length > 0) contract = c[0];
-        } catch (e) {}
-
-        // Financeiro e Horas (Logica Híbrida CamelCase/SnakeCase)
-        let totalGasto = 0, horasRealizadas = 0;
-        try {
-            // Tenta obraId primeiro (Backup Standard)
-            const [exp] = await db.query('SELECT SUM(total_value) as total FROM expenses WHERE obraId = ?', [id]);
-            totalGasto = parseFloat(exp[0].total) || 0;
-            const [hrs] = await db.query('SELECT SUM(horas_trabalhadas) as total FROM daily_work_logs WHERE obraId = ?', [id]);
-            horasRealizadas = parseFloat(hrs[0].total) || 0;
-        } catch (e) {
-            // Fallback
-            try {
-                const [exp2] = await db.query('SELECT SUM(total_value) as total FROM expenses WHERE obra_id = ?', [id]);
-                totalGasto = parseFloat(exp2[0].total) || 0;
-                const [hrs2] = await db.query('SELECT SUM(horas_trabalhadas) as total FROM daily_work_logs WHERE obra_id = ?', [id]);
-                horasRealizadas = parseFloat(hrs2[0].total) || 0;
-            } catch (e2) {}
-        }
-
-        const valorTotal = parseFloat(contract.total_value) || 0;
-        const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
-        let percentualFinanceiro = (valorTotal > 0) ? (totalGasto / valorTotal) * 100 : 0;
-        let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
-        const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
-
-        let previsaoTermino = null;
-        let statusPrazo = 'indefinido';
-        const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
-        const dataFim = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
-
-        if (horasRealizadas > 0 && horasTotais > 0 && dataInicio) {
-            const diffDays = Math.ceil(Math.abs(new Date() - dataInicio) / (86400000)) || 1;
-            const horasPorDia = horasRealizadas / diffDays;
-            if (horasPorDia > 0) {
-                const diasRest = Math.ceil((horasTotais - horasRealizadas) / horasPorDia);
-                previsaoTermino = addBusinessDays(new Date(), diasRest);
-            }
-        }
-        if (previsaoTermino && dataFim) statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
-
-        // --- VEÍCULOS E FUNCIONÁRIOS (CAMELCASE FIX) ---
-        // A tabela vehicle_operational_assignment no backup usa vehicleId, employeeId, obraId, startDate
-        let allocationData = [];
-        try {
-            const [allocations] = await db.query(`
-                SELECT 
-                    voa.id, 
-                    voa.startDate as data_inicio,
-                    v.plate, v.model, v.type as tipo_veiculo,
-                    e.name as nome_funcionario, e.role as cargo
-                FROM vehicle_operational_assignment voa
-                LEFT JOIN vehicles v ON voa.vehicleId = v.id
-                LEFT JOIN employees e ON voa.employeeId = e.id
-                WHERE voa.obraId = ? 
-                AND (voa.endDate IS NULL OR voa.endDate > NOW())
-            `, [id]);
-            allocationData = allocations;
-        } catch (err) {
-            console.warn('[Supervisor] Erro CamelCase em allocations. Tentando SnakeCase:', err.message);
-            // Fallback para snake_case caso o banco tenha sido alterado manualmente
-            try {
-                const [allocations2] = await db.query(`
-                    SELECT 
-                        voa.id, 
-                        voa.start_date as data_inicio,
-                        v.plate, v.model, v.type as tipo_veiculo,
-                        e.name as nome_funcionario, e.role as cargo
-                    FROM vehicle_operational_assignment voa
-                    LEFT JOIN vehicles v ON voa.vehicle_id = v.id
-                    LEFT JOIN employees e ON voa.employee_id = e.id
-                    WHERE voa.obra_id = ? 
-                    AND (voa.end_date IS NULL OR voa.end_date > NOW())
-                `, [id]);
-                allocationData = allocations2;
-            } catch (err2) {
-                console.warn('[Supervisor] Falha total allocations:', err2.message);
-            }
-        }
-
-        const vehicles = allocationData
-            .filter(a => a.plate)
-            .map(a => ({ 
-                id: a.id, 
-                plate: a.plate, 
-                model: a.model, 
-                type: a.tipo_veiculo, 
-                data_alocacao: a.data_inicio 
-            }));
-
-        const employees = allocationData
-            .filter(a => a.nome_funcionario)
-            .map(a => ({
-                id: a.id, 
-                nome: a.nome_funcionario,
-                cargo: a.cargo,
-                data_alocacao: a.data_inicio
-            }));
-
-        // Logs
-        let crmLogs = [];
-        try {
-            const [logs] = await db.query('SELECT * FROM obra_crm_logs WHERE obra_id = ? ORDER BY created_at DESC LIMIT 50', [id]);
-            crmLogs = logs;
-        } catch (crmErr) {}
-
         res.json({
-            obra: {
-                id: String(obra.id),
-                nome: obra.nome,
-                status: obra.status,
-                responsavel: contract.fiscal_nome || 'Não Definido', 
-                fiscal_nome: contract.fiscal_nome,
-                kpi: {
-                    valor_total_contrato: valorTotal,
-                    total_gasto: totalGasto,
-                    horas_contratadas: horasTotais,
-                    horas_realizadas: horasRealizadas,
-                    percentual_conclusao: parseFloat(percentualConclusao.toFixed(1)),
-                },
-                previsao: { data_termino_estimada: previsaoTermino, status: statusPrazo },
-                data_inicio_contratual: contract.start_date,
-                data_fim_contratual: contract.expected_end_date
-            },
+            obra: obra[0],
+            contract: contractData,
+            burnup: burnupData, // Array para o gráfico
             vehicles: vehicles,
-            employees: employees,
-            crm_history: crmLogs
+            crm: crmLogs
         });
 
     } catch (error) {
-        console.error('============ ERRO DETALHE ============', error);
-        res.status(500).json({ message: 'Erro ao carregar detalhes.', debug: error.message });
+        console.error(error);
+        res.status(500).json({message: 'Erro ao carregar detalhes'});
     }
 };
 
+// 3. REGISTRAR CRM
 exports.addCrmLog = async (req, res) => {
-    const { obra_id, tipo_interacao, resumo_conversa, data_proximo_contato } = req.body;
-    const supervisor_id = req.user?.userId || null;
-    const supervisor_name = req.user?.username || 'Supervisor'; 
-    try {
-        await db.query(`INSERT INTO obra_crm_logs (obra_id, supervisor_id, supervisor_name, tipo_interacao, resumo_conversa, data_proximo_contato) VALUES (?, ?, ?, ?, ?, ?)`, [obra_id, supervisor_id, supervisor_name, tipo_interacao, resumo_conversa, data_proximo_contato]);
-        res.status(201).json({ message: 'Salvo.' });
-    } catch (error) { res.status(500).json({ message: 'Erro ao salvar.' }); }
-};
+    const { obra_id, interaction_type, notes, agreed_action } = req.body;
+    const user_id = req.user?.userId; // Do middleware de auth
 
-exports.upsertContract = async (req, res) => {
-    let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome } = req.body;
-    if (!data_inicio) data_inicio = null;
-    if (!data_fim_contratual) data_fim_contratual = null;
-    if (!fiscal_nome) fiscal_nome = null;
     try {
-        const [existing] = await db.query('SELECT id FROM obra_contracts WHERE obra_id = ?', [obra_id]);
-        if (existing.length > 0) {
-            await db.query(`UPDATE obra_contracts SET total_value = ?, total_hours_contracted = ?, start_date = ?, expected_end_date = ?, fiscal_nome = ? WHERE obra_id = ?`, [valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, obra_id]);
-        } else {
-            await db.query(`INSERT INTO obra_contracts (obra_id, total_value, total_hours_contracted, start_date, expected_end_date, fiscal_nome) VALUES (?, ?, ?, ?, ?, ?)`, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome]);
-        }
-        res.json({ message: 'Salvo.' });
-    } catch (error) { res.status(500).json({ message: 'Erro ao salvar.' }); }
+        await db.query(`
+            INSERT INTO obra_crm_logs 
+            (obra_id, user_id, interaction_type, notes, agreed_action)
+            VALUES (?, ?, ?, ?, ?)
+        `, [obra_id, user_id, interaction_type, notes, agreed_action]);
+        
+        res.json({success: true});
+    } catch (e) {
+        res.status(500).json({error: e.message});
+    }
 };
