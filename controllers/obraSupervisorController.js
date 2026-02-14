@@ -171,7 +171,10 @@ exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     
     // Validação básica do ID para evitar crash do SQL
-    if (!id) return res.status(400).json({message: 'ID da obra inválido.'});
+    // Se o ID não for numérico, retorna erro 400 em vez de tentar query e dar 500
+    if (!id || isNaN(Number(id))) {
+        return res.status(400).json({message: 'ID da obra inválido. Deve ser numérico.'});
+    }
 
     try {
         // 1. Obra Básica (Essencial)
