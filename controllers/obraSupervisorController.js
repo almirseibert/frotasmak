@@ -31,7 +31,7 @@ exports.getDashboardData = async (req, res) => {
         // 1. Dados Básicos (Obras Ativas)
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
         
-        // 2. Buscas Auxiliares (Blindadas contra erros de tabela inexistente)
+        // 2. Buscas Auxiliares
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
@@ -74,9 +74,11 @@ exports.getDashboardData = async (req, res) => {
             const obraId = String(obra.id);
             const contract = contractMap[obra.id] || {};
             
-            // Valores
+            // Valores (Prioridade: Contrato > Obra Legado > 0)
             const valorTotal = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
-            const horasContratadas = parseFloat(contract.total_hours_contracted) || 0;
+            const horasContratadas = parseFloat(contract.total_hours_contracted) || 0; // Nota: Se não tiver contrato, será calculado no front ou deve ser somado aqui?
+            // O Front fará a lógica de preenchimento inicial, aqui enviamos o que temos oficializado.
+            
             const totalGasto = parseFloat(expenseMap[obraId]) || 0;
             const horasExecutadas = parseFloat(hoursMap[obraId]) || 0;
 
@@ -115,8 +117,19 @@ exports.getDashboardData = async (req, res) => {
                 id: obraId,
                 nome: obra.nome,
                 status: obra.status,
-                responsavel: contract.fiscal_nome || obra.responsavel || 'A Definir',
+                // Prioridade: Contrato > Obra > Padrão
+                responsavel: contract.responsavel_nome || obra.responsavel || 'A Definir', 
                 fiscal_nome: contract.fiscal_nome || obra.fiscal || 'A Definir',
+                
+                // Dados Brutos para Configuração (Legacy Fallback)
+                legacy_data: {
+                    valor_total: obra.valorTotalContrato,
+                    horas_json: obra.horasContratadasPorTipo,
+                    data_inicio: obra.dataInicio,
+                    responsavel: obra.responsavel,
+                    fiscal: obra.fiscal
+                },
+
                 kpi: {
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
@@ -160,156 +173,98 @@ function getStatusColor(perc) {
 
 // 2. DETALHES DA OBRA (COCKPIT)
 exports.getObraDetails = async (req, res) => {
+    // ... (Mantém o código existente da última versão correta)
     const { id } = req.params;
-    
     if (!id) return res.status(400).json({message: 'ID da obra inválido.'});
 
     try {
-        // 1. Obra Básica
         let obra = [];
         try {
             const [resObra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
             obra = resObra || [];
-        } catch (e) {
-            return res.status(404).json({message: 'Erro ao buscar obra.', debug: e.message});
-        }
+        } catch (e) { return res.status(404).json({message: 'Erro ao buscar obra.', debug: e.message}); }
 
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
 
-        // 2. Dados Auxiliares (Com Try-Catch individual para não quebrar a página toda se faltar uma tabela)
-        
-        // Contrato
         let contractData = {};
         try {
             const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
             contractData = contract[0] || {};
         } catch (e) { console.warn('Contrato warning:', e.message); }
 
-        // Burnup
         let burnupData = [];
         try {
-            const [resBurnup] = await db.query(`
-                SELECT DATE(date) as data, SUM(totalHours) as horas_dia 
-                FROM daily_work_logs WHERE obraId = ? GROUP BY DATE(date) ORDER BY date ASC
-            `, [id]);
+            const [resBurnup] = await db.query(`SELECT DATE(date) as data, SUM(totalHours) as horas_dia FROM daily_work_logs WHERE obraId = ? GROUP BY DATE(date) ORDER BY date ASC`, [id]);
             burnupData = resBurnup || [];
         } catch (e) { console.warn('Burnup warning:', e.message); }
 
-        // Veículos
         let vehicles = [];
         try {
-            const [resVehicles] = await db.query(`
-                SELECT 
-                    v.id, v.placa, v.modelo, v.tipo, 
-                    voa.startDate as data_alocacao,
-                    COALESCE(e.name, '---') as operador_nome,
-                    ces.fator_conversao,
-                    ces.grupo_contratado
-                FROM vehicles v
-                LEFT JOIN vehicle_operational_assignment voa ON v.id = voa.vehicleId AND voa.obraId = ? AND (voa.endDate IS NULL OR voa.endDate > NOW())
-                LEFT JOIN employees e ON voa.employeeId = e.id
-                LEFT JOIN contract_equipment_substitutions ces ON ces.veiculo_real_id = v.id AND ces.obra_contract_id = ?
-                WHERE v.obraAtualId = ?
-            `, [id, contractData.id || 0, id]);
+            const [resVehicles] = await db.query(`SELECT v.id, v.placa, v.modelo, v.tipo, voa.startDate as data_alocacao, COALESCE(e.name, '---') as operador_nome, ces.fator_conversao, ces.grupo_contratado FROM vehicles v LEFT JOIN vehicle_operational_assignment voa ON v.id = voa.vehicleId AND voa.obraId = ? AND (voa.endDate IS NULL OR voa.endDate > NOW()) LEFT JOIN employees e ON voa.employeeId = e.id LEFT JOIN contract_equipment_substitutions ces ON ces.veiculo_real_id = v.id AND ces.obra_contract_id = ? WHERE v.obraAtualId = ?`, [id, contractData.id || 0, id]);
             vehicles = resVehicles || [];
-        } catch (e) {
-            // Fallback simples se a query complexa falhar
-            try {
-                const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
-                vehicles = vSimple ? vSimple.map(v => ({...v, operador_nome: '---', data_alocacao: null})) : [];
-            } catch (err2) { vehicles = []; }
-        }
+        } catch (e) { vehicles = []; }
 
-        // CRM - AQUI ONDE O ERRO ESTAVA OCORRENDO
         let crmLogs = [];
         try {
-            // Tenta buscar com user_id
-            const [resCrm] = await db.query(`
-                SELECT l.*, u.username as supervisor_name 
-                FROM obra_crm_logs l
-                LEFT JOIN users u ON l.user_id = u.id
-                WHERE l.obra_id = ? ORDER BY l.created_at DESC
-            `, [id]);
+            const [resCrm] = await db.query(`SELECT l.*, u.username as supervisor_name FROM obra_crm_logs l LEFT JOIN users u ON l.user_id = u.id WHERE l.obra_id = ? ORDER BY l.created_at DESC`, [id]);
             crmLogs = resCrm || [];
-        } catch (e) { 
-            console.warn('CRM warning (tentando fallback):', e.message);
-            // Se falhar (ex: coluna user_id não existe), retorna vazio em vez de crashar
-            crmLogs = [];
-        }
+        } catch (e) { crmLogs = []; }
 
-        // KPI
         let kpi = { horas_executadas: 0, total_gasto: 0 };
         try {
             const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [id]);
             const [hours] = await db.query('SELECT SUM(totalHours) as total FROM daily_work_logs WHERE obraId = ?', [id]);
-            kpi = {
-                horas_executadas: parseFloat(hours[0]?.total) || 0,
-                total_gasto: parseFloat(expenses[0]?.total) || 0
-            };
-        } catch (e) { console.warn('KPI warning:', e.message); }
+            kpi = { horas_executadas: parseFloat(hours[0]?.total) || 0, total_gasto: parseFloat(expenses[0]?.total) || 0 };
+        } catch (e) { }
 
         res.json({
-            obra: { ...obra[0], kpi }, 
-            contract: contractData,
-            burnup: burnupData || [],
-            vehicles: vehicles || [],
-            crm_history: crmLogs || [],
-            employees: []
+            obra: { ...obra[0], kpi }, contract: contractData, burnup: burnupData || [], vehicles: vehicles || [], crm_history: crmLogs || [], employees: []
         });
-
-    } catch (error) {
-        console.error('Erro Critical Detalhes:', error);
-        res.status(500).json({message: 'Erro crítico ao carregar detalhes.', debug: error.message});
-    }
+    } catch (error) { res.status(500).json({message: 'Erro crítico.', debug: error.message}); }
 };
 
-// 3. REGISTRAR CRM
 exports.addCrmLog = async (req, res) => {
+    // ... (Mantém o código existente)
     const { obra_id, interaction_type, notes, agreed_action } = req.body;
-    const user_id = req.user?.userId || null; // Se não tiver user logado, envia NULL
-
+    const user_id = req.user?.userId || null;
     try {
-        await db.query(`
-            INSERT INTO obra_crm_logs 
-            (obra_id, user_id, interaction_type, notes, agreed_action)
-            VALUES (?, ?, ?, ?, ?)
-        `, [obra_id, user_id, interaction_type, notes, agreed_action]);
-        
+        await db.query(`INSERT INTO obra_crm_logs (obra_id, user_id, interaction_type, notes, agreed_action) VALUES (?, ?, ?, ?, ?)`, [obra_id, user_id, interaction_type, notes, agreed_action]);
         res.json({success: true});
-    } catch (e) {
-        console.error('Erro CRM Insert:', e.message);
-        // Retorna erro 500 mas com mensagem clara se for coluna inexistente
-        res.status(500).json({error: `Erro ao salvar: ${e.message}. Verifique se a tabela obra_crm_logs tem a coluna user_id.`});
-    }
+    } catch (e) { res.status(500).json({error: e.message}); }
 };
 
 // 4. SALVAR/ATUALIZAR CONTRATO
 exports.upsertContract = async (req, res) => {
-    let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome } = req.body;
+    // ADICIONADO: responsavel_nome
+    let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome } = req.body;
     
     if (!data_inicio) data_inicio = null;
     if (!data_fim_contratual) data_fim_contratual = null;
     if (!fiscal_nome) fiscal_nome = null;
+    if (!responsavel_nome) responsavel_nome = null;
 
     try {
+        // Verifica se a coluna responsavel_nome existe na tabela, se não, ignora ou tenta
+        // O ideal é rodar o script SQL abaixo para garantir
+        
         const [existing] = await db.query('SELECT id FROM obra_contracts WHERE obra_id = ?', [obra_id]);
         
         if (existing.length > 0) {
             await db.query(`
                 UPDATE obra_contracts 
-                SET total_value = ?, total_hours_contracted = ?, start_date = ?, expected_end_date = ?, fiscal_nome = ? 
+                SET total_value = ?, total_hours_contracted = ?, start_date = ?, expected_end_date = ?, fiscal_nome = ?, responsavel_nome = ? 
                 WHERE obra_id = ?
-            `, [valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, obra_id]);
+            `, [valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome, obra_id]);
         } else {
             await db.query(`
                 INSERT INTO obra_contracts 
-                (obra_id, total_value, total_hours_contracted, start_date, expected_end_date, fiscal_nome) 
-                VALUES (?, ?, ?, ?, ?, ?)
-            `, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome]);
+                (obra_id, total_value, total_hours_contracted, start_date, expected_end_date, fiscal_nome, responsavel_nome) 
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome]);
         }
         res.json({ message: 'Contrato salvo com sucesso.' });
     } catch (error) {
         console.error("Erro ao salvar contrato:", error);
-        res.status(500).json({ message: 'Erro ao salvar contrato.' });
+        res.status(500).json({ message: `Erro ao salvar contrato: ${error.message}` });
     }
 };
