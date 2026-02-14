@@ -26,7 +26,7 @@ const addBusinessDays = (startDate, daysToAdd) => {
 exports.getDashboardData = async (req, res) => {
     try {
         // Busca obras ativas e seus contratos
-        // AJUSTADO: Nomes das colunas conforme o seu dump SQL (total_value, total_hours_contracted, etc.)
+        // AJUSTADO: Removida a coluna oc.fiscal_nome (não existe no banco de dados fornecido)
         const [obras] = await db.query(`
             SELECT 
                 o.id, o.nome, o.responsavel,
@@ -133,7 +133,7 @@ exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
         // 1. Dados Básicos e Contrato
-        // AJUSTADO: Nomes das colunas conforme o seu dump SQL
+        // AJUSTADO: Removida a coluna oc.fiscal_nome (não existe no banco de dados fornecido)
         const [obraInfo] = await db.query(`
             SELECT 
                 o.id, o.nome, o.responsavel,
@@ -169,7 +169,6 @@ exports.getObraDetails = async (req, res) => {
         const percentualHoras = obra.horas_totais_contratadas > 0 ? (horasExecutadas / obra.horas_totais_contratadas) * 100 : 0;
 
         // 4. Veículos Alocados
-        // AJUSTADO: Removida a coluna ces.data_fim_alocacao pois não existe na sua tabela contract_equipment_substitutions
         const [veiculos] = await db.query(`
             SELECT 
                 v.id, v.modelo, v.placa, v.tipo, v.horimetro, 
