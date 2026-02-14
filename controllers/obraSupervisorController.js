@@ -8,7 +8,7 @@ const addBusinessDays = (startDate, daysToAdd) => {
     if (!startDate) return new Date();
     let count = 0;
     let currentDate = new Date(startDate);
-    // Proteção contra loop infinito em datas muito distantes
+    // Proteção contra loop infinito
     if (daysToAdd > 3000) daysToAdd = 3000; 
     
     while (count < daysToAdd) {
@@ -28,31 +28,28 @@ exports.getDashboardData = async (req, res) => {
     try {
         console.log('[Supervisor] Calculando Dashboard Inteligente...');
 
-        // 1. Dados Básicos
-        // Busca apenas obras ativas para o dashboard principal
+        // 1. Dados Básicos (Obras Ativas)
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
         
+        // 2. Buscas Auxiliares (Blindadas contra erros de tabela inexistente)
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
             contracts = resContracts || [];
-        } catch (e) { console.warn('ObraContracts Warning:', e.message); }
+        } catch (e) { console.warn('Aviso: Tabela obra_contracts vazia ou inexistente.'); }
         
-        // 2. Agregações Financeiras e de Horas (Faturamento)
         let expenses = [];
         try {
             const [resExpenses] = await db.query(`SELECT obraId, SUM(amount) as total FROM expenses GROUP BY obraId`);
             expenses = resExpenses || [];
-        } catch (e) { console.warn('Expenses Warning:', e.message); }
+        } catch (e) { console.warn('Aviso: Erro ao somar expenses.'); }
 
         let hoursLogs = [];
         try {
             const [resHours] = await db.query(`SELECT obraId, SUM(totalHours) as total FROM daily_work_logs GROUP BY obraId`);
             hoursLogs = resHours || [];
-        } catch (e) { console.warn('DailyWorkLogs Warning:', e.message); }
+        } catch (e) { console.warn('Aviso: Erro ao somar daily_work_logs.'); }
 
-        // 3. Contagem de Máquinas Ativas (Correção: Busca na tabela vehicles)
-        // Consideramos "Pesados" para o cálculo: Caminhão, Escavadeira, Motoniveladora, Retroescavadeira, Rolo, Trator
         let activeMachines = [];
         try {
             const [resMachines] = await db.query(`
@@ -65,9 +62,9 @@ exports.getDashboardData = async (req, res) => {
                 GROUP BY obraAtualId
             `);
             activeMachines = resMachines || [];
-        } catch (e) { console.warn('ActiveMachines Warning:', e.message); }
+        } catch (e) { console.warn('Aviso: Erro ao contar máquinas.'); }
 
-        // Mapeamento para acesso rápido
+        // Mapeamento
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
         const expenseMap = {}; expenses.forEach(e => expenseMap[e.obraId] = e.total);
         const hoursMap = {}; hoursLogs.forEach(h => hoursMap[h.obraId] = h.total);
@@ -77,7 +74,7 @@ exports.getDashboardData = async (req, res) => {
             const obraId = String(obra.id);
             const contract = contractMap[obra.id] || {};
             
-            // Valores (Fallback para dados da obra se contrato não existir)
+            // Valores
             const valorTotal = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
             const horasContratadas = parseFloat(contract.total_hours_contracted) || 0;
             const totalGasto = parseFloat(expenseMap[obraId]) || 0;
@@ -88,7 +85,7 @@ exports.getDashboardData = async (req, res) => {
             let percHoras = (horasContratadas > 0) ? (horasExecutadas / horasContratadas) * 100 : 0;
             const percConclusao = Math.max(percFinanceiro, percHoras);
 
-            // === LÓGICA DE PREVISÃO INTELIGENTE ===
+            // Previsão
             let previsaoTermino = null;
             let statusPrazo = 'indefinido';
             let diasRestantes = 0;
@@ -96,9 +93,6 @@ exports.getDashboardData = async (req, res) => {
             if (horasContratadas > 0) {
                 const horasSaldo = horasContratadas - horasExecutadas;
                 const maquinasAtivas = machinesMap[obraId] || 0;
-                
-                // Capacidade diária: 8h por máquina (padrão solicitado)
-                // Se não tiver máquina ativa, assumimos 1 para não travar o cálculo (divisão por zero)
                 const capacidadeDiaria = (maquinasAtivas > 0 ? maquinasAtivas : 1) * 8; 
 
                 if (horasSaldo > 0) {
@@ -106,10 +100,9 @@ exports.getDashboardData = async (req, res) => {
                     previsaoTermino = addBusinessDays(new Date(), diasRestantes);
                 } else {
                     diasRestantes = 0;
-                    previsaoTermino = new Date(); // Obra teoricamente acabou
+                    previsaoTermino = new Date(); 
                 }
 
-                // Verifica atraso
                 const dataFimContrato = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
                 if (dataFimContrato && previsaoTermino > dataFimContrato) {
                     statusPrazo = 'atrasado';
@@ -143,7 +136,7 @@ exports.getDashboardData = async (req, res) => {
             };
         });
 
-        // Ordenação Inteligente: Prioridade para quem termina antes
+        // Ordenação
         dashboardData.sort((a, b) => {
             if (!a.previsao.data_termino_estimada) return 1;
             if (!b.previsao.data_termino_estimada) return -1;
@@ -158,7 +151,6 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
-// Helper de cor
 function getStatusColor(perc) {
     if (perc >= 90) return 'red';
     if (perc >= 70) return 'violet';
@@ -170,47 +162,40 @@ function getStatusColor(perc) {
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     
-    // CORREÇÃO: Validação flexível (Aceita String ou Número)
     if (!id) return res.status(400).json({message: 'ID da obra inválido.'});
 
     try {
-        // 1. Obra Básica (Essencial)
+        // 1. Obra Básica
         let obra = [];
         try {
-            // A query funciona tanto para INT quanto VARCHAR
             const [resObra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
             obra = resObra || [];
         } catch (e) {
-            console.error('Erro ao buscar obra base:', e.message);
-            // Se falhar a busca básica, retorna 404 ou erro específico em vez de 500 genérico
             return res.status(404).json({message: 'Erro ao buscar obra.', debug: e.message});
         }
 
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
 
-        // 2. Contrato (Defensive)
+        // 2. Dados Auxiliares (Com Try-Catch individual para não quebrar a página toda se faltar uma tabela)
+        
+        // Contrato
         let contractData = {};
         try {
             const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
             contractData = contract[0] || {};
-        } catch (e) { console.warn('ObraContracts warning:', e.message); }
+        } catch (e) { console.warn('Contrato warning:', e.message); }
 
-        // 3. Burnup Chart Data (Defensive)
+        // Burnup
         let burnupData = [];
         try {
             const [resBurnup] = await db.query(`
-                SELECT 
-                    DATE(date) as data, 
-                    SUM(totalHours) as horas_dia 
-                FROM daily_work_logs 
-                WHERE obraId = ? 
-                GROUP BY DATE(date) 
-                ORDER BY date ASC
+                SELECT DATE(date) as data, SUM(totalHours) as horas_dia 
+                FROM daily_work_logs WHERE obraId = ? GROUP BY DATE(date) ORDER BY date ASC
             `, [id]);
             burnupData = resBurnup || [];
         } catch (e) { console.warn('Burnup warning:', e.message); }
 
-        // 4. Veículos Alocados (Defensive - Fallback Robusto)
+        // Veículos
         let vehicles = [];
         try {
             const [resVehicles] = await db.query(`
@@ -228,43 +213,41 @@ exports.getObraDetails = async (req, res) => {
             `, [id, contractData.id || 0, id]);
             vehicles = resVehicles || [];
         } catch (e) {
-            console.error('Erro SQL Veiculos (Tentando fallback):', e.message);
+            // Fallback simples se a query complexa falhar
             try {
                 const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
-                vehicles = vSimple ? vSimple.map(v => ({...v, operador_nome: 'Erro Info', data_alocacao: new Date()})) : [];
-            } catch (err2) {
-                vehicles = [];
-            }
+                vehicles = vSimple ? vSimple.map(v => ({...v, operador_nome: '---', data_alocacao: null})) : [];
+            } catch (err2) { vehicles = []; }
         }
 
-        // 5. Histórico CRM (Defensive)
+        // CRM - AQUI ONDE O ERRO ESTAVA OCORRENDO
         let crmLogs = [];
         try {
+            // Tenta buscar com user_id
             const [resCrm] = await db.query(`
-                SELECT 
-                    l.*, 
-                    u.username as supervisor_name 
+                SELECT l.*, u.username as supervisor_name 
                 FROM obra_crm_logs l
                 LEFT JOIN users u ON l.user_id = u.id
-                WHERE l.obra_id = ? 
-                ORDER BY l.created_at DESC
+                WHERE l.obra_id = ? ORDER BY l.created_at DESC
             `, [id]);
             crmLogs = resCrm || [];
-        } catch (e) { console.warn('CRM warning:', e.message); }
+        } catch (e) { 
+            console.warn('CRM warning (tentando fallback):', e.message);
+            // Se falhar (ex: coluna user_id não existe), retorna vazio em vez de crashar
+            crmLogs = [];
+        }
 
-        // 6. KPIs Unitários (Defensive)
+        // KPI
         let kpi = { horas_executadas: 0, total_gasto: 0 };
         try {
             const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [id]);
             const [hours] = await db.query('SELECT SUM(totalHours) as total FROM daily_work_logs WHERE obraId = ?', [id]);
-            
             kpi = {
                 horas_executadas: parseFloat(hours[0]?.total) || 0,
                 total_gasto: parseFloat(expenses[0]?.total) || 0
             };
         } catch (e) { console.warn('KPI warning:', e.message); }
 
-        // Response Final
         res.json({
             obra: { ...obra[0], kpi }, 
             contract: contractData,
@@ -283,7 +266,7 @@ exports.getObraDetails = async (req, res) => {
 // 3. REGISTRAR CRM
 exports.addCrmLog = async (req, res) => {
     const { obra_id, interaction_type, notes, agreed_action } = req.body;
-    const user_id = req.user?.userId; 
+    const user_id = req.user?.userId || null; // Se não tiver user logado, envia NULL
 
     try {
         await db.query(`
@@ -294,8 +277,9 @@ exports.addCrmLog = async (req, res) => {
         
         res.json({success: true});
     } catch (e) {
-        console.error('Erro CRM:', e);
-        res.status(500).json({error: e.message});
+        console.error('Erro CRM Insert:', e.message);
+        // Retorna erro 500 mas com mensagem clara se for coluna inexistente
+        res.status(500).json({error: `Erro ao salvar: ${e.message}. Verifique se a tabela obra_crm_logs tem a coluna user_id.`});
     }
 };
 
@@ -303,7 +287,6 @@ exports.addCrmLog = async (req, res) => {
 exports.upsertContract = async (req, res) => {
     let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome } = req.body;
     
-    // Tratamento de nulos
     if (!data_inicio) data_inicio = null;
     if (!data_fim_contratual) data_fim_contratual = null;
     if (!fiscal_nome) fiscal_nome = null;
@@ -324,7 +307,6 @@ exports.upsertContract = async (req, res) => {
                 VALUES (?, ?, ?, ?, ?, ?)
             `, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome]);
         }
-        
         res.json({ message: 'Contrato salvo com sucesso.' });
     } catch (error) {
         console.error("Erro ao salvar contrato:", error);
