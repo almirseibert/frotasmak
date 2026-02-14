@@ -20,54 +20,60 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // CONTROLADORES
 // ==================================================================================
 
-// 1. OBTER DADOS DO DASHBOARD (SEM FILTROS - TRAZ TUDO)
+// 1. OBTER DADOS DO DASHBOARD (MACRO)
 exports.getDashboardData = async (req, res) => {
     try {
-        console.log('[Supervisor] Carregando Dashboard...');
-
-        // 1. Busca TODAS as obras sem cláusula WHERE de status
-        // Isso garante que obras com "Em andamento", "Aberta", etc., apareçam.
+        // 1. Busca TODAS as obras
         const [allObras] = await db.query('SELECT * FROM obras');
-        console.log(`[Supervisor] Obras encontradas no banco: ${allObras.length}`);
-
-        if (allObras.length > 0) {
-            console.log(`[Debug] Exemplo de Status: "${allObras[0].status}"`);
-        }
-
-        // 2. Busca tabelas auxiliares (Contratos)
+        
+        // 2. Busca contratos (Tabela nova do Supervisor - usa obra_id)
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
             contracts = resContracts;
-        } catch (e) { 
-            console.warn('[Supervisor] Tabela contratos vazia ou ausente. O sistema irá operar sem dados financeiros por enquanto.'); 
-        }
+        } catch (e) {}
 
-        // 3. Busca Financeiro (Expenses)
+        // 3. Busca Financeiro (Tabela antiga - provável uso de obraId)
         let expensesMap = {};
         try {
-            const [resExpenses] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
-            resExpenses.forEach(r => expensesMap[r.obra_id] = r.total);
-        } catch (e) { /* Ignora se tabela não existir */ }
+            // Tenta primeiro com obraId (padrão legado)
+            const [resExpenses] = await db.query('SELECT obraId, SUM(total_value) as total FROM expenses GROUP BY obraId');
+            resExpenses.forEach(r => expensesMap[r.obraId] = r.total);
+        } catch (e) {
+            try {
+                // Se falhar, tenta obra_id (padrão novo)
+                const [resExpenses2] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
+                resExpenses2.forEach(r => expensesMap[r.obra_id] = r.total);
+            } catch (e2) { console.warn('[Supervisor] Falha ao ler expenses:', e2.message); }
+        }
 
-        // 4. Busca Horas (Daily Work Logs)
+        // 4. Busca Horas (Tabela antiga - provável uso de obraId)
         let hoursMap = {};
         try {
-            const [resHours] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
-            resHours.forEach(r => hoursMap[r.obra_id] = r.total);
-        } catch (e) { /* Ignora se tabela não existir */ }
+             // Tenta primeiro com obraId
+            const [resHours] = await db.query('SELECT obraId, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obraId');
+            resHours.forEach(r => hoursMap[r.obraId] = r.total);
+        } catch (e) {
+            try {
+                // Fallback para obra_id
+                const [resHours2] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
+                resHours2.forEach(r => hoursMap[r.obra_id] = r.total);
+            } catch (e2) { /* Ignora */ }
+        }
 
         // 5. Montagem dos Dados
         const dashboardData = allObras.map(obra => {
             const obraIdStr = String(obra.id);
-            // Tenta encontrar contrato compatível (seja ID número ou string)
             const contract = contracts.find(c => String(c.obra_id) === obraIdStr) || {};
             
+            // Valores
             const valorTotal = parseFloat(contract.total_value) || 0;
             const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
+            // Busca no mapa usando o ID compatível
             const totalGasto = parseFloat(expensesMap[obraIdStr] || expensesMap[obra.id]) || 0;
             const horasRealizadas = parseFloat(hoursMap[obraIdStr] || hoursMap[obra.id]) || 0;
 
+            // Cálculos Percentuais
             let percentualFinanceiro = (valorTotal > 0) ? (totalGasto / valorTotal) * 100 : 0;
             let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
             const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
@@ -79,9 +85,7 @@ exports.getDashboardData = async (req, res) => {
             const dataFim = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
 
             if (horasRealizadas > 0 && horasTotais > 0 && dataInicio) {
-                const hoje = new Date();
-                const diffTime = Math.abs(hoje - dataInicio);
-                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
+                const diffDays = Math.ceil(Math.abs(new Date() - dataInicio) / (86400000)) || 1;
                 const horasPorDia = horasRealizadas / diffDays;
                 
                 if (horasPorDia > 0 && (horasTotais - horasRealizadas) > 0) {
@@ -93,8 +97,8 @@ exports.getDashboardData = async (req, res) => {
 
             return {
                 id: String(obra.id),
-                nome: obra.nome || 'Obra sem nome',
-                status: obra.status || 'Desconhecido',
+                nome: obra.nome,
+                status: obra.status,
                 responsavel: contract.fiscal_nome || 'Não Definido', 
                 fiscal_nome: contract.fiscal_nome,
                 kpi: {
@@ -124,20 +128,16 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
-// 2. OBTER DETALHES (COM BUSCA DE VEÍCULOS POR ATIVIDADE)
+// 2. OBTER DETALHES (AGORA COM BUSCA CORRETA DE ALOCAÇÕES)
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     
     try {
         const [obraInfo] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
-        
-        if (!obraInfo || obraInfo.length === 0) {
-            return res.status(404).json({ message: 'Obra não encontrada.' });
-        }
-        
+        if (!obraInfo || obraInfo.length === 0) return res.status(404).json({ message: 'Obra não encontrada.' });
         const obra = obraInfo[0];
         
-        // Contratos e KPIs (Mesma lógica do dashboard)
+        // --- CONTRATOS E KPIS (Mesma lógica robusta do dashboard) ---
         let contract = {};
         try {
             const [c] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
@@ -146,11 +146,26 @@ exports.getObraDetails = async (req, res) => {
 
         let totalGasto = 0, horasRealizadas = 0;
         try {
-            const [exp] = await db.query('SELECT SUM(total_value) as total FROM expenses WHERE obra_id = ?', [id]);
+            // Tenta obraId (CamelCase) primeiro
+            const [exp] = await db.query('SELECT SUM(total_value) as total FROM expenses WHERE obraId = ?', [id]);
             totalGasto = parseFloat(exp[0].total) || 0;
-            const [hrs] = await db.query('SELECT SUM(horas_trabalhadas) as total FROM daily_work_logs WHERE obra_id = ?', [id]);
+        } catch (e) {
+            try {
+                // Fallback obra_id
+                const [exp2] = await db.query('SELECT SUM(total_value) as total FROM expenses WHERE obra_id = ?', [id]);
+                totalGasto = parseFloat(exp2[0].total) || 0;
+            } catch (e2) {}
+        }
+
+        try {
+            const [hrs] = await db.query('SELECT SUM(horas_trabalhadas) as total FROM daily_work_logs WHERE obraId = ?', [id]);
             horasRealizadas = parseFloat(hrs[0].total) || 0;
-        } catch (e) {}
+        } catch (e) {
+            try {
+                const [hrs2] = await db.query('SELECT SUM(horas_trabalhadas) as total FROM daily_work_logs WHERE obra_id = ?', [id]);
+                horasRealizadas = parseFloat(hrs2[0].total) || 0;
+            } catch (e2) {}
+        }
 
         const valorTotal = parseFloat(contract.total_value) || 0;
         const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
@@ -158,7 +173,6 @@ exports.getObraDetails = async (req, res) => {
         let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
         const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
 
-        // Previsão
         let previsaoTermino = null;
         let statusPrazo = 'indefinido';
         const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
@@ -169,30 +183,70 @@ exports.getObraDetails = async (req, res) => {
             const horasPorDia = horasRealizadas / diffDays;
             if (horasPorDia > 0) {
                 const diasRest = Math.ceil((horasTotais - horasRealizadas) / horasPorDia);
-                if (diasRest > 0) previsaoTermino = addBusinessDays(new Date(), diasRest);
+                previsaoTermino = addBusinessDays(new Date(), diasRest);
             }
         }
         if (previsaoTermino && dataFim) statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
 
-        // ======================================================================
-        // ESTRATÉGIA DE VEÍCULOS: BUSCA POR ATIVIDADE RECENTE (30 DIAS)
-        // ======================================================================
-        // Busca veículos que tiveram apontamento nesta obra nos últimos 30 dias
-        let vehicles = [];
+        // --- VEÍCULOS E FUNCIONÁRIOS (Corrigido para usar vehicle_operational_assignment) ---
+        let allocationData = [];
         try {
-            const [activeVehicles] = await db.query(`
-                SELECT DISTINCT v.id, v.plate, v.model, v.type 
-                FROM vehicles v
-                JOIN daily_work_logs d ON v.id = d.vehicle_id
-                WHERE d.obra_id = ? 
-                AND d.work_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-                ORDER BY d.work_date DESC
+            // Busca na tabela de alocação operacional (Assignments)
+            // Tenta usar obraId (CamelCase) e vehicleId/employeeId
+            const [allocations] = await db.query(`
+                SELECT 
+                    voa.id, 
+                    voa.startDate as data_inicio,
+                    v.plate, v.model, v.type as tipo_veiculo,
+                    e.name as nome_funcionario, e.role as cargo
+                FROM vehicle_operational_assignment voa
+                LEFT JOIN vehicles v ON voa.vehicleId = v.id
+                LEFT JOIN employees e ON voa.employeeId = e.id
+                WHERE voa.obraId = ? AND (voa.endDate IS NULL OR voa.endDate > NOW())
             `, [id]);
-            vehicles = activeVehicles;
-        } catch (vErr) {
-            console.warn('[Supervisor] Erro ao buscar veículos por atividade (tabela pode não existir):', vErr.message);
+            allocationData = allocations;
+        } catch (err) {
+            console.warn('[Supervisor] Erro ao buscar allocations (tentando snake_case):', err.message);
+            // Fallback: Tenta query com snake_case se a primeira falhar
+            try {
+                const [allocations2] = await db.query(`
+                    SELECT 
+                        voa.id, 
+                        voa.start_date as data_inicio,
+                        v.plate, v.model, v.type as tipo_veiculo,
+                        e.name as nome_funcionario, e.role as cargo
+                    FROM vehicle_operational_assignment voa
+                    LEFT JOIN vehicles v ON voa.vehicle_id = v.id
+                    LEFT JOIN employees e ON voa.employee_id = e.id
+                    WHERE voa.obra_id = ? AND (voa.end_date IS NULL OR voa.end_date > NOW())
+                `, [id]);
+                allocationData = allocations2;
+            } catch (err2) {
+                 console.warn('[Supervisor] Falha total em allocations:', err2.message);
+            }
         }
 
+        // Separa veículos e funcionários para o frontend
+        const vehicles = allocationData
+            .filter(a => a.plate) // Tem placa? É veículo
+            .map(a => ({ 
+                id: a.id, 
+                plate: a.plate, 
+                model: a.model, 
+                type: a.tipo_veiculo, 
+                data_alocacao: a.data_inicio 
+            }));
+
+        const employees = allocationData
+            .filter(a => a.nome_funcionario) // Tem nome? É funcionário
+            .map(a => ({
+                id: a.id, // ID da alocação ou do func
+                nome: a.nome_funcionario,
+                cargo: a.cargo,
+                data_alocacao: a.data_inicio
+            }));
+
+        // CRM Logs
         let crmLogs = [];
         try {
             const [logs] = await db.query('SELECT * FROM obra_crm_logs WHERE obra_id = ? ORDER BY created_at DESC LIMIT 50', [id]);
@@ -218,6 +272,7 @@ exports.getObraDetails = async (req, res) => {
                 data_fim_contratual: contract.expected_end_date
             },
             vehicles: vehicles,
+            employees: employees, // Novo campo
             crm_history: crmLogs
         });
 
