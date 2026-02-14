@@ -26,10 +26,10 @@ const addBusinessDays = (startDate, daysToAdd) => {
 exports.getDashboardData = async (req, res) => {
     try {
         // Busca obras ativas e seus contratos
-        // AJUSTADO: Removida a coluna oc.fiscal_nome (não existe no banco de dados fornecido)
+        // AJUSTADO: Removido o.responsavel para evitar erro caso a coluna não exista
         const [obras] = await db.query(`
             SELECT 
-                o.id, o.nome, o.responsavel,
+                o.id, o.nome,
                 oc.total_value as valor_total_contrato, 
                 oc.total_hours_contracted as horas_totais_contratadas,
                 oc.start_date as data_inicio_contratual, 
@@ -54,11 +54,11 @@ exports.getDashboardData = async (req, res) => {
                 `, [obra.id]);
                 horasExecutadas = parseFloat(totalExec[0].total) || 0;
 
-                // B. Calcular Ritmo Atual (Média dos últimos 10 dias usando a coluna date)
+                // B. Calcular Ritmo Atual (Média dos últimos 10 dias usando a coluna date com backticks)
                 const [ritmo] = await db.query(`
                     SELECT COALESCE(SUM(total_hours) / 7, 0) as media_diaria
                     FROM daily_work_logs 
-                    WHERE obra_id = ? AND date >= DATE_SUB(NOW(), INTERVAL 10 DAY)
+                    WHERE obra_id = ? AND \`date\` >= DATE_SUB(NOW(), INTERVAL 10 DAY)
                 `, [obra.id]);
                 mediaDiaria = parseFloat(ritmo[0].media_diaria) || 0;
 
@@ -133,10 +133,10 @@ exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
         // 1. Dados Básicos e Contrato
-        // AJUSTADO: Removida a coluna oc.fiscal_nome (não existe no banco de dados fornecido)
+        // AJUSTADO: Removido o.responsavel
         const [obraInfo] = await db.query(`
             SELECT 
-                o.id, o.nome, o.responsavel,
+                o.id, o.nome,
                 oc.total_value as valor_total_contrato, 
                 oc.total_hours_contracted as horas_totais_contratadas,
                 oc.start_date as data_inicio_contratual, 
