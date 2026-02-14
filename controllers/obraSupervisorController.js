@@ -164,8 +164,11 @@ exports.getObraDetails = async (req, res) => {
         const [obra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
 
-        const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
-        const contractData = contract[0] || {};
+        let contractData = {};
+        try {
+            const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
+            contractData = contract[0] || {};
+        } catch (e) { console.warn('ObraContracts warning:', e.message); }
 
         // Burnup Chart Data
         const [burnupData] = await db.query(`
@@ -178,27 +181,40 @@ exports.getObraDetails = async (req, res) => {
             ORDER BY date ASC
         `, [id]);
 
-        // Veículos Alocados (Correção SQL)
-        // Busca veículos na tabela vehicles (obraAtualId), cruza com histórico para data e voa para operador
-        const [vehicles] = await db.query(`
-            SELECT 
-                v.id, v.placa, v.modelo, v.tipo, 
-                ohv.dataEntrada as data_alocacao,
-                COALESCE(voa.employeeName, '---') as operador_nome,
-                ces.fator_conversao,
-                ces.grupo_contratado
-            FROM vehicles v
-            LEFT JOIN obras_historico_veiculos ohv ON v.id = ohv.veiculoId AND ohv.dataSaida IS NULL AND ohv.obraId = ?
-            LEFT JOIN vehicle_operational_assignment voa ON v.id = voa.vehicleId
-            LEFT JOIN contract_equipment_substitutions ces ON ces.veiculo_real_id = v.id AND ces.obra_contract_id = ?
-            WHERE v.obraAtualId = ?
-        `, [id, contractData.id || 0, id]);
+        // Veículos Alocados (Correção SQL: Removida tabela obras_historico_veiculos inexistente)
+        // Usa vehicle_operational_assignment para pegar dados de alocação (data e operador)
+        let vehicles = [];
+        try {
+            const [resVehicles] = await db.query(`
+                SELECT 
+                    v.id, v.placa, v.modelo, v.tipo, 
+                    voa.startDate as data_alocacao,
+                    COALESCE(e.name, '---') as operador_nome,
+                    ces.fator_conversao,
+                    ces.grupo_contratado
+                FROM vehicles v
+                LEFT JOIN vehicle_operational_assignment voa ON v.id = voa.vehicleId AND voa.obraId = ? AND (voa.endDate IS NULL OR voa.endDate > NOW())
+                LEFT JOIN employees e ON voa.employeeId = e.id
+                LEFT JOIN contract_equipment_substitutions ces ON ces.veiculo_real_id = v.id AND ces.obra_contract_id = ?
+                WHERE v.obraAtualId = ?
+            `, [id, contractData.id || 0, id]);
+            vehicles = resVehicles;
+        } catch (e) {
+            console.error('Erro SQL Veiculos:', e.message);
+            // Fallback simples para não quebrar a página inteira
+            const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
+            vehicles = vSimple.map(v => ({...v, operador_nome: 'Erro Info'}));
+        }
 
         // Histórico CRM
         const [crmLogs] = await db.query(`
-            SELECT * FROM obra_crm_logs 
-            WHERE obra_id = ? 
-            ORDER BY created_at DESC
+            SELECT 
+                l.*, 
+                u.username as supervisor_name 
+            FROM obra_crm_logs l
+            LEFT JOIN users u ON l.user_id = u.id
+            WHERE l.obra_id = ? 
+            ORDER BY l.created_at DESC
         `, [id]);
 
         // Recalcular KPIs unitários para esta obra (sincronia com dashboard)
@@ -211,11 +227,12 @@ exports.getObraDetails = async (req, res) => {
         };
 
         res.json({
-            obra: { ...obra[0], kpi }, // Injeta KPI atualizado no objeto obra
+            obra: { ...obra[0], kpi }, 
             contract: contractData,
             burnup: burnupData,
             vehicles: vehicles,
-            crm: crmLogs
+            crm_history: crmLogs, // Nome corrigido para match com Frontend
+            employees: [] // Frontend espera esta chave para não dar crash
         });
 
     } catch (error) {
