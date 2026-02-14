@@ -163,11 +163,11 @@ exports.getObraDetails = async (req, res) => {
         const percentualHoras = obra.horas_totais_contratadas > 0 ? (horasExecutadas / obra.horas_totais_contratadas) * 100 : 0;
 
         // 4. Veículos Alocados
+        // REMOVIDO v.operador_atual para evitar erro 500, pois a coluna não existe na tabela vehicles no dump SQL fornecido.
         const [veiculos] = await db.query(`
             SELECT 
                 v.id, v.modelo, v.placa, v.tipo, v.horimetro, 
                 COALESCE(ces.fator_conversao, 1.00) as fator_conversao,
-                v.operador_atual,
                 ces.data_fim_alocacao as previsao_liberacao
             FROM vehicles v
             LEFT JOIN contract_equipment_substitutions ces ON v.id = ces.veiculo_real_id AND ces.data_fim_alocacao IS NULL
