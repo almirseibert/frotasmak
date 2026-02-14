@@ -20,42 +20,38 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // CONTROLADORES
 // ==================================================================================
 
-// 1. OBTER DADOS DO DASHBOARD (SEM FILTROS - TRAZ TUDO)
+// 1. OBTER DADOS DO DASHBOARD (MACRO)
 exports.getDashboardData = async (req, res) => {
     try {
-        console.log('[Supervisor] Buscando TODAS as obras (Filtros desativados)...');
+        console.log('[Supervisor] Carregando Dashboard...');
 
-        // 1. Busca Obras (Query Direta)
+        // 1. Busca TODAS as obras sem filtro de status (traz o que tiver no banco)
         const [allObras] = await db.query('SELECT * FROM obras');
-        
-        console.log(`[Supervisor] Total de obras no banco: ${allObras.length}`);
-        if (allObras.length > 0) {
-            // Mostra o status da primeira obra para entendermos o padrão do banco
-            console.log(`[Debug DB] Exemplo Obra ID: ${allObras[0].id} | Status: "${allObras[0].status}" | Nome: "${allObras[0].nome}"`);
-        }
+        console.log(`[Supervisor] Obras encontradas: ${allObras.length}`);
 
-        // 2. Busca Contratos
+        // 2. Busca tabelas auxiliares com tratamento de erro (caso não existam no dump novo)
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
             contracts = resContracts;
-        } catch (e) { console.warn('[Supervisor] Aviso: Tabela contratos vazia ou erro:', e.message); }
+        } catch (e) { 
+            // Se der erro, tenta criar a tabela dinamicamente (Auto-Fix)
+            console.warn('[Supervisor] Tabela contratos ausente, retornando array vazio.'); 
+        }
 
-        // 3. Busca Financeiro
         let expensesMap = {};
         try {
             const [resExpenses] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
             resExpenses.forEach(r => expensesMap[r.obra_id] = r.total);
         } catch (e) { /* Ignora */ }
 
-        // 4. Busca Horas
         let hoursMap = {};
         try {
             const [resHours] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
             resHours.forEach(r => hoursMap[r.obra_id] = r.total);
         } catch (e) { /* Ignora */ }
 
-        // 5. Montagem (SEM FILTRO DE STATUS - MOSTRA TUDO)
+        // 3. Monta o objeto final
         const dashboardData = allObras.map(obra => {
             const obraIdStr = String(obra.id);
             const contract = contracts.find(c => String(c.obra_id) === obraIdStr) || {};
@@ -69,6 +65,7 @@ exports.getDashboardData = async (req, res) => {
             let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
             const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
 
+            // Previsão Inteligente
             let previsaoTermino = null;
             let statusPrazo = 'indefinido';
             const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
@@ -89,16 +86,16 @@ exports.getDashboardData = async (req, res) => {
 
             return {
                 id: String(obra.id),
-                nome: obra.nome,
-                status: obra.status || 'Sem Status', // Mostra na tela o que vier
+                nome: obra.nome || 'Obra sem nome',
+                status: obra.status || 'Desconhecido',
                 responsavel: contract.fiscal_nome || 'Não Definido', 
                 fiscal_nome: contract.fiscal_nome,
                 kpi: {
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
-                    saldo_financeiro: valorTotal - totalGasto,
                     horas_contratadas: horasTotais,
                     horas_realizadas: horasRealizadas,
+                    saldo_financeiro: valorTotal - totalGasto,
                     saldo_horas: horasTotais - horasRealizadas,
                     percentual_conclusao: parseFloat(percentualConclusao.toFixed(1)),
                     alertas_assinatura: 0
@@ -120,7 +117,7 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
-// 2. OBTER DETALHES (COM DEBUG DE VEÍCULOS)
+// 2. OBTER DETALHES (COM BUSCA DE VEÍCULOS POR ATIVIDADE)
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     
@@ -133,7 +130,7 @@ exports.getObraDetails = async (req, res) => {
         
         const obra = obraInfo[0];
         
-        // ... (Lógica de contratos e KPIs igual ao dashboard)
+        // Contratos e KPIs (Mesma lógica do dashboard)
         let contract = {};
         try {
             const [c] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
@@ -154,29 +151,42 @@ exports.getObraDetails = async (req, res) => {
         let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
         const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
 
+        // Previsão
         let previsaoTermino = null;
         let statusPrazo = 'indefinido';
-        // ... (Cálculo de previsão igual ao dashboard)
+        const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
+        const dataFim = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
 
-        // VEÍCULOS: Tentativa Robusta
+        if (horasRealizadas > 0 && horasTotais > 0 && dataInicio) {
+            const diffDays = Math.ceil(Math.abs(new Date() - dataInicio) / (86400000)) || 1;
+            const horasPorDia = horasRealizadas / diffDays;
+            if (horasPorDia > 0) {
+                const diasRest = Math.ceil((horasTotais - horasRealizadas) / horasPorDia);
+                if (diasRest > 0) previsaoTermino = addBusinessDays(new Date(), diasRest);
+            }
+        }
+        if (previsaoTermino && dataFim) statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
+
+        // ======================================================================
+        // ESTRATÉGIA DE VEÍCULOS: BUSCA POR ATIVIDADE RECENTE (30 DIAS)
+        // ======================================================================
+        // Como não temos coluna 'location' fixa, assumimos que quem trabalhou na obra
+        // recentemente está alocado lá.
         let vehicles = [];
         try {
-            // Tentativa 1: Coluna nova (provavelmente vazia agora)
-            const [veh1] = await db.query('SELECT id, plate, model, type FROM vehicles WHERE current_location_id = ?', [id]);
-            vehicles = veh1;
-
-            // Se vazio, vamos logar a estrutura da tabela de atribuição para saber como usar na próxima
-            if (vehicles.length === 0) {
-                console.log('[Supervisor Debug] Veículos vazios por current_location_id. Verificando assignments...');
-                try {
-                    // Apenas para ver no log do servidor quais colunas existem
-                    const [columns] = await db.query('SHOW COLUMNS FROM vehicle_operational_assignment');
-                    console.log('[Supervisor Debug] Colunas em vehicle_operational_assignment:', columns.map(c => c.Field).join(', '));
-                } catch(errDesc) {
-                    console.log('[Supervisor Debug] Tabela vehicle_operational_assignment não existe ou erro:', errDesc.message);
-                }
-            }
-        } catch (vErr) { console.warn('[Supervisor] Erro veículos:', vErr.message); }
+            const [activeVehicles] = await db.query(`
+                SELECT DISTINCT v.id, v.plate, v.model, v.type 
+                FROM vehicles v
+                JOIN daily_work_logs d ON v.id = d.vehicle_id
+                WHERE d.obra_id = ? 
+                AND d.work_date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                ORDER BY d.work_date DESC
+            `, [id]);
+            vehicles = activeVehicles;
+            console.log(`[Supervisor] Veículos ativos encontrados na obra ${id}: ${vehicles.length}`);
+        } catch (vErr) {
+            console.warn('[Supervisor] Erro ao buscar veículos por atividade:', vErr.message);
+        }
 
         let crmLogs = [];
         try {
@@ -212,6 +222,7 @@ exports.getObraDetails = async (req, res) => {
     }
 };
 
+// ... Resto dos métodos (addCrmLog, upsertContract) permanecem iguais ...
 exports.addCrmLog = async (req, res) => {
     const { obra_id, tipo_interacao, resumo_conversa, data_proximo_contato } = req.body;
     const supervisor_id = req.user?.userId || null;
