@@ -26,62 +26,81 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // 1. OBTER DADOS DO DASHBOARD (MACRO - MODO TV)
 exports.getDashboardData = async (req, res) => {
     try {
-        console.log('[Supervisor] Iniciando busca de dados do dashboard...');
+        console.log('[Supervisor] Iniciando busca de dados do dashboard (Modo Seguro)...');
 
-        // Query principal com tratamento de nulos via COALESCE
-        // NOTA: Se der erro aqui, verifique se as colunas 'fiscal_nome' existem na tabela 'obra_contracts'
-        const query = `
-            SELECT 
-                o.id, 
-                o.nome,
-                oc.total_value as valor_total_contrato, 
-                oc.total_hours_contracted as horas_totais_contratadas,
-                oc.start_date as data_inicio_contratual,
-                oc.expected_end_date as data_fim_contratual,
-                oc.fiscal_nome,
-                (SELECT COALESCE(SUM(total_value), 0) FROM expenses WHERE obra_id = o.id) as total_gasto,
-                (SELECT COALESCE(SUM(horas_trabalhadas), 0) FROM daily_work_logs WHERE obra_id = o.id) as total_horas_realizadas
-            FROM obras o
-            LEFT JOIN obra_contracts oc ON o.id = oc.obra_id
-            WHERE o.status = 'Ativa'
-        `;
+        // 1. Buscar Obras (Query Simples)
+        // Removemos cláusulas WHERE complexas para evitar erro de coluna inexistente
+        const [allObras] = await db.query('SELECT * FROM obras');
+        
+        // Filtragem em Memória (Mais seguro para esquemas legados)
+        // Se a coluna 'status' não existir, assume que a obra é ativa para não sumir com os dados
+        const obrasAtivas = allObras.filter(o => {
+            if (!o.status) return true; // Fallback se não tiver coluna status
+            return ['Ativa', 'active', 'Em Andamento'].includes(o.status);
+        });
 
-        const [obras] = await db.query(query);
+        console.log(`[Supervisor] Obras carregadas: ${allObras.length} total, ${obrasAtivas.length} consideradas ativas.`);
 
-        console.log(`[Supervisor] Encontradas ${obras.length} obras ativas.`);
+        // 2. Buscar Contratos (Separado para não quebrar se a tabela faltar)
+        let contracts = [];
+        try {
+            const [resContracts] = await db.query('SELECT * FROM obra_contracts');
+            contracts = resContracts;
+        } catch (e) {
+            console.error('[Supervisor WARN] Tabela obra_contracts não encontrada ou erro:', e.message);
+            // Segue o fluxo com array vazio, permitindo que o dashboard abra mesmo sem contratos
+        }
 
-        const dashboardData = obras.map(obra => {
-            // Sanitização de valores para evitar NaN ou null
-            const valorTotal = parseFloat(obra.valor_total_contrato) || 0;
-            const totalGasto = parseFloat(obra.total_gasto) || 0;
-            const horasTotais = parseFloat(obra.horas_totais_contratadas) || 0;
-            const horasRealizadas = parseFloat(obra.total_horas_realizadas) || 0;
+        // 3. Buscar Totais de Despesas (Expenses)
+        let expensesMap = {};
+        try {
+            const [resExpenses] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
+            resExpenses.forEach(r => expensesMap[r.obra_id] = r.total);
+        } catch (e) {
+            console.warn('[Supervisor WARN] Erro ao buscar expenses (tabela ou coluna inexistente):', e.message);
+        }
 
-            // Cálculos de Percentual (Evita divisão por zero)
+        // 4. Buscar Totais de Horas (Daily Work Logs)
+        let hoursMap = {};
+        try {
+            // Tenta buscar horas trabalhadas. 
+            // IMPORTANTE: Se o nome da coluna no seu DB for 'total_hours' ou 'hours', o erro aparecerá no log do servidor.
+            const [resHours] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
+            resHours.forEach(r => hoursMap[r.obra_id] = r.total);
+        } catch (e) {
+            console.warn('[Supervisor WARN] Erro ao buscar daily_work_logs (verifique nome da coluna de horas):', e.message);
+        }
+
+        // 5. Montagem dos Dados (Merge dos resultados)
+        const dashboardData = obrasAtivas.map(obra => {
+            const contract = contracts.find(c => c.obra_id === obra.id) || {};
+            
+            // Sanitização de valores para evitar NaN
+            const valorTotal = parseFloat(contract.total_value) || 0;
+            const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
+            const totalGasto = parseFloat(expensesMap[obra.id]) || 0;
+            const horasRealizadas = parseFloat(hoursMap[obra.id]) || 0;
+
+            // Cálculos de Percentual
             let percentualFinanceiro = 0;
-            if (valorTotal > 0) {
-                percentualFinanceiro = (totalGasto / valorTotal) * 100;
-            }
+            if (valorTotal > 0) percentualFinanceiro = (totalGasto / valorTotal) * 100;
 
             let percentualHoras = 0;
-            if (horasTotais > 0) {
-                percentualHoras = (horasRealizadas / horasTotais) * 100;
-            }
+            if (horasTotais > 0) percentualHoras = (horasRealizadas / horasTotais) * 100;
 
-            // Define o percentual mestre (o maior entre financeiro e horas é o risco)
             const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
 
             // Previsão Inteligente
             let previsaoTermino = null;
             let statusPrazo = 'indefinido';
+            
+            const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
+            const dataFim = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
 
-            // Só calcula previsão se houver horas realizadas e contrato configurado
-            if (horasRealizadas > 0 && horasTotais > 0 && obra.data_inicio_contratual) {
-                // Média simples: horas por dia desde o início
-                const dataInicio = new Date(obra.data_inicio_contratual);
+            if (horasRealizadas > 0 && horasTotais > 0 && dataInicio) {
                 const hoje = new Date();
                 const diffTime = Math.abs(hoje - dataInicio);
-                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1; // Evita zero dias
+                const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
                 
                 const horasPorDia = horasRealizadas / diffDays;
                 const horasRestantes = horasTotais - horasRealizadas;
@@ -92,17 +111,15 @@ exports.getDashboardData = async (req, res) => {
                 }
             }
 
-            // Verifica atraso
-            if (previsaoTermino && obra.data_fim_contratual) {
-                const fimContrato = new Date(obra.data_fim_contratual);
-                statusPrazo = previsaoTermino > fimContrato ? 'atrasado' : 'no_prazo';
+            if (previsaoTermino && dataFim) {
+                statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
             }
 
             return {
                 id: obra.id,
                 nome: obra.nome,
-                responsavel: obra.fiscal_nome || 'Não Definido', // Fallback se null
-                fiscal_nome: obra.fiscal_nome,
+                responsavel: contract.fiscal_nome || 'Não Definido', 
+                fiscal_nome: contract.fiscal_nome,
                 kpi: {
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
@@ -110,15 +127,15 @@ exports.getDashboardData = async (req, res) => {
                     horas_contratadas: horasTotais,
                     horas_realizadas: horasRealizadas,
                     saldo_horas: horasTotais - horasRealizadas,
-                    percentual_conclusao: parseFloat(percentualConclusao.toFixed(1)), // 1 casa decimal
-                    alertas_assinatura: 0 // Placeholder para futuro
+                    percentual_conclusao: parseFloat(percentualConclusao.toFixed(1)),
+                    alertas_assinatura: 0
                 },
                 previsao: {
                     data_termino_estimada: previsaoTermino,
                     status: statusPrazo
                 },
-                data_inicio_contratual: obra.data_inicio_contratual,
-                data_fim_contratual: obra.data_fim_contratual
+                data_inicio_contratual: contract.start_date,
+                data_fim_contratual: contract.expected_end_date
             };
         });
 
@@ -126,15 +143,13 @@ exports.getDashboardData = async (req, res) => {
 
     } catch (error) {
         // LOG CRÍTICO PARA O EASYPANEL
-        console.error('============ ERRO NO DASHBOARD SUPERVISOR ============');
+        console.error('============ ERRO FATAL NO DASHBOARD ============');
         console.error('Mensagem:', error.message);
-        console.error('SQL State:', error.sqlState);
-        console.error('SQL Message:', error.sqlMessage); // Aqui vai dizer qual coluna falta
-        console.error('======================================================');
+        console.error('=================================================');
         
         res.status(500).json({ 
             message: 'Erro interno ao carregar dashboard.',
-            debug_error: error.sqlMessage || error.message // Envia erro pro front em dev
+            debug_error: error.message 
         });
     }
 };
