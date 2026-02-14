@@ -26,11 +26,14 @@ const addBusinessDays = (startDate, daysToAdd) => {
 exports.getDashboardData = async (req, res) => {
     try {
         // Busca obras ativas e seus contratos
+        // AJUSTADO: Nomes das colunas conforme o seu dump SQL (total_value, total_hours_contracted, etc.)
         const [obras] = await db.query(`
             SELECT 
                 o.id, o.nome, o.responsavel,
-                oc.fiscal_nome, oc.valor_total_contrato, oc.horas_totais_contratadas,
-                oc.data_inicio_contratual, oc.data_fim_contratual,
+                oc.total_value as valor_total_contrato, 
+                oc.total_hours_contracted as horas_totais_contratadas,
+                oc.start_date as data_inicio_contratual, 
+                oc.expected_end_date as data_fim_contratual,
                 oc.id as contract_id
             FROM obras o
             LEFT JOIN obra_contracts oc ON o.id = oc.obra_id
@@ -130,11 +133,14 @@ exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
         // 1. Dados Básicos e Contrato
+        // AJUSTADO: Nomes das colunas conforme o seu dump SQL
         const [obraInfo] = await db.query(`
             SELECT 
                 o.id, o.nome, o.responsavel,
-                oc.fiscal_nome, oc.valor_total_contrato, oc.horas_totais_contratadas,
-                oc.data_inicio_contratual, oc.data_fim_contratual,
+                oc.total_value as valor_total_contrato, 
+                oc.total_hours_contracted as horas_totais_contratadas,
+                oc.start_date as data_inicio_contratual, 
+                oc.expected_end_date as data_fim_contratual,
                 oc.id as contract_id
             FROM obras o
             LEFT JOIN obra_contracts oc ON o.id = oc.obra_id
@@ -163,14 +169,13 @@ exports.getObraDetails = async (req, res) => {
         const percentualHoras = obra.horas_totais_contratadas > 0 ? (horasExecutadas / obra.horas_totais_contratadas) * 100 : 0;
 
         // 4. Veículos Alocados
-        // REMOVIDO v.operador_atual para evitar erro 500, pois a coluna não existe na tabela vehicles no dump SQL fornecido.
+        // AJUSTADO: Removida a coluna ces.data_fim_alocacao pois não existe na sua tabela contract_equipment_substitutions
         const [veiculos] = await db.query(`
             SELECT 
                 v.id, v.modelo, v.placa, v.tipo, v.horimetro, 
-                COALESCE(ces.fator_conversao, 1.00) as fator_conversao,
-                ces.data_fim_alocacao as previsao_liberacao
+                COALESCE(ces.conversion_factor, 1.00) as fator_conversao
             FROM vehicles v
-            LEFT JOIN contract_equipment_substitutions ces ON v.id = ces.veiculo_real_id AND ces.data_fim_alocacao IS NULL
+            LEFT JOIN contract_equipment_substitutions ces ON v.id = ces.actual_vehicle_id
             WHERE v.obraAtualId = ?
         `, [id]);
 
@@ -237,14 +242,14 @@ exports.upsertContract = async (req, res) => {
         if (existing.length > 0) {
             await db.query(`
                 UPDATE obra_contracts 
-                SET valor_total_contrato = ?, horas_totais_contratadas = ?, data_inicio_contratual = ?, data_fim_contratual = ?, fiscal_nome = ?
+                SET total_value = ?, total_hours_contracted = ?, start_date = ?, expected_end_date = ?
                 WHERE obra_id = ?
-            `, [valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, obra_id]);
+            `, [valor_total, horas_totais, data_inicio, data_fim_contratual, obra_id]);
         } else {
             await db.query(`
-                INSERT INTO obra_contracts (obra_id, valor_total_contrato, horas_totais_contratadas, data_inicio_contratual, data_fim_contratual, fiscal_nome)
-                VALUES (?, ?, ?, ?, ?, ?)
-            `, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome]);
+                INSERT INTO obra_contracts (obra_id, total_value, total_hours_contracted, start_date, expected_end_date)
+                VALUES (?, ?, ?, ?, ?)
+            `, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual]);
         }
 
         res.json({ message: 'Dados do contrato atualizados com sucesso.' });
