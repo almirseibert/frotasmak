@@ -29,11 +29,11 @@ exports.getDashboardData = async (req, res) => {
         console.log('[Supervisor] Calculando Dashboard Inteligente...');
 
         // 1. Dados Básicos
+        // Busca apenas obras ativas para o dashboard principal
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
         const [contracts] = await db.query('SELECT * FROM obra_contracts');
         
         // 2. Agregações Financeiras e de Horas (Faturamento)
-        // Ajuste 'total_value' ou 'amount' conforme sua tabela expenses real
         const [expenses] = await db.query(`
             SELECT obraId, SUM(amount) as total 
             FROM expenses 
@@ -46,16 +46,16 @@ exports.getDashboardData = async (req, res) => {
             GROUP BY obraId
         `);
 
-        // 3. Contagem de Máquinas Ativas (Para o cálculo de previsão)
+        // 3. Contagem de Máquinas Ativas (Correção: Busca na tabela vehicles)
+        // Consideramos "Pesados" para o cálculo: Caminhão, Escavadeira, Motoniveladora, Retroescavadeira, Rolo, Trator
         const [activeMachines] = await db.query(`
             SELECT 
-                voa.obraId, 
-                COUNT(DISTINCT voa.vehicleId) as qtd_maquinas
-            FROM vehicle_operational_assignment voa
-            LEFT JOIN vehicles v ON voa.vehicleId = v.id
-            WHERE (voa.endDate IS NULL OR voa.endDate > NOW())
-            AND v.tipo IN ('Caminhão', 'Escavadeira', 'Motoniveladora', 'Retroescavadeira', 'Rolo', 'Trator', 'Pá Carregadeira')
-            GROUP BY voa.obraId
+                obraAtualId as obraId, 
+                COUNT(id) as qtd_maquinas
+            FROM vehicles
+            WHERE obraAtualId IS NOT NULL
+            AND tipo IN ('Caminhão', 'Escavadeira', 'Motoniveladora', 'Retroescavadeira', 'Rolo', 'Trator', 'Pá Carregadeira')
+            GROUP BY obraAtualId
         `);
 
         // Mapeamento para acesso rápido
@@ -68,7 +68,7 @@ exports.getDashboardData = async (req, res) => {
             const obraId = String(obra.id);
             const contract = contractMap[obra.id] || {};
             
-            // Valores
+            // Valores (Fallback para dados da obra se contrato não existir)
             const valorTotal = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
             const horasContratadas = parseFloat(contract.total_hours_contracted) || 0;
             const totalGasto = parseFloat(expenseMap[obraId]) || 0;
@@ -89,7 +89,7 @@ exports.getDashboardData = async (req, res) => {
                 const maquinasAtivas = machinesMap[obraId] || 0;
                 
                 // Capacidade diária: 8h por máquina (padrão solicitado)
-                // Se não tiver máquina ativa, assumimos 1 para não travar o cálculo
+                // Se não tiver máquina ativa, assumimos 1 para não travar o cálculo (divisão por zero)
                 const capacidadeDiaria = (maquinasAtivas > 0 ? maquinasAtivas : 1) * 8; 
 
                 if (horasSaldo > 0) {
@@ -145,7 +145,7 @@ exports.getDashboardData = async (req, res) => {
 
     } catch (error) {
         console.error('Erro Dashboard:', error);
-        res.status(500).json({ message: 'Erro interno no dashboard.' });
+        res.status(500).json({ message: 'Erro interno no dashboard.', debug: error.message });
     }
 };
 
@@ -178,21 +178,21 @@ exports.getObraDetails = async (req, res) => {
             ORDER BY date ASC
         `, [id]);
 
-        // Veículos Alocados + Fator de Substituição
+        // Veículos Alocados (Correção SQL)
+        // Busca veículos na tabela vehicles (obraAtualId), cruza com histórico para data e voa para operador
         const [vehicles] = await db.query(`
             SELECT 
                 v.id, v.placa, v.modelo, v.tipo, 
-                voa.startDate as data_alocacao,
-                e.name as operador_nome,
+                ohv.dataEntrada as data_alocacao,
+                COALESCE(voa.employeeName, '---') as operador_nome,
                 ces.fator_conversao,
                 ces.grupo_contratado
-            FROM vehicle_operational_assignment voa
-            JOIN vehicles v ON voa.vehicleId = v.id
-            LEFT JOIN employees e ON voa.employeeId = e.id
+            FROM vehicles v
+            LEFT JOIN obras_historico_veiculos ohv ON v.id = ohv.veiculoId AND ohv.dataSaida IS NULL AND ohv.obraId = ?
+            LEFT JOIN vehicle_operational_assignment voa ON v.id = voa.vehicleId
             LEFT JOIN contract_equipment_substitutions ces ON ces.veiculo_real_id = v.id AND ces.obra_contract_id = ?
-            WHERE voa.obraId = ? 
-            AND (voa.endDate IS NULL OR voa.endDate > NOW())
-        `, [contractData.id || 0, id]);
+            WHERE v.obraAtualId = ?
+        `, [id, contractData.id || 0, id]);
 
         // Histórico CRM
         const [crmLogs] = await db.query(`
@@ -220,7 +220,7 @@ exports.getObraDetails = async (req, res) => {
 
     } catch (error) {
         console.error('Erro Detalhes:', error);
-        res.status(500).json({message: 'Erro ao carregar detalhes da obra'});
+        res.status(500).json({message: 'Erro ao carregar detalhes da obra', debug: error.message});
     }
 };
 
@@ -243,7 +243,7 @@ exports.addCrmLog = async (req, res) => {
     }
 };
 
-// 4. SALVAR/ATUALIZAR CONTRATO (A FUNÇÃO QUE FALTAVA)
+// 4. SALVAR/ATUALIZAR CONTRATO
 exports.upsertContract = async (req, res) => {
     let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome } = req.body;
     
