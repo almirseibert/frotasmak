@@ -45,11 +45,11 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // 1. OBTER DADOS DO DASHBOARD (MACRO)
 exports.getDashboardData = async (req, res) => {
     try {
-        console.log('[Supervisor] Calculando Dashboard Inteligente (v3)...');
+        console.log('[Supervisor] Calculando Dashboard Inteligente (vFinal)...');
 
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
         
-        // Buscas Auxiliares (com tratamento de erro silencioso)
+        // Buscas Auxiliares
         let contracts = [];
         try {
             const [res] = await db.query('SELECT * FROM obra_contracts');
@@ -70,12 +70,12 @@ exports.getDashboardData = async (req, res) => {
 
         let activeMachines = [];
         try {
-            // Conta máquinas e caminhões
+            // Conta máquinas e caminhões para o dashboard macro
             const [res] = await db.query(`
                 SELECT obraAtualId as obraId, COUNT(id) as qtd_maquinas
                 FROM vehicles
                 WHERE obraAtualId IS NOT NULL
-                AND tipo NOT IN ('Carro', 'Moto', 'Utilitário') -- Exclui leves
+                AND tipo NOT IN ('Carro', 'Moto', 'Utilitário', 'Leve')
                 GROUP BY obraAtualId
             `);
             activeMachines = res || [];
@@ -93,6 +93,7 @@ exports.getDashboardData = async (req, res) => {
             
             // --- CÁLCULO DE HORAS ---
             let horasContratadas = parseFloat(contract.total_hours_contracted) || 0;
+            // Se contrato zerado, usa legado
             if (horasContratadas === 0) {
                 horasContratadas = sumLegacyHours(obra.horasContratadasPorTipo);
             }
@@ -114,7 +115,7 @@ exports.getDashboardData = async (req, res) => {
             if (horasContratadas > 0) {
                 const horasSaldo = horasContratadas - horasExecutadas;
                 const maquinasAtivas = machinesMap[obraId] || 0;
-                // Capacidade: 8h por máquina/caminhão
+                // Capacidade: 8h por máquina/caminhão dia
                 const capacidadeDiaria = (maquinasAtivas > 0 ? maquinasAtivas : 1) * 8; 
 
                 if (horasSaldo > 0) {
@@ -133,7 +134,8 @@ exports.getDashboardData = async (req, res) => {
                 }
             }
 
-            // CORREÇÃO DATA: Usa dataInicio da obra se contrato não tiver
+            // CORREÇÃO DATA: Prioridade Contrato > Obra.dataInicio
+            // Importante: new Date(obra.dataInicio) pode vir com fuso horário, o front deve tratar apenas a data string
             const dataInicioReal = contract.start_date || obra.dataInicio;
 
             return {
@@ -215,20 +217,10 @@ exports.getObraDetails = async (req, res) => {
         } catch (e) {}
 
         // *** CORREÇÃO DE DADOS MISTOS (CONTRATO + LEGADO) ***
-        // Data Início: Se não tem no contrato, usa da obra
-        if (!contractData.start_date) {
-            contractData.start_date = obra[0].dataInicio;
-        }
-        
-        // Total Horas: Se não tem no contrato, soma do JSON da obra
-        if (!contractData.total_hours_contracted) {
-            contractData.total_hours_contracted = sumLegacyHours(obra[0].horasContratadasPorTipo);
-        }
-        
-        // Valor Total
-        if (!contractData.total_value) {
-            contractData.total_value = parseFloat(obra[0].valorTotalContrato) || 0;
-        }
+        // Garante que os dados básicos existam no objeto contractData para o front consumir fácil
+        if (!contractData.start_date) contractData.start_date = obra[0].dataInicio;
+        if (!contractData.total_hours_contracted) contractData.total_hours_contracted = sumLegacyHours(obra[0].horasContratadasPorTipo);
+        if (!contractData.total_value) contractData.total_value = parseFloat(obra[0].valorTotalContrato) || 0;
 
         // 3. Burnup
         let burnupData = [];
@@ -240,9 +232,9 @@ exports.getObraDetails = async (req, res) => {
             burnupData = resBurnup || [];
         } catch (e) {}
 
-        // 4. Veículos Alocados - QUERY CORRIGIDA PARA EXIBIR OPERADOR
-        // Removemos o filtro 'voa.obraId = ?' do JOIN para pegar qualquer alocação ativa do veículo,
-        // já que o filtro principal é 'v.obraAtualId'
+        // 4. Veículos Alocados - QUERY OTIMIZADA PARA OPERADOR
+        // Removemos o filtro de 'voa.obraId' para garantir que pegamos o operador ativo do veículo,
+        // independentemente se a alocação foi feita exatamente com esse ID de obra no histórico (visto que obraAtualId é a verdade)
         let vehicles = [];
         try {
             const [resVehicles] = await db.query(`
@@ -256,7 +248,7 @@ exports.getObraDetails = async (req, res) => {
                     COALESCE(ces.fator_conversao, 1.00) as fator_conversao,
                     ces.grupo_contratado
                 FROM vehicles v
-                -- Join para pegar operador ativo (independente da obra no log, pois confiamos no obraAtualId do veiculo)
+                -- Join para pegar operador ativo (qualquer alocação ativa serve para mostrar o operador atual)
                 LEFT JOIN vehicle_operational_assignment voa 
                     ON v.id = voa.vehicleId 
                     AND (voa.endDate IS NULL OR voa.endDate > NOW())
@@ -270,6 +262,7 @@ exports.getObraDetails = async (req, res) => {
             vehicles = resVehicles || [];
         } catch (e) {
             console.warn('Erro SQL Veiculos:', e.message);
+            // Fallback
             try {
                 const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
                 vehicles = vSimple ? vSimple.map(v => ({...v, operador_nome: '---', data_alocacao: new Date(), fator_conversao: 1.0})) : [];
@@ -297,13 +290,15 @@ exports.getObraDetails = async (req, res) => {
             kpi = {
                 horas_executadas: parseFloat(hours[0]?.total) || 0,
                 total_gasto: parseFloat(expenses[0]?.total) || 0,
-                // Passa o total calculado (contrato ou legado) para o frontend
-                horas_contratadas: contractData.total_hours_contracted
+                horas_contratadas: contractData.total_hours_contracted // Passa o total unificado
             };
         } catch (e) { }
 
+        // Injete a data de início da obra original no objeto obra para o front usar se precisar
+        obra[0].data_inicio_real = obra[0].dataInicio;
+
         res.json({
-            obra: { ...obra[0], kpi }, // KPI injetado na obra também
+            obra: { ...obra[0], kpi }, 
             contract: contractData, 
             burnup: burnupData || [], 
             vehicles: vehicles || [], 
