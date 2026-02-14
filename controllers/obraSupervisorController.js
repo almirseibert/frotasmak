@@ -170,8 +170,17 @@ function getStatusColor(perc) {
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
-        // 1. Obra Básica (Essencial - Se falhar aqui, retorna erro)
-        const [obra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
+        // 1. Obra Básica (Essencial)
+        // Adicionada proteção para caso a query principal falhe
+        let obra = [];
+        try {
+            const [resObra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
+            obra = resObra;
+        } catch (e) {
+            console.error('Erro ao buscar obra base:', e);
+            return res.status(500).json({message: 'Erro ao buscar dados da obra no banco.'});
+        }
+
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
 
         // 2. Contrato (Defensive)
@@ -263,7 +272,8 @@ exports.getObraDetails = async (req, res) => {
 
     } catch (error) {
         console.error('Erro Critical Detalhes:', error);
-        res.status(500).json({message: 'Erro ao carregar detalhes da obra', debug: error.message});
+        // Retorna um JSON de erro amigável em vez de HTML do 500 padrão
+        res.status(500).json({message: 'Erro crítico ao carregar detalhes.', debug: error.message});
     }
 };
 
