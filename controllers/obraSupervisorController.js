@@ -20,40 +20,47 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // CONTROLADORES
 // ==================================================================================
 
-// 1. OBTER DADOS DO DASHBOARD (MACRO)
+// 1. OBTER DADOS DO DASHBOARD (SEM FILTROS - TRAZ TUDO)
 exports.getDashboardData = async (req, res) => {
     try {
         console.log('[Supervisor] Carregando Dashboard...');
 
-        // 1. Busca TODAS as obras sem filtro de status (traz o que tiver no banco)
+        // 1. Busca TODAS as obras sem cláusula WHERE de status
+        // Isso garante que obras com "Em andamento", "Aberta", etc., apareçam.
         const [allObras] = await db.query('SELECT * FROM obras');
-        console.log(`[Supervisor] Obras encontradas: ${allObras.length}`);
+        console.log(`[Supervisor] Obras encontradas no banco: ${allObras.length}`);
 
-        // 2. Busca tabelas auxiliares com tratamento de erro (caso não existam no dump novo)
+        if (allObras.length > 0) {
+            console.log(`[Debug] Exemplo de Status: "${allObras[0].status}"`);
+        }
+
+        // 2. Busca tabelas auxiliares (Contratos)
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
             contracts = resContracts;
         } catch (e) { 
-            // Se der erro, tenta criar a tabela dinamicamente (Auto-Fix)
-            console.warn('[Supervisor] Tabela contratos ausente, retornando array vazio.'); 
+            console.warn('[Supervisor] Tabela contratos vazia ou ausente. O sistema irá operar sem dados financeiros por enquanto.'); 
         }
 
+        // 3. Busca Financeiro (Expenses)
         let expensesMap = {};
         try {
             const [resExpenses] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
             resExpenses.forEach(r => expensesMap[r.obra_id] = r.total);
-        } catch (e) { /* Ignora */ }
+        } catch (e) { /* Ignora se tabela não existir */ }
 
+        // 4. Busca Horas (Daily Work Logs)
         let hoursMap = {};
         try {
             const [resHours] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
             resHours.forEach(r => hoursMap[r.obra_id] = r.total);
-        } catch (e) { /* Ignora */ }
+        } catch (e) { /* Ignora se tabela não existir */ }
 
-        // 3. Monta o objeto final
+        // 5. Montagem dos Dados
         const dashboardData = allObras.map(obra => {
             const obraIdStr = String(obra.id);
+            // Tenta encontrar contrato compatível (seja ID número ou string)
             const contract = contracts.find(c => String(c.obra_id) === obraIdStr) || {};
             
             const valorTotal = parseFloat(contract.total_value) || 0;
@@ -170,8 +177,7 @@ exports.getObraDetails = async (req, res) => {
         // ======================================================================
         // ESTRATÉGIA DE VEÍCULOS: BUSCA POR ATIVIDADE RECENTE (30 DIAS)
         // ======================================================================
-        // Como não temos coluna 'location' fixa, assumimos que quem trabalhou na obra
-        // recentemente está alocado lá.
+        // Busca veículos que tiveram apontamento nesta obra nos últimos 30 dias
         let vehicles = [];
         try {
             const [activeVehicles] = await db.query(`
@@ -183,9 +189,8 @@ exports.getObraDetails = async (req, res) => {
                 ORDER BY d.work_date DESC
             `, [id]);
             vehicles = activeVehicles;
-            console.log(`[Supervisor] Veículos ativos encontrados na obra ${id}: ${vehicles.length}`);
         } catch (vErr) {
-            console.warn('[Supervisor] Erro ao buscar veículos por atividade:', vErr.message);
+            console.warn('[Supervisor] Erro ao buscar veículos por atividade (tabela pode não existir):', vErr.message);
         }
 
         let crmLogs = [];
@@ -222,7 +227,6 @@ exports.getObraDetails = async (req, res) => {
     }
 };
 
-// ... Resto dos métodos (addCrmLog, upsertContract) permanecem iguais ...
 exports.addCrmLog = async (req, res) => {
     const { obra_id, tipo_interacao, resumo_conversa, data_proximo_contato } = req.body;
     const supervisor_id = req.user?.userId || null;
