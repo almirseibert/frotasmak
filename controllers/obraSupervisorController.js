@@ -100,7 +100,7 @@ exports.getDashboardData = async (req, res) => {
             if (previsaoTermino && dataFim) statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
 
             return {
-                id: obra.id,
+                id: String(obra.id), // Garante retorno como String
                 nome: obra.nome,
                 responsavel: contract.fiscal_nome || 'Não Definido', 
                 fiscal_nome: contract.fiscal_nome,
@@ -131,13 +131,93 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
-// 2. OBTER DETALHES DA OBRA (COCKPIT) - BLINDADO
+// 2. OBTER DETALHES DA OBRA (COCKPIT) - REFORMULADO
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     console.log(`[Supervisor] Buscando detalhes para Obra ID: ${id}`);
     
     try {
-        // 1. Busca Veículos (Com tratamento de erro se a coluna não existir)
+        // 1. Busca Dados da Obra (Tabela Principal)
+        const [obraInfo] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
+        
+        if (!obraInfo || obraInfo.length === 0) {
+            return res.status(404).json({ message: 'Obra não encontrada.' });
+        }
+        
+        const obra = obraInfo[0];
+        const obraIdStr = String(obra.id); // Garante string
+
+        // 2. Busca Contrato
+        let contract = {};
+        try {
+            const [c] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
+            if (c.length > 0) contract = c[0];
+        } catch (e) { console.warn('[Supervisor] Contrato não encontrado/erro:', e.message); }
+
+        // 3. Busca Totais Financeiros e Horas (Independente do Dashboard)
+        let totalGasto = 0;
+        let horasRealizadas = 0;
+        try {
+            const [exp] = await db.query('SELECT SUM(total_value) as total FROM expenses WHERE obra_id = ?', [id]);
+            totalGasto = parseFloat(exp[0].total) || 0;
+            
+            const [hrs] = await db.query('SELECT SUM(horas_trabalhadas) as total FROM daily_work_logs WHERE obra_id = ?', [id]);
+            horasRealizadas = parseFloat(hrs[0].total) || 0;
+        } catch (e) { console.warn('[Supervisor] Erro ao somar totais:', e.message); }
+
+        // 4. Cálculos KPI (Mesma lógica do Dashboard)
+        const valorTotal = parseFloat(contract.total_value) || 0;
+        const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
+        
+        let percentualFinanceiro = (valorTotal > 0) ? (totalGasto / valorTotal) * 100 : 0;
+        let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
+        const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
+
+        // Previsão
+        let previsaoTermino = null;
+        let statusPrazo = 'indefinido';
+        const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
+        const dataFim = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
+
+        if (horasRealizadas > 0 && horasTotais > 0 && dataInicio) {
+            const hoje = new Date();
+            const diffTime = Math.abs(hoje - dataInicio);
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
+            const horasPorDia = horasRealizadas / diffDays;
+            
+            if (horasPorDia > 0 && (horasTotais - horasRealizadas) > 0) {
+                const diasRestantes = Math.ceil((horasTotais - horasRealizadas) / horasPorDia);
+                previsaoTermino = addBusinessDays(new Date(), diasRestantes);
+            }
+        }
+        if (previsaoTermino && dataFim) statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
+
+        // Objeto Completo da Obra (substitui a necessidade de buscar no dashboard)
+        const macroData = {
+            id: String(obra.id),
+            nome: obra.nome,
+            status: obra.status,
+            responsavel: contract.fiscal_nome || 'Não Definido', 
+            fiscal_nome: contract.fiscal_nome,
+            kpi: {
+                valor_total_contrato: valorTotal,
+                total_gasto: totalGasto,
+                saldo_financeiro: valorTotal - totalGasto,
+                horas_contratadas: horasTotais,
+                horas_realizadas: horasRealizadas,
+                saldo_horas: horasTotais - horasRealizadas,
+                percentual_conclusao: parseFloat(percentualConclusao.toFixed(1)),
+                alertas_assinatura: 0
+            },
+            previsao: {
+                data_termino_estimada: previsaoTermino,
+                status: statusPrazo
+            },
+            data_inicio_contratual: contract.start_date,
+            data_fim_contratual: contract.expected_end_date
+        };
+
+        // 5. Veículos
         let vehicles = [];
         try {
             const [veh] = await db.query(`
@@ -146,25 +226,22 @@ exports.getObraDetails = async (req, res) => {
                 WHERE v.current_location_id = ? 
             `, [id]);
             vehicles = veh;
-        } catch (vErr) {
-            console.warn('[Supervisor WARN] Erro ao buscar veículos (provável coluna inexistente):', vErr.sqlMessage);
-        }
+        } catch (vErr) { console.warn('[Supervisor] Veículos não carregados:', vErr.sqlMessage); }
 
-        // 2. Busca CRM Logs
+        // 6. Logs CRM
         let crmLogs = [];
         try {
             const [logs] = await db.query(`
                 SELECT * FROM obra_crm_logs 
                 WHERE obra_id = ? 
-                ORDER BY created_at DESC 
-                LIMIT 50
+                ORDER BY created_at DESC LIMIT 50
             `, [id]);
             crmLogs = logs;
-        } catch (crmErr) {
-            console.error('[Supervisor WARN] Erro ao buscar logs CRM:', crmErr.sqlMessage);
-        }
+        } catch (crmErr) { console.warn('[Supervisor] CRM não carregado:', crmErr.sqlMessage); }
 
+        // Retorna tudo unificado
         res.json({
+            obra: macroData,
             vehicles: vehicles,
             crm_history: crmLogs
         });
