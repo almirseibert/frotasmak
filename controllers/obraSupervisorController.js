@@ -45,45 +45,43 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // 1. OBTER DADOS DO DASHBOARD (MACRO)
 exports.getDashboardData = async (req, res) => {
     try {
-        console.log('[Supervisor] Calculando Dashboard Inteligente (v2)...');
+        console.log('[Supervisor] Calculando Dashboard Inteligente (v3)...');
 
-        // 1. Dados Básicos (Obras Ativas)
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
         
-        // 2. Buscas Auxiliares
+        // Buscas Auxiliares (com tratamento de erro silencioso)
         let contracts = [];
         try {
-            const [resContracts] = await db.query('SELECT * FROM obra_contracts');
-            contracts = resContracts || [];
-        } catch (e) { console.warn('Aviso: Tabela obra_contracts vazia ou inexistente.'); }
+            const [res] = await db.query('SELECT * FROM obra_contracts');
+            contracts = res || [];
+        } catch (e) {}
         
         let expenses = [];
         try {
-            const [resExpenses] = await db.query(`SELECT obraId, SUM(amount) as total FROM expenses GROUP BY obraId`);
-            expenses = resExpenses || [];
-        } catch (e) { console.warn('Aviso: Erro ao somar expenses.'); }
+            const [res] = await db.query(`SELECT obraId, SUM(amount) as total FROM expenses GROUP BY obraId`);
+            expenses = res || [];
+        } catch (e) {}
 
         let hoursLogs = [];
         try {
-            const [resHours] = await db.query(`SELECT obraId, SUM(totalHours) as total FROM daily_work_logs GROUP BY obraId`);
-            hoursLogs = resHours || [];
-        } catch (e) { console.warn('Aviso: Erro ao somar daily_work_logs.'); }
+            const [res] = await db.query(`SELECT obraId, SUM(totalHours) as total FROM daily_work_logs GROUP BY obraId`);
+            hoursLogs = res || [];
+        } catch (e) {}
 
         let activeMachines = [];
         try {
-            const [resMachines] = await db.query(`
-                SELECT 
-                    obraAtualId as obraId, 
-                    COUNT(id) as qtd_maquinas
+            // Conta máquinas e caminhões
+            const [res] = await db.query(`
+                SELECT obraAtualId as obraId, COUNT(id) as qtd_maquinas
                 FROM vehicles
                 WHERE obraAtualId IS NOT NULL
-                AND tipo IN ('Caminhão', 'Escavadeira', 'Motoniveladora', 'Retroescavadeira', 'Rolo', 'Trator', 'Pá Carregadeira')
+                AND tipo NOT IN ('Carro', 'Moto', 'Utilitário') -- Exclui leves
                 GROUP BY obraAtualId
             `);
-            activeMachines = resMachines || [];
-        } catch (e) { console.warn('Aviso: Erro ao contar máquinas.'); }
+            activeMachines = res || [];
+        } catch (e) {}
 
-        // Mapeamento
+        // Mapeamentos
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
         const expenseMap = {}; expenses.forEach(e => expenseMap[e.obraId] = e.total);
         const hoursMap = {}; hoursLogs.forEach(h => hoursMap[h.obraId] = h.total);
@@ -93,11 +91,8 @@ exports.getDashboardData = async (req, res) => {
             const obraId = String(obra.id);
             const contract = contractMap[obra.id] || {};
             
-            // --- CÁLCULO DE HORAS (CORREÇÃO) ---
-            // 1. Tenta pegar do contrato novo
+            // --- CÁLCULO DE HORAS ---
             let horasContratadas = parseFloat(contract.total_hours_contracted) || 0;
-            
-            // 2. Se zerado, tenta somar do JSON legado (tabela obras)
             if (horasContratadas === 0) {
                 horasContratadas = sumLegacyHours(obra.horasContratadasPorTipo);
             }
@@ -119,16 +114,15 @@ exports.getDashboardData = async (req, res) => {
             if (horasContratadas > 0) {
                 const horasSaldo = horasContratadas - horasExecutadas;
                 const maquinasAtivas = machinesMap[obraId] || 0;
-                // Se não houver máquinas ativas, assume 1 para evitar divisão por zero (mas reflete lentidão)
+                // Capacidade: 8h por máquina/caminhão
                 const capacidadeDiaria = (maquinasAtivas > 0 ? maquinasAtivas : 1) * 8; 
 
                 if (horasSaldo > 0) {
                     diasRestantes = Math.ceil(horasSaldo / capacidadeDiaria);
-                    // Previsão de fim é a partir de HOJE + Dias Restantes
                     previsaoTermino = addBusinessDays(new Date(), diasRestantes);
                 } else {
                     diasRestantes = 0;
-                    previsaoTermino = new Date(); // Obra teoricamente acabou
+                    previsaoTermino = new Date(); 
                 }
 
                 const dataFimContrato = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
@@ -139,8 +133,7 @@ exports.getDashboardData = async (req, res) => {
                 }
             }
 
-            // --- CORREÇÃO DATA INÍCIO ---
-            // Prioriza contrato, fallback para obra.dataInicio
+            // CORREÇÃO DATA: Usa dataInicio da obra se contrato não tiver
             const dataInicioReal = contract.start_date || obra.dataInicio;
 
             return {
@@ -161,7 +154,7 @@ exports.getDashboardData = async (req, res) => {
                 kpi: {
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
-                    horas_contratadas: horasContratadas, // Agora deve vir preenchido
+                    horas_contratadas: horasContratadas,
                     horas_executadas: horasExecutadas,
                     percentual_conclusao: parseFloat(percConclusao.toFixed(1)),
                     dias_restantes_estimados: diasRestantes,
@@ -172,12 +165,11 @@ exports.getDashboardData = async (req, res) => {
                     data_termino_estimada: previsaoTermino,
                     status: statusPrazo
                 },
-                data_inicio: dataInicioReal, // Corrigido
+                data_inicio: dataInicioReal,
                 data_fim_contratual: contract.expected_end_date
             };
         });
 
-        // Ordenação
         dashboardData.sort((a, b) => {
             if (!a.previsao.data_termino_estimada) return 1;
             if (!b.previsao.data_termino_estimada) return -1;
@@ -211,9 +203,7 @@ exports.getObraDetails = async (req, res) => {
         try {
             const [resObra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
             obra = resObra || [];
-        } catch (e) {
-            return res.status(404).json({message: 'Erro ao buscar obra.', debug: e.message});
-        }
+        } catch (e) { return res.status(404).json({message: 'Erro ao buscar obra.', debug: e.message}); }
 
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
 
@@ -222,16 +212,22 @@ exports.getObraDetails = async (req, res) => {
         try {
             const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
             contractData = contract[0] || {};
-        } catch (e) { console.warn('Contrato warning:', e.message); }
+        } catch (e) {}
 
-        // **CÁLCULO TOTAL HORAS CONTRATADAS (CORREÇÃO)**
-        // Se não tem no contrato, soma do legado
+        // *** CORREÇÃO DE DADOS MISTOS (CONTRATO + LEGADO) ***
+        // Data Início: Se não tem no contrato, usa da obra
+        if (!contractData.start_date) {
+            contractData.start_date = obra[0].dataInicio;
+        }
+        
+        // Total Horas: Se não tem no contrato, soma do JSON da obra
         if (!contractData.total_hours_contracted) {
             contractData.total_hours_contracted = sumLegacyHours(obra[0].horasContratadasPorTipo);
-            // Injeta valor total também se faltar
-            if (!contractData.total_value) {
-                contractData.total_value = parseFloat(obra[0].valorTotalContrato) || 0;
-            }
+        }
+        
+        // Valor Total
+        if (!contractData.total_value) {
+            contractData.total_value = parseFloat(obra[0].valorTotalContrato) || 0;
         }
 
         // 3. Burnup
@@ -242,12 +238,11 @@ exports.getObraDetails = async (req, res) => {
                 FROM daily_work_logs WHERE obraId = ? GROUP BY DATE(date) ORDER BY date ASC
             `, [id]);
             burnupData = resBurnup || [];
-        } catch (e) { console.warn('Burnup warning:', e.message); }
+        } catch (e) {}
 
-        // 4. Veículos Alocados (CORREÇÃO DE SUMIÇO)
-        // Simplifiquei a query para confiar mais no `obraAtualId` da tabela vehicles,
-        // que é atualizada quando o veículo é alocado. O LEFT JOIN com `vehicle_operational_assignment`
-        // agora é usado apenas para tentar pegar metadados (operador, data), mas não filtra o veículo.
+        // 4. Veículos Alocados - QUERY CORRIGIDA PARA EXIBIR OPERADOR
+        // Removemos o filtro 'voa.obraId = ?' do JOIN para pegar qualquer alocação ativa do veículo,
+        // já que o filtro principal é 'v.obraAtualId'
         let vehicles = [];
         try {
             const [resVehicles] = await db.query(`
@@ -256,29 +251,25 @@ exports.getObraDetails = async (req, res) => {
                     v.placa, 
                     v.modelo, 
                     v.tipo, 
-                    -- Tenta pegar data de alocação do histórico ativo, senão usa data atual ou nula
                     COALESCE(voa.startDate, NOW()) as data_alocacao,
-                    -- Tenta pegar operador, senão ---
                     COALESCE(e.name, '---') as operador_nome,
-                    -- Substituição
                     COALESCE(ces.fator_conversao, 1.00) as fator_conversao,
                     ces.grupo_contratado
                 FROM vehicles v
-                -- Join flexível para pegar dados operacionais APENAS se existirem e estiverem ativos
+                -- Join para pegar operador ativo (independente da obra no log, pois confiamos no obraAtualId do veiculo)
                 LEFT JOIN vehicle_operational_assignment voa 
                     ON v.id = voa.vehicleId 
-                    AND voa.obraId = ? 
                     AND (voa.endDate IS NULL OR voa.endDate > NOW())
                 LEFT JOIN employees e ON voa.employeeId = e.id
+                -- Join para substituição
                 LEFT JOIN contract_equipment_substitutions ces 
                     ON ces.veiculo_real_id = v.id 
                     AND ces.obra_contract_id = ?
                 WHERE v.obraAtualId = ?
-            `, [id, contractData.id || 0, id]);
+            `, [contractData.id || 0, id]);
             vehicles = resVehicles || [];
         } catch (e) {
             console.warn('Erro SQL Veiculos:', e.message);
-            // Fallback extremo: Pega só da tabela vehicles
             try {
                 const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
                 vehicles = vSimple ? vSimple.map(v => ({...v, operador_nome: '---', data_alocacao: new Date(), fator_conversao: 1.0})) : [];
@@ -306,13 +297,13 @@ exports.getObraDetails = async (req, res) => {
             kpi = {
                 horas_executadas: parseFloat(hours[0]?.total) || 0,
                 total_gasto: parseFloat(expenses[0]?.total) || 0,
-                // Passa também o contratado calculado para o frontend usar no cálculo de saldo
-                horas_contratadas: contractData.total_hours_contracted || 0
+                // Passa o total calculado (contrato ou legado) para o frontend
+                horas_contratadas: contractData.total_hours_contracted
             };
         } catch (e) { }
 
         res.json({
-            obra: { ...obra[0], kpi }, 
+            obra: { ...obra[0], kpi }, // KPI injetado na obra também
             contract: contractData, 
             burnup: burnupData || [], 
             vehicles: vehicles || [], 
