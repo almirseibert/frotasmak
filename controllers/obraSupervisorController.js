@@ -35,20 +35,20 @@ exports.getDashboardData = async (req, res) => {
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
-            contracts = resContracts;
+            contracts = resContracts || [];
         } catch (e) { console.warn('ObraContracts Warning:', e.message); }
         
         // 2. Agregações Financeiras e de Horas (Faturamento)
         let expenses = [];
         try {
             const [resExpenses] = await db.query(`SELECT obraId, SUM(amount) as total FROM expenses GROUP BY obraId`);
-            expenses = resExpenses;
+            expenses = resExpenses || [];
         } catch (e) { console.warn('Expenses Warning:', e.message); }
 
         let hoursLogs = [];
         try {
             const [resHours] = await db.query(`SELECT obraId, SUM(totalHours) as total FROM daily_work_logs GROUP BY obraId`);
-            hoursLogs = resHours;
+            hoursLogs = resHours || [];
         } catch (e) { console.warn('DailyWorkLogs Warning:', e.message); }
 
         // 3. Contagem de Máquinas Ativas (Correção: Busca na tabela vehicles)
@@ -64,7 +64,7 @@ exports.getDashboardData = async (req, res) => {
                 AND tipo IN ('Caminhão', 'Escavadeira', 'Motoniveladora', 'Retroescavadeira', 'Rolo', 'Trator', 'Pá Carregadeira')
                 GROUP BY obraAtualId
             `);
-            activeMachines = resMachines;
+            activeMachines = resMachines || [];
         } catch (e) { console.warn('ActiveMachines Warning:', e.message); }
 
         // Mapeamento para acesso rápido
@@ -169,16 +169,21 @@ function getStatusColor(perc) {
 // 2. DETALHES DA OBRA (COCKPIT)
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
+    
+    // Validação básica do ID para evitar crash do SQL
+    if (!id) return res.status(400).json({message: 'ID da obra inválido.'});
+
     try {
         // 1. Obra Básica (Essencial)
-        // Adicionada proteção para caso a query principal falhe
         let obra = [];
         try {
+            // Tenta buscar. Se o ID for string e o banco esperar INT, isso pode falhar.
             const [resObra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
-            obra = resObra;
+            obra = resObra || [];
         } catch (e) {
-            console.error('Erro ao buscar obra base:', e);
-            return res.status(500).json({message: 'Erro ao buscar dados da obra no banco.'});
+            console.error('Erro ao buscar obra base:', e.message);
+            // Se falhar a busca básica, retorna 404 ou erro específico em vez de 500 genérico
+            return res.status(404).json({message: 'Obra não encontrada ou ID inválido.', debug: e.message});
         }
 
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
@@ -202,7 +207,7 @@ exports.getObraDetails = async (req, res) => {
                 GROUP BY DATE(date) 
                 ORDER BY date ASC
             `, [id]);
-            burnupData = resBurnup;
+            burnupData = resBurnup || [];
         } catch (e) { console.warn('Burnup warning:', e.message); }
 
         // 4. Veículos Alocados (Defensive - Fallback Robusto)
@@ -221,15 +226,14 @@ exports.getObraDetails = async (req, res) => {
                 LEFT JOIN contract_equipment_substitutions ces ON ces.veiculo_real_id = v.id AND ces.obra_contract_id = ?
                 WHERE v.obraAtualId = ?
             `, [id, contractData.id || 0, id]);
-            vehicles = resVehicles;
+            vehicles = resVehicles || [];
         } catch (e) {
             console.error('Erro SQL Veiculos (Tentando fallback):', e.message);
-            // Fallback para listar apenas os veículos sem info extra
             try {
                 const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
-                vehicles = vSimple.map(v => ({...v, operador_nome: 'Erro Info', data_alocacao: new Date()}));
+                vehicles = vSimple ? vSimple.map(v => ({...v, operador_nome: 'Erro Info', data_alocacao: new Date()})) : [];
             } catch (err2) {
-                vehicles = []; // Último recurso
+                vehicles = [];
             }
         }
 
@@ -245,7 +249,7 @@ exports.getObraDetails = async (req, res) => {
                 WHERE l.obra_id = ? 
                 ORDER BY l.created_at DESC
             `, [id]);
-            crmLogs = resCrm;
+            crmLogs = resCrm || [];
         } catch (e) { console.warn('CRM warning:', e.message); }
 
         // 6. KPIs Unitários (Defensive)
@@ -260,19 +264,18 @@ exports.getObraDetails = async (req, res) => {
             };
         } catch (e) { console.warn('KPI warning:', e.message); }
 
-        // Response Final
+        // Response Final - Garantir arrays vazios em vez de null
         res.json({
             obra: { ...obra[0], kpi }, 
             contract: contractData,
-            burnup: burnupData,
-            vehicles: vehicles,
-            crm_history: crmLogs, // Nome corrigido para match com Frontend
-            employees: [] // Frontend espera esta chave para não dar crash
+            burnup: burnupData || [],
+            vehicles: vehicles || [],
+            crm_history: crmLogs || [], // Segurança extra: nunca retornar null
+            employees: []
         });
 
     } catch (error) {
         console.error('Erro Critical Detalhes:', error);
-        // Retorna um JSON de erro amigável em vez de HTML do 500 padrão
         res.status(500).json({message: 'Erro crítico ao carregar detalhes.', debug: error.message});
     }
 };
