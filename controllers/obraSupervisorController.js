@@ -31,32 +31,41 @@ exports.getDashboardData = async (req, res) => {
         // 1. Dados Básicos
         // Busca apenas obras ativas para o dashboard principal
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
-        const [contracts] = await db.query('SELECT * FROM obra_contracts');
+        
+        let contracts = [];
+        try {
+            const [resContracts] = await db.query('SELECT * FROM obra_contracts');
+            contracts = resContracts;
+        } catch (e) { console.warn('ObraContracts Warning:', e.message); }
         
         // 2. Agregações Financeiras e de Horas (Faturamento)
-        const [expenses] = await db.query(`
-            SELECT obraId, SUM(amount) as total 
-            FROM expenses 
-            GROUP BY obraId
-        `); 
+        let expenses = [];
+        try {
+            const [resExpenses] = await db.query(`SELECT obraId, SUM(amount) as total FROM expenses GROUP BY obraId`);
+            expenses = resExpenses;
+        } catch (e) { console.warn('Expenses Warning:', e.message); }
 
-        const [hoursLogs] = await db.query(`
-            SELECT obraId, SUM(totalHours) as total 
-            FROM daily_work_logs 
-            GROUP BY obraId
-        `);
+        let hoursLogs = [];
+        try {
+            const [resHours] = await db.query(`SELECT obraId, SUM(totalHours) as total FROM daily_work_logs GROUP BY obraId`);
+            hoursLogs = resHours;
+        } catch (e) { console.warn('DailyWorkLogs Warning:', e.message); }
 
         // 3. Contagem de Máquinas Ativas (Correção: Busca na tabela vehicles)
         // Consideramos "Pesados" para o cálculo: Caminhão, Escavadeira, Motoniveladora, Retroescavadeira, Rolo, Trator
-        const [activeMachines] = await db.query(`
-            SELECT 
-                obraAtualId as obraId, 
-                COUNT(id) as qtd_maquinas
-            FROM vehicles
-            WHERE obraAtualId IS NOT NULL
-            AND tipo IN ('Caminhão', 'Escavadeira', 'Motoniveladora', 'Retroescavadeira', 'Rolo', 'Trator', 'Pá Carregadeira')
-            GROUP BY obraAtualId
-        `);
+        let activeMachines = [];
+        try {
+            const [resMachines] = await db.query(`
+                SELECT 
+                    obraAtualId as obraId, 
+                    COUNT(id) as qtd_maquinas
+                FROM vehicles
+                WHERE obraAtualId IS NOT NULL
+                AND tipo IN ('Caminhão', 'Escavadeira', 'Motoniveladora', 'Retroescavadeira', 'Rolo', 'Trator', 'Pá Carregadeira')
+                GROUP BY obraAtualId
+            `);
+            activeMachines = resMachines;
+        } catch (e) { console.warn('ActiveMachines Warning:', e.message); }
 
         // Mapeamento para acesso rápido
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
@@ -161,28 +170,33 @@ function getStatusColor(perc) {
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
+        // 1. Obra Básica (Essencial - Se falhar aqui, retorna erro)
         const [obra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
 
+        // 2. Contrato (Defensive)
         let contractData = {};
         try {
             const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
             contractData = contract[0] || {};
         } catch (e) { console.warn('ObraContracts warning:', e.message); }
 
-        // Burnup Chart Data
-        const [burnupData] = await db.query(`
-            SELECT 
-                DATE(date) as data, 
-                SUM(totalHours) as horas_dia 
-            FROM daily_work_logs 
-            WHERE obraId = ? 
-            GROUP BY DATE(date) 
-            ORDER BY date ASC
-        `, [id]);
+        // 3. Burnup Chart Data (Defensive)
+        let burnupData = [];
+        try {
+            const [resBurnup] = await db.query(`
+                SELECT 
+                    DATE(date) as data, 
+                    SUM(totalHours) as horas_dia 
+                FROM daily_work_logs 
+                WHERE obraId = ? 
+                GROUP BY DATE(date) 
+                ORDER BY date ASC
+            `, [id]);
+            burnupData = resBurnup;
+        } catch (e) { console.warn('Burnup warning:', e.message); }
 
-        // Veículos Alocados (Correção SQL: Removida tabela obras_historico_veiculos inexistente)
-        // Usa vehicle_operational_assignment para pegar dados de alocação (data e operador)
+        // 4. Veículos Alocados (Defensive - Fallback Robusto)
         let vehicles = [];
         try {
             const [resVehicles] = await db.query(`
@@ -200,32 +214,44 @@ exports.getObraDetails = async (req, res) => {
             `, [id, contractData.id || 0, id]);
             vehicles = resVehicles;
         } catch (e) {
-            console.error('Erro SQL Veiculos:', e.message);
-            // Fallback simples para não quebrar a página inteira
-            const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
-            vehicles = vSimple.map(v => ({...v, operador_nome: 'Erro Info'}));
+            console.error('Erro SQL Veiculos (Tentando fallback):', e.message);
+            // Fallback para listar apenas os veículos sem info extra
+            try {
+                const [vSimple] = await db.query(`SELECT id, placa, modelo, tipo FROM vehicles WHERE obraAtualId = ?`, [id]);
+                vehicles = vSimple.map(v => ({...v, operador_nome: 'Erro Info', data_alocacao: new Date()}));
+            } catch (err2) {
+                vehicles = []; // Último recurso
+            }
         }
 
-        // Histórico CRM
-        const [crmLogs] = await db.query(`
-            SELECT 
-                l.*, 
-                u.username as supervisor_name 
-            FROM obra_crm_logs l
-            LEFT JOIN users u ON l.user_id = u.id
-            WHERE l.obra_id = ? 
-            ORDER BY l.created_at DESC
-        `, [id]);
+        // 5. Histórico CRM (Defensive)
+        let crmLogs = [];
+        try {
+            const [resCrm] = await db.query(`
+                SELECT 
+                    l.*, 
+                    u.username as supervisor_name 
+                FROM obra_crm_logs l
+                LEFT JOIN users u ON l.user_id = u.id
+                WHERE l.obra_id = ? 
+                ORDER BY l.created_at DESC
+            `, [id]);
+            crmLogs = resCrm;
+        } catch (e) { console.warn('CRM warning:', e.message); }
 
-        // Recalcular KPIs unitários para esta obra (sincronia com dashboard)
-        const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [id]);
-        const [hours] = await db.query('SELECT SUM(totalHours) as total FROM daily_work_logs WHERE obraId = ?', [id]);
-        
-        const kpi = {
-            horas_executadas: parseFloat(hours[0].total) || 0,
-            total_gasto: parseFloat(expenses[0].total) || 0
-        };
+        // 6. KPIs Unitários (Defensive)
+        let kpi = { horas_executadas: 0, total_gasto: 0 };
+        try {
+            const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [id]);
+            const [hours] = await db.query('SELECT SUM(totalHours) as total FROM daily_work_logs WHERE obraId = ?', [id]);
+            
+            kpi = {
+                horas_executadas: parseFloat(hours[0]?.total) || 0,
+                total_gasto: parseFloat(expenses[0]?.total) || 0
+            };
+        } catch (e) { console.warn('KPI warning:', e.message); }
 
+        // Response Final
         res.json({
             obra: { ...obra[0], kpi }, 
             contract: contractData,
@@ -236,7 +262,7 @@ exports.getObraDetails = async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Erro Detalhes:', error);
+        console.error('Erro Critical Detalhes:', error);
         res.status(500).json({message: 'Erro ao carregar detalhes da obra', debug: error.message});
     }
 };
