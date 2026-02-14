@@ -29,53 +29,65 @@ exports.getDashboardData = async (req, res) => {
         console.log('[Supervisor] Iniciando busca de dados do dashboard (Modo Seguro)...');
 
         // 1. Buscar Obras (Query Simples)
-        // Removemos cláusulas WHERE complexas para evitar erro de coluna inexistente
         const [allObras] = await db.query('SELECT * FROM obras');
         
-        // Filtragem em Memória (Mais seguro para esquemas legados)
-        // Se a coluna 'status' não existir, assume que a obra é ativa para não sumir com os dados
+        // LOG DE DIAGNÓSTICO (Para ver no console o que está vindo do banco)
+        if (allObras.length > 0) {
+            console.log('[Supervisor Debug] Status encontrados:', allObras.map(o => `${o.id}: ${o.status}`).join(', '));
+        } else {
+            console.log('[Supervisor Debug] Nenhuma obra encontrada na tabela obras.');
+        }
+
+        // 2. Filtragem em Memória (Lógica BLACKLIST - Mais permissiva)
+        // Mostra tudo, EXCETO o que for explicitamente inativo/concluído
         const obrasAtivas = allObras.filter(o => {
-            if (!o.status) return true; // Fallback se não tiver coluna status
-            return ['Ativa', 'active', 'Em Andamento'].includes(o.status);
+            // Se não tiver coluna status ou for nula, assume que é ativa (para aparecer na tela)
+            if (o.status === undefined || o.status === null) return true; 
+            
+            // Normaliza para comparar (remove espaços e põe em minúsculas)
+            const s = String(o.status).toLowerCase().trim();
+            
+            // Define o que NÃO queremos mostrar
+            const statusInativos = ['inativa', 'inactive', 'concluída', 'concluida', 'finalizada', 'cancelada', 'arquivada'];
+            
+            // Retorna true se NÃO estiver na lista de inativos
+            return !statusInativos.includes(s);
         });
 
         console.log(`[Supervisor] Obras carregadas: ${allObras.length} total, ${obrasAtivas.length} consideradas ativas.`);
 
-        // 2. Buscar Contratos (Separado para não quebrar se a tabela faltar)
+        // 3. Buscar Contratos (Separado para não quebrar se a tabela faltar)
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
             contracts = resContracts;
         } catch (e) {
             console.error('[Supervisor WARN] Tabela obra_contracts não encontrada ou erro:', e.message);
-            // Segue o fluxo com array vazio, permitindo que o dashboard abra mesmo sem contratos
         }
 
-        // 3. Buscar Totais de Despesas (Expenses)
+        // 4. Buscar Totais de Despesas (Expenses)
         let expensesMap = {};
         try {
             const [resExpenses] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
             resExpenses.forEach(r => expensesMap[r.obra_id] = r.total);
         } catch (e) {
-            console.warn('[Supervisor WARN] Erro ao buscar expenses (tabela ou coluna inexistente):', e.message);
+            console.warn('[Supervisor WARN] Erro ao buscar expenses:', e.message);
         }
 
-        // 4. Buscar Totais de Horas (Daily Work Logs)
+        // 5. Buscar Totais de Horas (Daily Work Logs)
         let hoursMap = {};
         try {
-            // Tenta buscar horas trabalhadas. 
-            // IMPORTANTE: Se o nome da coluna no seu DB for 'total_hours' ou 'hours', o erro aparecerá no log do servidor.
             const [resHours] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
             resHours.forEach(r => hoursMap[r.obra_id] = r.total);
         } catch (e) {
-            console.warn('[Supervisor WARN] Erro ao buscar daily_work_logs (verifique nome da coluna de horas):', e.message);
+            console.warn('[Supervisor WARN] Erro ao buscar daily_work_logs:', e.message);
         }
 
-        // 5. Montagem dos Dados (Merge dos resultados)
+        // 6. Montagem dos Dados
         const dashboardData = obrasAtivas.map(obra => {
             const contract = contracts.find(c => c.obra_id === obra.id) || {};
             
-            // Sanitização de valores para evitar NaN
+            // Sanitização de valores
             const valorTotal = parseFloat(contract.total_value) || 0;
             const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
             const totalGasto = parseFloat(expensesMap[obra.id]) || 0;
@@ -118,6 +130,7 @@ exports.getDashboardData = async (req, res) => {
             return {
                 id: obra.id,
                 nome: obra.nome,
+                status_original: obra.status, // Útil para debug no front se precisar
                 responsavel: contract.fiscal_nome || 'Não Definido', 
                 fiscal_nome: contract.fiscal_nome,
                 kpi: {
@@ -142,7 +155,6 @@ exports.getDashboardData = async (req, res) => {
         res.json(dashboardData);
 
     } catch (error) {
-        // LOG CRÍTICO PARA O EASYPANEL
         console.error('============ ERRO FATAL NO DASHBOARD ============');
         console.error('Mensagem:', error.message);
         console.error('=================================================');
@@ -158,15 +170,12 @@ exports.getDashboardData = async (req, res) => {
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
-        // Busca veículos alocados na obra (Logíca baseada em vehicle_operational_assignment ou histórico recente)
-        // Adaptar conforme sua regra de alocação atual. Aqui busco assignments ativos.
         const [vehicles] = await db.query(`
             SELECT v.id, v.plate, v.model, v.type 
             FROM vehicles v
             WHERE v.current_location_id = ? AND v.status = 'active'
         `, [id]);
 
-        // Busca histórico de CRM
         const [crmLogs] = await db.query(`
             SELECT * FROM obra_crm_logs 
             WHERE obra_id = ? 
@@ -184,10 +193,10 @@ exports.getObraDetails = async (req, res) => {
     }
 };
 
-// 3. REGISTRAR CRM (DIÁRIO DE OBRA/CONTATO)
+// 3. REGISTRAR CRM
 exports.addCrmLog = async (req, res) => {
     const { obra_id, tipo_interacao, resumo_conversa, data_proximo_contato } = req.body;
-    const supervisor_id = req.user.userId; // Do authMiddleware
+    const supervisor_id = req.user.userId;
     const supervisor_name = req.user.username || 'Supervisor'; 
 
     try {
@@ -204,12 +213,10 @@ exports.addCrmLog = async (req, res) => {
     }
 };
 
-// 4. CONFIGURAR CONTRATO (UPSERT)
+// 4. CONFIGURAR CONTRATO
 exports.upsertContract = async (req, res) => {
-    // Sanitização básica
     let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome } = req.body;
     
-    // Converte strings vazias para null para evitar erro de data inválida no MySQL
     if (!data_inicio) data_inicio = null;
     if (!data_fim_contratual) data_fim_contratual = null;
     if (!fiscal_nome) fiscal_nome = null;
