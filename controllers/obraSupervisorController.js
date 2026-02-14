@@ -170,23 +170,20 @@ function getStatusColor(perc) {
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     
-    // Validação básica do ID para evitar crash do SQL
-    // Se o ID não for numérico, retorna erro 400 em vez de tentar query e dar 500
-    if (!id || isNaN(Number(id))) {
-        return res.status(400).json({message: 'ID da obra inválido. Deve ser numérico.'});
-    }
+    // CORREÇÃO: Validação flexível (Aceita String ou Número)
+    if (!id) return res.status(400).json({message: 'ID da obra inválido.'});
 
     try {
         // 1. Obra Básica (Essencial)
         let obra = [];
         try {
-            // Tenta buscar. Se o ID for string e o banco esperar INT, isso pode falhar.
+            // A query funciona tanto para INT quanto VARCHAR
             const [resObra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
             obra = resObra || [];
         } catch (e) {
             console.error('Erro ao buscar obra base:', e.message);
             // Se falhar a busca básica, retorna 404 ou erro específico em vez de 500 genérico
-            return res.status(404).json({message: 'Obra não encontrada ou ID inválido.', debug: e.message});
+            return res.status(404).json({message: 'Erro ao buscar obra.', debug: e.message});
         }
 
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
@@ -267,13 +264,13 @@ exports.getObraDetails = async (req, res) => {
             };
         } catch (e) { console.warn('KPI warning:', e.message); }
 
-        // Response Final - Garantir arrays vazios em vez de null
+        // Response Final
         res.json({
             obra: { ...obra[0], kpi }, 
             contract: contractData,
             burnup: burnupData || [],
             vehicles: vehicles || [],
-            crm_history: crmLogs || [], // Segurança extra: nunca retornar null
+            crm_history: crmLogs || [],
             employees: []
         });
 
