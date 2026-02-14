@@ -31,81 +31,57 @@ exports.getDashboardData = async (req, res) => {
         // 1. Buscar Obras (Query Simples)
         const [allObras] = await db.query('SELECT * FROM obras');
         
-        // LOG DE DIAGNÓSTICO (Para ver no console o que está vindo do banco)
-        if (allObras.length > 0) {
-            console.log('[Supervisor Debug] Status encontrados:', allObras.map(o => `${o.id}: ${o.status}`).join(', '));
-        } else {
-            console.log('[Supervisor Debug] Nenhuma obra encontrada na tabela obras.');
-        }
-
-        // 2. Filtragem em Memória (Lógica BLACKLIST - Mais permissiva)
-        // Mostra tudo, EXCETO o que for explicitamente inativo/concluído
+        // Filtragem (Blacklist) - Mostra tudo exceto Inativas/Concluídas
         const obrasAtivas = allObras.filter(o => {
-            // Se não tiver coluna status ou for nula, assume que é ativa (para aparecer na tela)
             if (o.status === undefined || o.status === null) return true; 
-            
-            // Normaliza para comparar (remove espaços e põe em minúsculas)
             const s = String(o.status).toLowerCase().trim();
-            
-            // Define o que NÃO queremos mostrar
             const statusInativos = ['inativa', 'inactive', 'concluída', 'concluida', 'finalizada', 'cancelada', 'arquivada'];
-            
-            // Retorna true se NÃO estiver na lista de inativos
             return !statusInativos.includes(s);
         });
 
-        console.log(`[Supervisor] Obras carregadas: ${allObras.length} total, ${obrasAtivas.length} consideradas ativas.`);
-
-        // 3. Buscar Contratos (Separado para não quebrar se a tabela faltar)
+        // 2. Buscar Contratos (Protegido contra falhas)
         let contracts = [];
         try {
             const [resContracts] = await db.query('SELECT * FROM obra_contracts');
             contracts = resContracts;
         } catch (e) {
-            console.error('[Supervisor WARN] Tabela obra_contracts não encontrada ou erro:', e.message);
+            console.error('[Supervisor WARN] Erro ao buscar obra_contracts:', e.message);
         }
 
-        // 4. Buscar Totais de Despesas (Expenses)
+        // 3. Buscar Totais de Despesas
         let expensesMap = {};
         try {
             const [resExpenses] = await db.query('SELECT obra_id, SUM(total_value) as total FROM expenses GROUP BY obra_id');
             resExpenses.forEach(r => expensesMap[r.obra_id] = r.total);
-        } catch (e) {
-            console.warn('[Supervisor WARN] Erro ao buscar expenses:', e.message);
-        }
+        } catch (e) { /* Ignora erro se tabela não existir */ }
 
-        // 5. Buscar Totais de Horas (Daily Work Logs)
+        // 4. Buscar Totais de Horas
         let hoursMap = {};
         try {
             const [resHours] = await db.query('SELECT obra_id, SUM(horas_trabalhadas) as total FROM daily_work_logs GROUP BY obra_id');
             resHours.forEach(r => hoursMap[r.obra_id] = r.total);
-        } catch (e) {
-            console.warn('[Supervisor WARN] Erro ao buscar daily_work_logs:', e.message);
-        }
+        } catch (e) { /* Ignora erro se tabela não existir */ }
 
-        // 6. Montagem dos Dados
+        // 5. Montagem dos Dados
         const dashboardData = obrasAtivas.map(obra => {
-            const contract = contracts.find(c => c.obra_id === obra.id) || {};
+            const obraIdStr = String(obra.id);
+            // Procura contrato convertendo ambos IDs para string
+            const contract = contracts.find(c => String(c.obra_id) === obraIdStr) || {};
             
             // Sanitização de valores
             const valorTotal = parseFloat(contract.total_value) || 0;
             const horasTotais = parseFloat(contract.total_hours_contracted) || 0;
-            const totalGasto = parseFloat(expensesMap[obra.id]) || 0;
-            const horasRealizadas = parseFloat(hoursMap[obra.id]) || 0;
+            const totalGasto = parseFloat(expensesMap[obraIdStr] || expensesMap[obra.id]) || 0;
+            const horasRealizadas = parseFloat(hoursMap[obraIdStr] || hoursMap[obra.id]) || 0;
 
-            // Cálculos de Percentual
-            let percentualFinanceiro = 0;
-            if (valorTotal > 0) percentualFinanceiro = (totalGasto / valorTotal) * 100;
-
-            let percentualHoras = 0;
-            if (horasTotais > 0) percentualHoras = (horasRealizadas / horasTotais) * 100;
-
+            // Cálculos
+            let percentualFinanceiro = (valorTotal > 0) ? (totalGasto / valorTotal) * 100 : 0;
+            let percentualHoras = (horasTotais > 0) ? (horasRealizadas / horasTotais) * 100 : 0;
             const percentualConclusao = Math.max(percentualFinanceiro, percentualHoras);
 
             // Previsão Inteligente
             let previsaoTermino = null;
             let statusPrazo = 'indefinido';
-            
             const dataInicio = contract.start_date ? new Date(contract.start_date) : null;
             const dataFim = contract.expected_end_date ? new Date(contract.expected_end_date) : null;
 
@@ -113,7 +89,6 @@ exports.getDashboardData = async (req, res) => {
                 const hoje = new Date();
                 const diffTime = Math.abs(hoje - dataInicio);
                 const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
-                
                 const horasPorDia = horasRealizadas / diffDays;
                 const horasRestantes = horasTotais - horasRealizadas;
 
@@ -122,15 +97,11 @@ exports.getDashboardData = async (req, res) => {
                     previsaoTermino = addBusinessDays(new Date(), diasRestantesEstimados);
                 }
             }
-
-            if (previsaoTermino && dataFim) {
-                statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
-            }
+            if (previsaoTermino && dataFim) statusPrazo = previsaoTermino > dataFim ? 'atrasado' : 'no_prazo';
 
             return {
                 id: obra.id,
                 nome: obra.nome,
-                status_original: obra.status, // Útil para debug no front se precisar
                 responsavel: contract.fiscal_nome || 'Não Definido', 
                 fiscal_nome: contract.fiscal_nome,
                 kpi: {
@@ -155,49 +126,60 @@ exports.getDashboardData = async (req, res) => {
         res.json(dashboardData);
 
     } catch (error) {
-        console.error('============ ERRO FATAL NO DASHBOARD ============');
-        console.error('Mensagem:', error.message);
-        console.error('=================================================');
-        
-        res.status(500).json({ 
-            message: 'Erro interno ao carregar dashboard.',
-            debug_error: error.message 
-        });
+        console.error('============ ERRO FATAL NO DASHBOARD ============', error);
+        res.status(500).json({ message: 'Erro interno ao carregar dashboard.', debug_error: error.message });
     }
 };
 
-// 2. OBTER DETALHES DA OBRA (COCKPIT)
+// 2. OBTER DETALHES DA OBRA (COCKPIT) - BLINDADO
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
+    console.log(`[Supervisor] Buscando detalhes para Obra ID: ${id}`);
+    
     try {
-        const [vehicles] = await db.query(`
-            SELECT v.id, v.plate, v.model, v.type 
-            FROM vehicles v
-            WHERE v.current_location_id = ? AND v.status = 'active'
-        `, [id]);
+        // 1. Busca Veículos (Com tratamento de erro se a coluna não existir)
+        let vehicles = [];
+        try {
+            const [veh] = await db.query(`
+                SELECT v.id, v.plate, v.model, v.type 
+                FROM vehicles v
+                WHERE v.current_location_id = ? 
+            `, [id]);
+            vehicles = veh;
+        } catch (vErr) {
+            console.warn('[Supervisor WARN] Erro ao buscar veículos (provável coluna inexistente):', vErr.sqlMessage);
+        }
 
-        const [crmLogs] = await db.query(`
-            SELECT * FROM obra_crm_logs 
-            WHERE obra_id = ? 
-            ORDER BY created_at DESC 
-            LIMIT 50
-        `, [id]);
+        // 2. Busca CRM Logs
+        let crmLogs = [];
+        try {
+            const [logs] = await db.query(`
+                SELECT * FROM obra_crm_logs 
+                WHERE obra_id = ? 
+                ORDER BY created_at DESC 
+                LIMIT 50
+            `, [id]);
+            crmLogs = logs;
+        } catch (crmErr) {
+            console.error('[Supervisor WARN] Erro ao buscar logs CRM:', crmErr.sqlMessage);
+        }
 
         res.json({
             vehicles: vehicles,
             crm_history: crmLogs
         });
+
     } catch (error) {
-        console.error('Erro ao buscar detalhes da obra:', error);
-        res.status(500).json({ message: 'Erro ao carregar detalhes.' });
+        console.error('============ ERRO CRÍTICO NO DETALHE ============', error);
+        res.status(500).json({ message: 'Erro ao carregar detalhes.', debug: error.message });
     }
 };
 
 // 3. REGISTRAR CRM
 exports.addCrmLog = async (req, res) => {
     const { obra_id, tipo_interacao, resumo_conversa, data_proximo_contato } = req.body;
-    const supervisor_id = req.user.userId;
-    const supervisor_name = req.user.username || 'Supervisor'; 
+    const supervisor_id = req.user?.userId || null;
+    const supervisor_name = req.user?.username || 'Supervisor'; 
 
     try {
         await db.query(`
@@ -209,7 +191,7 @@ exports.addCrmLog = async (req, res) => {
         res.status(201).json({ message: 'Registro salvo com sucesso.' });
     } catch (error) {
         console.error('Erro ao salvar CRM:', error);
-        res.status(500).json({ message: 'Erro ao salvar registro.' });
+        res.status(500).json({ message: 'Erro ao salvar registro.', debug: error.sqlMessage });
     }
 };
 
@@ -240,6 +222,6 @@ exports.upsertContract = async (req, res) => {
         res.json({ message: 'Contrato configurado com sucesso.' });
     } catch (error) {
         console.error('Erro ao configurar contrato:', error);
-        res.status(500).json({ message: 'Erro ao salvar configurações do contrato.', debug: error.message });
+        res.status(500).json({ message: 'Erro ao salvar configurações.', debug: error.sqlMessage });
     }
 };
