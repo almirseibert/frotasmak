@@ -8,8 +8,8 @@ const addBusinessDays = (startDate, daysToAdd) => {
     if (!startDate) return new Date();
     let count = 0;
     let currentDate = new Date(startDate);
-    // Proteção contra loop infinito
-    if (daysToAdd > 2000) daysToAdd = 2000; 
+    // Proteção contra loop infinito em datas muito distantes
+    if (daysToAdd > 3000) daysToAdd = 3000; 
     
     while (count < daysToAdd) {
         currentDate.setDate(currentDate.getDate() + 1);
@@ -33,11 +33,12 @@ exports.getDashboardData = async (req, res) => {
         const [contracts] = await db.query('SELECT * FROM obra_contracts');
         
         // 2. Agregações Financeiras e de Horas (Faturamento)
+        // Ajuste 'total_value' ou 'amount' conforme sua tabela expenses real
         const [expenses] = await db.query(`
-            SELECT obraId, SUM(totalValue) as total 
+            SELECT obraId, SUM(amount) as total 
             FROM expenses 
             GROUP BY obraId
-        `); // Ajuste conforme nome real da coluna na sua tabela expenses (totalValue ou amount)
+        `); 
 
         const [hoursLogs] = await db.query(`
             SELECT obraId, SUM(totalHours) as total 
@@ -46,7 +47,6 @@ exports.getDashboardData = async (req, res) => {
         `);
 
         // 3. Contagem de Máquinas Ativas (Para o cálculo de previsão)
-        // Consideramos "Pesados" para o cálculo: Caminhão, Escavadeira, Motoniveladora, Retroescavadeira, Rolo, Trator
         const [activeMachines] = await db.query(`
             SELECT 
                 voa.obraId, 
@@ -88,8 +88,8 @@ exports.getDashboardData = async (req, res) => {
                 const horasSaldo = horasContratadas - horasExecutadas;
                 const maquinasAtivas = machinesMap[obraId] || 0;
                 
-                // Média de produção diária (8h por máquina dia útil é o padrão da indústria/solicitado)
-                // Se não tiver máquina, assume 1 para não dividir por zero e dar erro
+                // Capacidade diária: 8h por máquina (padrão solicitado)
+                // Se não tiver máquina ativa, assumimos 1 para não travar o cálculo
                 const capacidadeDiaria = (maquinasAtivas > 0 ? maquinasAtivas : 1) * 8; 
 
                 if (horasSaldo > 0) {
@@ -109,21 +109,17 @@ exports.getDashboardData = async (req, res) => {
                 }
             }
 
-            // Alertas CRM
-            // Aqui você pode fazer uma query extra para saber se tem logs pendentes, 
-            // mas por performance no dashboard macro, deixamos simplificado.
-            
             return {
                 id: obraId,
                 nome: obra.nome,
                 status: obra.status,
-                responsavel: contract.fiscal_nome || obra.responsavel || 'A Definir', // Prioriza contrato, fallback obra
+                responsavel: contract.fiscal_nome || obra.responsavel || 'A Definir',
                 fiscal_nome: contract.fiscal_nome || obra.fiscal || 'A Definir',
                 kpi: {
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
                     horas_contratadas: horasContratadas,
-                    horas_executadas: horasExecutadas, // Info vinda do Faturamento (daily_work_logs)
+                    horas_executadas: horasExecutadas,
                     percentual_conclusao: parseFloat(percConclusao.toFixed(1)),
                     dias_restantes_estimados: diasRestantes,
                     maquinas_ativas: machinesMap[obraId] || 0,
@@ -138,7 +134,7 @@ exports.getDashboardData = async (req, res) => {
             };
         });
 
-        // Ordenação Inteligente: Quem termina antes (data estimada) vem primeiro
+        // Ordenação Inteligente: Prioridade para quem termina antes
         dashboardData.sort((a, b) => {
             if (!a.previsao.data_termino_estimada) return 1;
             if (!b.previsao.data_termino_estimada) return -1;
@@ -149,7 +145,7 @@ exports.getDashboardData = async (req, res) => {
 
     } catch (error) {
         console.error('Erro Dashboard:', error);
-        res.status(500).json({ message: 'Erro interno.' });
+        res.status(500).json({ message: 'Erro interno no dashboard.' });
     }
 };
 
@@ -168,12 +164,10 @@ exports.getObraDetails = async (req, res) => {
         const [obra] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
         if (!obra.length) return res.status(404).json({message: 'Obra não encontrada'});
 
-        // Reuse a lógica do dashboard para pegar os KPIs atualizados
-        // (Em produção idealmente refatorar para função compartilhada)
         const [contract] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
         const contractData = contract[0] || {};
 
-        // Burnup Chart Data (Agrupado por semana ou mês)
+        // Burnup Chart Data
         const [burnupData] = await db.query(`
             SELECT 
                 DATE(date) as data, 
@@ -207,27 +201,33 @@ exports.getObraDetails = async (req, res) => {
             ORDER BY created_at DESC
         `, [id]);
 
-        // Calcular KPIs finais para envio
-        // ... (Mesma lógica do dashboard para calcular previsão e saldos)
+        // Recalcular KPIs unitários para esta obra (sincronia com dashboard)
+        const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [id]);
+        const [hours] = await db.query('SELECT SUM(totalHours) as total FROM daily_work_logs WHERE obraId = ?', [id]);
         
+        const kpi = {
+            horas_executadas: parseFloat(hours[0].total) || 0,
+            total_gasto: parseFloat(expenses[0].total) || 0
+        };
+
         res.json({
-            obra: obra[0],
+            obra: { ...obra[0], kpi }, // Injeta KPI atualizado no objeto obra
             contract: contractData,
-            burnup: burnupData, // Array para o gráfico
+            burnup: burnupData,
             vehicles: vehicles,
             crm: crmLogs
         });
 
     } catch (error) {
-        console.error(error);
-        res.status(500).json({message: 'Erro ao carregar detalhes'});
+        console.error('Erro Detalhes:', error);
+        res.status(500).json({message: 'Erro ao carregar detalhes da obra'});
     }
 };
 
 // 3. REGISTRAR CRM
 exports.addCrmLog = async (req, res) => {
     const { obra_id, interaction_type, notes, agreed_action } = req.body;
-    const user_id = req.user?.userId; // Do middleware de auth
+    const user_id = req.user?.userId; 
 
     try {
         await db.query(`
@@ -238,6 +238,40 @@ exports.addCrmLog = async (req, res) => {
         
         res.json({success: true});
     } catch (e) {
+        console.error('Erro CRM:', e);
         res.status(500).json({error: e.message});
+    }
+};
+
+// 4. SALVAR/ATUALIZAR CONTRATO (A FUNÇÃO QUE FALTAVA)
+exports.upsertContract = async (req, res) => {
+    let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome } = req.body;
+    
+    // Tratamento de nulos
+    if (!data_inicio) data_inicio = null;
+    if (!data_fim_contratual) data_fim_contratual = null;
+    if (!fiscal_nome) fiscal_nome = null;
+
+    try {
+        const [existing] = await db.query('SELECT id FROM obra_contracts WHERE obra_id = ?', [obra_id]);
+        
+        if (existing.length > 0) {
+            await db.query(`
+                UPDATE obra_contracts 
+                SET total_value = ?, total_hours_contracted = ?, start_date = ?, expected_end_date = ?, fiscal_nome = ? 
+                WHERE obra_id = ?
+            `, [valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, obra_id]);
+        } else {
+            await db.query(`
+                INSERT INTO obra_contracts 
+                (obra_id, total_value, total_hours_contracted, start_date, expected_end_date, fiscal_nome) 
+                VALUES (?, ?, ?, ?, ?, ?)
+            `, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome]);
+        }
+        
+        res.json({ message: 'Contrato salvo com sucesso.' });
+    } catch (error) {
+        console.error("Erro ao salvar contrato:", error);
+        res.status(500).json({ message: 'Erro ao salvar contrato.' });
     }
 };
