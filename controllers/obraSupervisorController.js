@@ -1,7 +1,7 @@
 const db = require('../database');
 
 // ==================================================================================
-// FUNÇÕES AUXILIARES MATEMÁTICAS
+// FUNÇÕES AUXILIARES
 // ==================================================================================
 
 const sumLegacyHours = (jsonInput) => {
@@ -43,6 +43,7 @@ exports.getDashboardData = async (req, res) => {
         const dashboardData = await Promise.all(allObras.map(async (obra) => {
             const obraId = String(obra.id);
             const contract = contractMap[obra.id] || {};
+            const isHidden = contract.is_hidden === 1; // Flag de Ocultar/Despriorizar
 
             let horasContratadas = parseFloat(contract.total_hours_contracted) || sumLegacyHours(obra.horasContratadasPorTipo);
             let valorTotal = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
@@ -53,37 +54,25 @@ exports.getDashboardData = async (req, res) => {
             const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [obraId]);
             const totalGasto = parseFloat(expenses[0]?.total) || 0;
 
-            const [recentLogs] = await db.query(`
-                SELECT vehicleId, date, SUM(totalHours) as daily_hours
-                FROM daily_work_logs 
-                WHERE obraId = ? 
-                AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY) 
-                GROUP BY vehicleId, date
+            // --- NOVA LÓGICA DE CÁLCULO DE PREVISÃO ---
+            // Conta apenas máquinas pesadas ativas na obra
+            // Exclui tipos como 'Leve', 'Passeio', 'Utilitário' (ajuste conforme seu cadastro)
+            const [veiculosPesados] = await db.query(`
+                SELECT COUNT(id) as qtd 
+                FROM vehicles 
+                WHERE obraAtualId = ? 
+                AND tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo')
             `, [obraId]);
 
-            const vehicleAverages = {};
-            recentLogs.forEach(log => {
-                if (!vehicleAverages[log.vehicleId]) vehicleAverages[log.vehicleId] = [];
-                vehicleAverages[log.vehicleId].push(log.daily_hours);
-            });
-
-            let capacidadeDiariaCanteiro = 0;
-            Object.values(vehicleAverages).forEach(days => {
-                const sum = days.reduce((a, b) => a + b, 0);
-                const avg = sum / (days.length || 1);
-                capacidadeDiariaCanteiro += avg;
-            });
-
-            if (capacidadeDiariaCanteiro === 0) {
-                const [veiculosAtivos] = await db.query(`SELECT COUNT(id) as qtd FROM vehicles WHERE obraAtualId = ?`, [obraId]);
-                capacidadeDiariaCanteiro = (veiculosAtivos[0]?.qtd || 1) * 8; 
-            }
+            const numMaquinas = veiculosPesados[0]?.qtd || 0;
+            const capacidadeDiariaCanteiro = numMaquinas * 8; // Regra: 8h por máquina
 
             const saldoHoras = horasContratadas - horasExecutadas;
             let diasRestantes = 0;
-            let previsaoTermino = new Date();
+            let previsaoTermino = null;
 
-            if (saldoHoras > 0 && capacidadeDiariaCanteiro > 0) {
+            // Só calcula previsão se não estiver oculto e tiver saldo/capacidade
+            if (!isHidden && saldoHoras > 0 && capacidadeDiariaCanteiro > 0) {
                 diasRestantes = Math.ceil(saldoHoras / capacidadeDiariaCanteiro);
                 previsaoTermino = addBusinessDays(new Date(), diasRestantes);
             }
@@ -105,8 +94,10 @@ exports.getDashboardData = async (req, res) => {
                     percentual_conclusao: parseFloat(percConclusao.toFixed(1)),
                     dias_restantes_estimados: diasRestantes,
                     capacidade_diaria_atual: capacidadeDiariaCanteiro,
+                    maquinas_ativas: numMaquinas,
                     status_cor: getStatusColor(percConclusao),
-                    is_critical: isZonaAditivo || (diasRestantes < 15 && diasRestantes > 0)
+                    is_critical: !isHidden && (isZonaAditivo || (diasRestantes < 15 && diasRestantes > 0)),
+                    is_hidden: isHidden
                 },
                 previsao: {
                     data_termino_estimada: previsaoTermino
@@ -114,10 +105,23 @@ exports.getDashboardData = async (req, res) => {
             };
         }));
 
+        // ORDENAÇÃO ATUALIZADA:
+        // 1. Obras Normais primeiro (isHidden = false)
+        // 2. Obras Críticas no topo das normais
+        // 3. Data de término mais próxima
+        // 4. Obras Ocultas/Centros de Custo por último
         dashboardData.sort((a, b) => {
-            if (a.kpi.is_critical && !b.kpi.is_critical) return -1;
+            if (a.kpi.is_hidden && !b.kpi.is_hidden) return 1; // A oculto vai pro fim
+            if (!a.kpi.is_hidden && b.kpi.is_hidden) return -1; // B oculto vai pro fim
+            
+            if (a.kpi.is_critical && !b.kpi.is_critical) return -1; // Crítico sobe
             if (!a.kpi.is_critical && b.kpi.is_critical) return 1;
-            return new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada);
+
+            // Se ambos tem data, ordena. Se um não tem (null), vai pro fim do grupo
+            if (a.previsao.data_termino_estimada && b.previsao.data_termino_estimada) {
+                return new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada);
+            }
+            return 0;
         });
         
         res.json(dashboardData);
@@ -145,6 +149,7 @@ exports.getObraDetails = async (req, res) => {
         const [expensesCategory] = await db.query(`SELECT category, SUM(amount) as total FROM expenses WHERE obraId = ? GROUP BY category`, [id]);
         const totalDespesas = expensesCategory.reduce((acc, curr) => acc + parseFloat(curr.total), 0);
 
+        // Capacidade baseada em média (mantida para detalhe histórico) ou regra de 8h (pode ajustar se quiser igual ao dashboard)
         const [recentActivity] = await db.query(`
             SELECT date, SUM(totalHours) as total_dia
             FROM daily_work_logs 
@@ -166,17 +171,14 @@ exports.getObraDetails = async (req, res) => {
             ORDER BY c.created_at DESC
         `, [id]);
 
-        // ATUALIZAÇÃO AQUI: Buscar dados completos dos veículos
         const [vehicles] = await db.query('SELECT id, placa, modelo, tipo, marca, operationalAssignment FROM vehicles WHERE obraAtualId = ?', [id]);
         
         const machinePredictions = await Promise.all(vehicles.map(async (v) => {
-            // Média recente
             const [myLogs] = await db.query(`
                 SELECT SUM(totalHours) / COUNT(DISTINCT date) as media_individual
                 FROM daily_work_logs WHERE vehicleId = ? AND obraId = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
             `, [v.id, id]);
             
-            // Total Acumulado na Obra (para o PDF)
             const [totalLogs] = await db.query(`
                 SELECT SUM(totalHours) as total_absoluto
                 FROM daily_work_logs WHERE vehicleId = ? AND obraId = ?
@@ -195,7 +197,7 @@ exports.getObraDetails = async (req, res) => {
             return {
                 ...v,
                 media_diaria: mediaIndividual,
-                total_executado: totalIndividual, // Campo novo para o PDF
+                total_executado: totalIndividual,
                 proximo_destino: nextAllocation.location || '',
                 data_liberacao_manual: nextAllocation.release_date || null
             };
@@ -220,7 +222,6 @@ exports.getObraDetails = async (req, res) => {
             },
             producao: {
                 media_diaria_atual: mediaDiariaObra,
-                dias_analisados: recentActivity.length,
                 saldo_horas: contract.total_hours_contracted - horasExecutadas,
                 horas_executadas: horasExecutadas
             },
@@ -313,20 +314,13 @@ exports.updateVehicleNextMission = async (req, res) => {
     try {
         const [v] = await db.query('SELECT operationalAssignment FROM vehicles WHERE id = ?', [vehicle_id]);
         let currentAssignment = v[0]?.operationalAssignment || {};
-        if (typeof currentAssignment === 'string') currentAssignment = JSON.parse(currentAssignment); 
+        if (typeof currentAssignment === 'string') currentAssignment = JSON.parse(currentAssignment);
         if (!currentAssignment) currentAssignment = {};
 
-        currentAssignment.next_mission = {
-            location: next_location,
-            release_date: release_date,
-            updated_at: new Date()
-        };
-
+        currentAssignment.next_mission = { location: next_location, release_date: release_date, updated_at: new Date() };
         await db.query('UPDATE vehicles SET operationalAssignment = ? WHERE id = ?', [JSON.stringify(currentAssignment), vehicle_id]);
         res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+    } catch (e) { res.status(500).json({ error: e.message }); }
 };
 
 exports.addCrmLog = async (req, res) => {
@@ -339,17 +333,25 @@ exports.addCrmLog = async (req, res) => {
 };
 
 exports.upsertContract = async (req, res) => {
-    let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome } = req.body;
+    let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome, is_hidden } = req.body;
     
     if (!data_inicio) data_inicio = null;
     if (!data_fim_contratual) data_fim_contratual = null;
+    const hiddenVal = is_hidden ? 1 : 0;
 
     try {
         const [existing] = await db.query('SELECT id FROM obra_contracts WHERE obra_id = ?', [obra_id]);
         if (existing.length > 0) {
-            await db.query(`UPDATE obra_contracts SET total_value = ?, total_hours_contracted = ?, start_date = ?, expected_end_date = ?, fiscal_nome = ?, responsavel_nome = ? WHERE obra_id = ?`, [valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome, obra_id]);
+            await db.query(`
+                UPDATE obra_contracts 
+                SET total_value = ?, total_hours_contracted = ?, start_date = ?, expected_end_date = ?, fiscal_nome = ?, responsavel_nome = ?, is_hidden = ? 
+                WHERE obra_id = ?
+            `, [valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome, hiddenVal, obra_id]);
         } else {
-            await db.query(`INSERT INTO obra_contracts (obra_id, total_value, total_hours_contracted, start_date, expected_end_date, fiscal_nome, responsavel_nome) VALUES (?, ?, ?, ?, ?, ?, ?)`, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome]);
+            await db.query(`
+                INSERT INTO obra_contracts (obra_id, total_value, total_hours_contracted, start_date, expected_end_date, fiscal_nome, responsavel_nome, is_hidden) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `, [obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome, hiddenVal]);
         }
         res.json({ message: 'Contrato salvo.' });
     } catch (error) { res.status(500).json({ message: error.message }); }
