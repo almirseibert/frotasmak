@@ -56,7 +56,7 @@ exports.getDashboardData = async (req, res) => {
             const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [obraId]);
             const totalGasto = parseFloat(expenses[0]?.total) || 0;
 
-            // CÁLCULO INTELIGENTE DE PREVISÃO (Janela de 15 dias para suavizar)
+            // CÁLCULO INTELIGENTE DE PREVISÃO
             const [recentLogs] = await db.query(`
                 SELECT vehicleId, date, SUM(totalHours) as daily_hours
                 FROM daily_work_logs 
@@ -93,12 +93,15 @@ exports.getDashboardData = async (req, res) => {
             }
 
             const percConclusao = horasContratadas > 0 ? (horasExecutadas / horasContratadas) * 100 : 0;
+            const isZonaAditivo = percConclusao >= 90;
 
             return {
                 id: obraId,
                 nome: obra.nome,
+                dataInicio: obra.dataInicio, 
                 responsavel: contract.responsavel_nome || obra.responsavel || 'A Definir',
                 kpi: {
+                    ...contract, 
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
                     horas_contratadas: horasContratadas,
@@ -106,7 +109,8 @@ exports.getDashboardData = async (req, res) => {
                     percentual_conclusao: parseFloat(percConclusao.toFixed(1)),
                     dias_restantes_estimados: diasRestantes,
                     capacidade_diaria_atual: capacidadeDiariaCanteiro,
-                    status_cor: getStatusColor(percConclusao)
+                    status_cor: getStatusColor(percConclusao),
+                    is_critical: isZonaAditivo || (diasRestantes < 15 && diasRestantes > 0) // Flag para ordenação
                 },
                 previsao: {
                     data_termino_estimada: previsaoTermino
@@ -114,8 +118,18 @@ exports.getDashboardData = async (req, res) => {
             };
         }));
 
-        // ORDENAÇÃO: Obras que terminam antes aparecem primeiro
-        dashboardData.sort((a, b) => new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada));
+        // ORDENAÇÃO ATUALIZADA:
+        // 1. Obras Críticas (Zona Aditivo ou < 15 dias) primeiro.
+        // 2. Depois por Data de Término mais próxima.
+        dashboardData.sort((a, b) => {
+            // Se A é crítico e B não, A vem primeiro (-1)
+            if (a.kpi.is_critical && !b.kpi.is_critical) return -1;
+            // Se B é crítico e A não, B vem primeiro (1)
+            if (!a.kpi.is_critical && b.kpi.is_critical) return 1;
+            
+            // Se ambos forem iguais em criticidade, ordena por data de término
+            return new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada);
+        });
         
         res.json(dashboardData);
 
@@ -125,7 +139,7 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
-// 2. DETALHES DA OBRA (Com CRM e Financeiro Agrupado)
+// ... (Resto das funções getObraDetails, getAllocationForecast, etc permanecem iguais ao último arquivo válido) ...
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
@@ -136,7 +150,6 @@ exports.getObraDetails = async (req, res) => {
         const [contractRes] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
         let contract = contractRes[0] || {};
         
-        // Prioriza dados do contrato, fallback para dados da obra
         contract.total_value = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
         contract.total_hours_contracted = parseFloat(contract.total_hours_contracted) || sumLegacyHours(obra.horasContratadasPorTipo);
         contract.start_date = contract.start_date || obra.dataInicio;
@@ -144,7 +157,6 @@ exports.getObraDetails = async (req, res) => {
         const [expensesCategory] = await db.query(`SELECT category, SUM(amount) as total FROM expenses WHERE obraId = ? GROUP BY category`, [id]);
         const totalDespesas = expensesCategory.reduce((acc, curr) => acc + parseFloat(curr.total), 0);
 
-        // Capacidade Produtiva e Previsão
         const [recentActivity] = await db.query(`
             SELECT date, SUM(totalHours) as total_dia
             FROM daily_work_logs 
@@ -158,7 +170,6 @@ exports.getObraDetails = async (req, res) => {
             mediaDiariaObra = somaTotal / recentActivity.length;
         }
 
-        // Histórico de CRM/Diário
         const [crmHistory] = await db.query(`
             SELECT c.*, u.name as supervisor_name 
             FROM obra_crm_logs c 
@@ -167,7 +178,6 @@ exports.getObraDetails = async (req, res) => {
             ORDER BY c.created_at DESC
         `, [id]);
 
-        // Veículos e Previsões Individuais
         const [vehicles] = await db.query('SELECT id, placa, modelo, tipo, operationalAssignment FROM vehicles WHERE obraAtualId = ?', [id]);
         
         const machinePredictions = await Promise.all(vehicles.map(async (v) => {
@@ -226,10 +236,8 @@ exports.getObraDetails = async (req, res) => {
     }
 };
 
-// 3. NOVA ROTA: PREVISÃO DE ALOCAÇÃO GLOBAL (Para a nova página)
 exports.getAllocationForecast = async (req, res) => {
     try {
-        // Busca todos os veículos alocados em obras ativas
         const [vehicles] = await db.query(`
             SELECT v.id, v.placa, v.modelo, v.tipo, v.obraAtualId, o.nome as nome_obra, v.operationalAssignment
             FROM vehicles v
@@ -237,8 +245,6 @@ exports.getAllocationForecast = async (req, res) => {
             WHERE o.status = 'ativa'
         `);
 
-        // Precisa calcular o saldo da obra de cada veículo para estimar a saída
-        // Otimização: Calcular saldo de todas as obras primeiro
         const [obrasStats] = await db.query(`
             SELECT 
                 o.id, 
@@ -253,7 +259,6 @@ exports.getAllocationForecast = async (req, res) => {
 
         const obraMap = {};
         for (const o of obrasStats) {
-            // Calcula capacidade produtiva recente da obra
              const [recentLogs] = await db.query(`
                 SELECT SUM(totalHours) as total, COUNT(DISTINCT date) as days
                 FROM daily_work_logs 
@@ -280,7 +285,6 @@ exports.getAllocationForecast = async (req, res) => {
             let nextMission = {};
             try { if(v.operationalAssignment) nextMission = v.operationalAssignment.next_mission || {}; } catch(e){}
 
-            // Data de liberação: Prioriza manual, senão usa cálculo da obra
             const calculatedDate = obraStat.previsaoSaida;
             const manualDate = nextMission.release_date ? new Date(nextMission.release_date) : null;
 
@@ -296,7 +300,6 @@ exports.getAllocationForecast = async (req, res) => {
             };
         });
 
-        // Ordena por data de liberação (os que liberam antes primeiro)
         allocationList.sort((a, b) => new Date(a.previsao_liberacao) - new Date(b.previsao_liberacao));
 
         res.json(allocationList);
@@ -312,7 +315,7 @@ exports.updateVehicleNextMission = async (req, res) => {
     try {
         const [v] = await db.query('SELECT operationalAssignment FROM vehicles WHERE id = ?', [vehicle_id]);
         let currentAssignment = v[0]?.operationalAssignment || {};
-        if (typeof currentAssignment === 'string') currentAssignment = JSON.parse(currentAssignment); // Safety
+        if (typeof currentAssignment === 'string') currentAssignment = JSON.parse(currentAssignment); 
         if (!currentAssignment) currentAssignment = {};
 
         currentAssignment.next_mission = {
@@ -330,7 +333,7 @@ exports.updateVehicleNextMission = async (req, res) => {
 
 exports.addCrmLog = async (req, res) => {
     const { obra_id, interaction_type, notes, agreed_action } = req.body;
-    const user_id = req.user?.id || null; // Pega do middleware
+    const user_id = req.user?.id || null; 
     try {
         await db.query(`INSERT INTO obra_crm_logs (obra_id, user_id, interaction_type, notes, agreed_action) VALUES (?, ?, ?, ?, ?)`, [obra_id, user_id, interaction_type, notes, agreed_action]);
         res.json({success: true});
@@ -340,7 +343,6 @@ exports.addCrmLog = async (req, res) => {
 exports.upsertContract = async (req, res) => {
     let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome } = req.body;
     
-    // Tratamento de nulos
     if (!data_inicio) data_inicio = null;
     if (!data_fim_contratual) data_fim_contratual = null;
 
