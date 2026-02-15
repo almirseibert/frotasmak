@@ -15,6 +15,8 @@ const sumLegacyHours = (jsonInput) => {
 
 const addBusinessDays = (startDate, daysToAdd) => {
     let currentDate = new Date(startDate);
+    if (isNaN(currentDate.getTime())) currentDate = new Date();
+    
     // Proteção de loop
     if (daysToAdd > 5000) daysToAdd = 5000; 
     
@@ -35,34 +37,26 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // 1. DASHBOARD MACRO (Visão Geral)
 exports.getDashboardData = async (req, res) => {
     try {
-        // Busca apenas obras ativas
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
         
-        // Buscas Auxiliares
         let contracts = [];
         try { const [r] = await db.query('SELECT * FROM obra_contracts'); contracts = r || []; } catch (e) {}
-        
-        // Mapeamento de contratos
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
 
-        // Agregação de dados para o dashboard (simplificado para performance)
         const dashboardData = await Promise.all(allObras.map(async (obra) => {
             const obraId = String(obra.id);
             const contract = contractMap[obra.id] || {};
 
-            // 1. Definição de Totais (Prioridade: Contrato > Legado > 0)
             let horasContratadas = parseFloat(contract.total_hours_contracted) || sumLegacyHours(obra.horasContratadasPorTipo);
             let valorTotal = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
             
-            // 2. Executado (Total Geral)
             const [logs] = await db.query('SELECT SUM(totalHours) as total FROM daily_work_logs WHERE obraId = ?', [obraId]);
             const horasExecutadas = parseFloat(logs[0]?.total) || 0;
             
             const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [obraId]);
             const totalGasto = parseFloat(expenses[0]?.total) || 0;
 
-            // 3. CÁLCULO INTELIGENTE DE PREVISÃO (Janela de 10 dias)
-            // Busca produtividade dos últimos 10 dias de registro
+            // CÁLCULO INTELIGENTE DE PREVISÃO (Janela de 15 dias para suavizar)
             const [recentLogs] = await db.query(`
                 SELECT vehicleId, date, SUM(totalHours) as daily_hours
                 FROM daily_work_logs 
@@ -71,7 +65,6 @@ exports.getDashboardData = async (req, res) => {
                 GROUP BY vehicleId, date
             `, [obraId]);
 
-            // Calcula média diária POR MÁQUINA ativa
             const vehicleAverages = {};
             recentLogs.forEach(log => {
                 if (!vehicleAverages[log.vehicleId]) vehicleAverages[log.vehicleId] = [];
@@ -85,13 +78,11 @@ exports.getDashboardData = async (req, res) => {
                 capacidadeDiariaCanteiro += avg;
             });
 
-            // Fallback: Se não tiver dados recentes, usa regra de bolso (8h * num_maquinas)
             if (capacidadeDiariaCanteiro === 0) {
                 const [veiculosAtivos] = await db.query(`SELECT COUNT(id) as qtd FROM vehicles WHERE obraAtualId = ?`, [obraId]);
                 capacidadeDiariaCanteiro = (veiculosAtivos[0]?.qtd || 1) * 8; 
             }
 
-            // 4. Previsão Final
             const saldoHoras = horasContratadas - horasExecutadas;
             let diasRestantes = 0;
             let previsaoTermino = new Date();
@@ -114,7 +105,7 @@ exports.getDashboardData = async (req, res) => {
                     horas_executadas: horasExecutadas,
                     percentual_conclusao: parseFloat(percConclusao.toFixed(1)),
                     dias_restantes_estimados: diasRestantes,
-                    capacidade_diaria_atual: capacidadeDiariaCanteiro, // O ritmo atual
+                    capacidade_diaria_atual: capacidadeDiariaCanteiro,
                     status_cor: getStatusColor(percConclusao)
                 },
                 previsao: {
@@ -123,7 +114,9 @@ exports.getDashboardData = async (req, res) => {
             };
         }));
 
+        // ORDENAÇÃO: Obras que terminam antes aparecem primeiro
         dashboardData.sort((a, b) => new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada));
+        
         res.json(dashboardData);
 
     } catch (error) {
@@ -132,75 +125,59 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
-// 2. DETALHES COMPLETOS (Financeiro + Previsão + Desmobilização)
+// 2. DETALHES DA OBRA (Com CRM e Financeiro Agrupado)
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
-        // --- DADOS BÁSICOS ---
         const [obraRes] = await db.query('SELECT * FROM obras WHERE id = ?', [id]);
         if (!obraRes.length) return res.status(404).json({message: 'Obra não encontrada'});
         const obra = obraRes[0];
 
         const [contractRes] = await db.query('SELECT * FROM obra_contracts WHERE obra_id = ?', [id]);
         let contract = contractRes[0] || {};
-
-        // Unificação de Dados (Contrato vs Legado)
+        
+        // Prioriza dados do contrato, fallback para dados da obra
         contract.total_value = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
         contract.total_hours_contracted = parseFloat(contract.total_hours_contracted) || sumLegacyHours(obra.horasContratadasPorTipo);
         contract.start_date = contract.start_date || obra.dataInicio;
 
-        // --- FINANCEIRO AVANÇADO ---
-        // Despesas por Categoria
-        const [expensesCategory] = await db.query(`
-            SELECT category, SUM(amount) as total 
-            FROM expenses 
-            WHERE obraId = ? 
-            GROUP BY category
-        `, [id]);
-        
+        const [expensesCategory] = await db.query(`SELECT category, SUM(amount) as total FROM expenses WHERE obraId = ? GROUP BY category`, [id]);
         const totalDespesas = expensesCategory.reduce((acc, curr) => acc + parseFloat(curr.total), 0);
 
-        // --- CÉREBRO MATEMÁTICO (Capacidade Produtiva) ---
-        // 1. Média dos últimos 10 dias
+        // Capacidade Produtiva e Previsão
         const [recentActivity] = await db.query(`
             SELECT date, SUM(totalHours) as total_dia
             FROM daily_work_logs 
-            WHERE obraId = ? 
-            AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
-            GROUP BY date
-            ORDER BY date ASC
+            WHERE obraId = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
+            GROUP BY date ORDER BY date ASC
         `, [id]);
 
-        // Média Móvel Simples
         let mediaDiariaObra = 0;
         if (recentActivity.length > 0) {
-            const somaTotalRecente = recentActivity.reduce((acc, cur) => acc + parseFloat(cur.total_dia), 0);
-            mediaDiariaObra = somaTotalRecente / recentActivity.length;
+            const somaTotal = recentActivity.reduce((acc, cur) => acc + parseFloat(cur.total_dia), 0);
+            mediaDiariaObra = somaTotal / recentActivity.length;
         }
 
-        // --- LOGICA DE DESMOBILIZAÇÃO POR MÁQUINA ---
-        // Buscar veículos e calcular quando CADA UM deve sair baseado na média individual
-        const [vehicles] = await db.query(`
-            SELECT v.id, v.placa, v.modelo, v.tipo, v.operationalAssignment
-            FROM vehicles v 
-            WHERE v.obraAtualId = ?
+        // Histórico de CRM/Diário
+        const [crmHistory] = await db.query(`
+            SELECT c.*, u.name as supervisor_name 
+            FROM obra_crm_logs c 
+            LEFT JOIN users u ON c.user_id = u.id 
+            WHERE c.obra_id = ? 
+            ORDER BY c.created_at DESC
         `, [id]);
 
+        // Veículos e Previsões Individuais
+        const [vehicles] = await db.query('SELECT id, placa, modelo, tipo, operationalAssignment FROM vehicles WHERE obraAtualId = ?', [id]);
+        
         const machinePredictions = await Promise.all(vehicles.map(async (v) => {
-            // Média individual desta máquina
             const [myLogs] = await db.query(`
                 SELECT SUM(totalHours) / COUNT(DISTINCT date) as media_individual
-                FROM daily_work_logs
-                WHERE vehicleId = ? AND obraId = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
+                FROM daily_work_logs WHERE vehicleId = ? AND obraId = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
             `, [v.id, id]);
             
             const mediaIndividual = parseFloat(myLogs[0]?.media_individual) || 0;
             
-            // Lógica Simplificada de Saída:
-            // Assumimos que todas as máquinas trabalham até o fim do "Saldo de Horas" global da obra
-            // Ou, se houver alocação específica, usaríamos isso. Aqui usaremos a data final da obra.
-            
-            // Ler JSON de próxima alocação (se existir)
             let nextAllocation = {};
             try {
                 if (v.operationalAssignment && typeof v.operationalAssignment === 'object') {
@@ -216,15 +193,12 @@ exports.getObraDetails = async (req, res) => {
             };
         }));
 
-        // --- KPI FINAL ---
         const [totalHoursRes] = await db.query('SELECT SUM(totalHours) as total FROM daily_work_logs WHERE obraId = ?', [id]);
         const horasExecutadas = parseFloat(totalHoursRes[0]?.total) || 0;
         
-        // Status de Faturamento
-        // Valor Produzido (Medição Física) = % Executado * Valor Contrato
         const percExecucaoFisica = contract.total_hours_contracted > 0 ? (horasExecutadas / contract.total_hours_contracted) : 0;
         const valorProduzidoEstimado = percExecucaoFisica * contract.total_value;
-        const valorPendenteFaturamento = Math.max(0, valorProduzidoEstimado - totalDespesas); // Assumindo despesa como pago, ajuste conforme necessidade real
+        const valorPendenteFaturamento = Math.max(0, valorProduzidoEstimado - totalDespesas);
 
         res.json({
             obra,
@@ -237,12 +211,13 @@ exports.getObraDetails = async (req, res) => {
                 pendente_faturamento: valorPendenteFaturamento
             },
             producao: {
-                media_diaria_atual: mediaDiariaObra, // Média do canteiro (ritmo)
+                media_diaria_atual: mediaDiariaObra,
                 dias_analisados: recentActivity.length,
-                saldo_horas: contract.total_hours_contracted - horasExecutadas
+                saldo_horas: contract.total_hours_contracted - horasExecutadas,
+                horas_executadas: horasExecutadas
             },
             veiculos: machinePredictions,
-            burnup: recentActivity // Para gráfico
+            crm_history: crmHistory
         });
 
     } catch (error) {
@@ -251,18 +226,95 @@ exports.getObraDetails = async (req, res) => {
     }
 };
 
-// 3. ATUALIZAR PRÓXIMA ALOCAÇÃO (Desmobilização)
+// 3. NOVA ROTA: PREVISÃO DE ALOCAÇÃO GLOBAL (Para a nova página)
+exports.getAllocationForecast = async (req, res) => {
+    try {
+        // Busca todos os veículos alocados em obras ativas
+        const [vehicles] = await db.query(`
+            SELECT v.id, v.placa, v.modelo, v.tipo, v.obraAtualId, o.nome as nome_obra, v.operationalAssignment
+            FROM vehicles v
+            JOIN obras o ON v.obraAtualId = o.id
+            WHERE o.status = 'ativa'
+        `);
+
+        // Precisa calcular o saldo da obra de cada veículo para estimar a saída
+        // Otimização: Calcular saldo de todas as obras primeiro
+        const [obrasStats] = await db.query(`
+            SELECT 
+                o.id, 
+                o.nome,
+                oc.total_hours_contracted,
+                o.horasContratadasPorTipo,
+                (SELECT SUM(totalHours) FROM daily_work_logs WHERE obraId = o.id) as executed
+            FROM obras o
+            LEFT JOIN obra_contracts oc ON o.id = oc.obra_id
+            WHERE o.status = 'ativa'
+        `);
+
+        const obraMap = {};
+        for (const o of obrasStats) {
+            // Calcula capacidade produtiva recente da obra
+             const [recentLogs] = await db.query(`
+                SELECT SUM(totalHours) as total, COUNT(DISTINCT date) as days
+                FROM daily_work_logs 
+                WHERE obraId = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
+            `, [o.id]);
+            
+            const ritmoDiario = (recentLogs[0]?.total || 0) / (recentLogs[0]?.days || 1);
+            
+            let totalHoras = parseFloat(o.total_hours_contracted) || sumLegacyHours(o.horasContratadasPorTipo);
+            let executado = parseFloat(o.executed) || 0;
+            let saldo = totalHoras - executado;
+            let diasRestantes = (saldo > 0 && ritmoDiario > 0) ? Math.ceil(saldo / ritmoDiario) : 0;
+            
+            obraMap[o.id] = {
+                saldo,
+                ritmoDiario,
+                previsaoSaida: addBusinessDays(new Date(), diasRestantes)
+            };
+        }
+
+        const allocationList = vehicles.map(v => {
+            const obraStat = obraMap[v.obraAtualId] || { previsaoSaida: new Date() };
+            
+            let nextMission = {};
+            try { if(v.operationalAssignment) nextMission = v.operationalAssignment.next_mission || {}; } catch(e){}
+
+            // Data de liberação: Prioriza manual, senão usa cálculo da obra
+            const calculatedDate = obraStat.previsaoSaida;
+            const manualDate = nextMission.release_date ? new Date(nextMission.release_date) : null;
+
+            return {
+                id: v.id,
+                modelo: v.modelo,
+                placa: v.placa,
+                tipo: v.tipo,
+                obra_atual: v.nome_obra,
+                previsao_liberacao: manualDate || calculatedDate,
+                is_manual: !!manualDate,
+                proximo_destino: nextMission.location || 'A Definir'
+            };
+        });
+
+        // Ordena por data de liberação (os que liberam antes primeiro)
+        allocationList.sort((a, b) => new Date(a.previsao_liberacao) - new Date(b.previsao_liberacao));
+
+        res.json(allocationList);
+
+    } catch (error) {
+        console.error("Erro Allocation Forecast:", error);
+        res.status(500).json({message: error.message});
+    }
+};
+
 exports.updateVehicleNextMission = async (req, res) => {
     const { vehicle_id, next_location, release_date } = req.body;
     try {
-        // Buscar assignment atual para não perder dados
         const [v] = await db.query('SELECT operationalAssignment FROM vehicles WHERE id = ?', [vehicle_id]);
         let currentAssignment = v[0]?.operationalAssignment || {};
-        
-        if (typeof currentAssignment === 'string') currentAssignment = JSON.parse(currentAssignment);
+        if (typeof currentAssignment === 'string') currentAssignment = JSON.parse(currentAssignment); // Safety
         if (!currentAssignment) currentAssignment = {};
 
-        // Atualiza a chave next_mission
         currentAssignment.next_mission = {
             location: next_location,
             release_date: release_date,
@@ -276,10 +328,9 @@ exports.updateVehicleNextMission = async (req, res) => {
     }
 };
 
-// Rotas auxiliares (mantidas do original)
 exports.addCrmLog = async (req, res) => {
     const { obra_id, interaction_type, notes, agreed_action } = req.body;
-    const user_id = req.user?.userId || null;
+    const user_id = req.user?.id || null; // Pega do middleware
     try {
         await db.query(`INSERT INTO obra_crm_logs (obra_id, user_id, interaction_type, notes, agreed_action) VALUES (?, ?, ?, ?, ?)`, [obra_id, user_id, interaction_type, notes, agreed_action]);
         res.json({success: true});
@@ -287,8 +338,9 @@ exports.addCrmLog = async (req, res) => {
 };
 
 exports.upsertContract = async (req, res) => {
-    // Mesma lógica do seu arquivo original para salvar configurações
     let { obra_id, valor_total, horas_totais, data_inicio, data_fim_contratual, fiscal_nome, responsavel_nome } = req.body;
+    
+    // Tratamento de nulos
     if (!data_inicio) data_inicio = null;
     if (!data_fim_contratual) data_fim_contratual = null;
 
