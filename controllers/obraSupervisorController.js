@@ -17,14 +17,12 @@ const addBusinessDays = (startDate, daysToAdd) => {
     let currentDate = new Date(startDate);
     if (isNaN(currentDate.getTime())) currentDate = new Date();
     
-    // Proteção de loop
     if (daysToAdd > 5000) daysToAdd = 5000; 
     
     let count = 0;
     while (count < daysToAdd) {
         currentDate.setDate(currentDate.getDate() + 1);
         const dayOfWeek = currentDate.getDay();
-        // 0 = Domingo, 6 = Sábado
         if (dayOfWeek !== 0 && dayOfWeek !== 6) count++;
     }
     return currentDate;
@@ -34,7 +32,6 @@ const addBusinessDays = (startDate, daysToAdd) => {
 // CONTROLADORES
 // ==================================================================================
 
-// 1. DASHBOARD MACRO (Visão Geral)
 exports.getDashboardData = async (req, res) => {
     try {
         const [allObras] = await db.query('SELECT * FROM obras WHERE status = "ativa"');
@@ -56,7 +53,6 @@ exports.getDashboardData = async (req, res) => {
             const [expenses] = await db.query('SELECT SUM(amount) as total FROM expenses WHERE obraId = ?', [obraId]);
             const totalGasto = parseFloat(expenses[0]?.total) || 0;
 
-            // CÁLCULO INTELIGENTE DE PREVISÃO
             const [recentLogs] = await db.query(`
                 SELECT vehicleId, date, SUM(totalHours) as daily_hours
                 FROM daily_work_logs 
@@ -110,7 +106,7 @@ exports.getDashboardData = async (req, res) => {
                     dias_restantes_estimados: diasRestantes,
                     capacidade_diaria_atual: capacidadeDiariaCanteiro,
                     status_cor: getStatusColor(percConclusao),
-                    is_critical: isZonaAditivo || (diasRestantes < 15 && diasRestantes > 0) // Flag para ordenação
+                    is_critical: isZonaAditivo || (diasRestantes < 15 && diasRestantes > 0)
                 },
                 previsao: {
                     data_termino_estimada: previsaoTermino
@@ -118,16 +114,9 @@ exports.getDashboardData = async (req, res) => {
             };
         }));
 
-        // ORDENAÇÃO ATUALIZADA:
-        // 1. Obras Críticas (Zona Aditivo ou < 15 dias) primeiro.
-        // 2. Depois por Data de Término mais próxima.
         dashboardData.sort((a, b) => {
-            // Se A é crítico e B não, A vem primeiro (-1)
             if (a.kpi.is_critical && !b.kpi.is_critical) return -1;
-            // Se B é crítico e A não, B vem primeiro (1)
             if (!a.kpi.is_critical && b.kpi.is_critical) return 1;
-            
-            // Se ambos forem iguais em criticidade, ordena por data de término
             return new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada);
         });
         
@@ -139,7 +128,6 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
-// ... (Resto das funções getObraDetails, getAllocationForecast, etc permanecem iguais ao último arquivo válido) ...
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
@@ -178,15 +166,24 @@ exports.getObraDetails = async (req, res) => {
             ORDER BY c.created_at DESC
         `, [id]);
 
-        const [vehicles] = await db.query('SELECT id, placa, modelo, tipo, operationalAssignment FROM vehicles WHERE obraAtualId = ?', [id]);
+        // ATUALIZAÇÃO AQUI: Buscar dados completos dos veículos
+        const [vehicles] = await db.query('SELECT id, placa, modelo, tipo, marca, operationalAssignment FROM vehicles WHERE obraAtualId = ?', [id]);
         
         const machinePredictions = await Promise.all(vehicles.map(async (v) => {
+            // Média recente
             const [myLogs] = await db.query(`
                 SELECT SUM(totalHours) / COUNT(DISTINCT date) as media_individual
                 FROM daily_work_logs WHERE vehicleId = ? AND obraId = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
             `, [v.id, id]);
             
+            // Total Acumulado na Obra (para o PDF)
+            const [totalLogs] = await db.query(`
+                SELECT SUM(totalHours) as total_absoluto
+                FROM daily_work_logs WHERE vehicleId = ? AND obraId = ?
+            `, [v.id, id]);
+
             const mediaIndividual = parseFloat(myLogs[0]?.media_individual) || 0;
+            const totalIndividual = parseFloat(totalLogs[0]?.total_absoluto) || 0;
             
             let nextAllocation = {};
             try {
@@ -198,6 +195,7 @@ exports.getObraDetails = async (req, res) => {
             return {
                 ...v,
                 media_diaria: mediaIndividual,
+                total_executado: totalIndividual, // Campo novo para o PDF
                 proximo_destino: nextAllocation.location || '',
                 data_liberacao_manual: nextAllocation.release_date || null
             };
