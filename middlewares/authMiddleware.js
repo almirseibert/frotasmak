@@ -35,18 +35,33 @@ const authMiddleware = async (req, res, next) => {
         }
 
         const user = users[0];
+        
+        // Normaliza o papel do usuário (role ou user_type)
+        const userRole = (user.role || user.user_type || '').toLowerCase();
 
         // 4. Anexar o payload atualizado à requisição
         req.user = {
             id: user.id,
             email: user.email,
-            role: user.role || user.user_type, // Normalização de campos
+            role: userRole, 
             user_type: user.user_type || user.role,
             canAccessRefueling: user.canAccessRefueling === 1,
             bloqueado_abastecimento: user.bloqueado_abastecimento === 1
         };
+
+        // 5. VERIFICAÇÃO DE ACESSO AO MÓDULO SUPERVISOR
+        // Se a rota acessada contiver "/supervisor", exige permissão específica
+        if (req.originalUrl && req.originalUrl.includes('/supervisor')) {
+            const allowedRoles = ['admin', 'supervisor'];
+            
+            if (!allowedRoles.includes(userRole)) {
+                return res.status(403).json({ 
+                    error: 'Acesso negado. Apenas Supervisores e Administradores podem acessar este módulo.' 
+                });
+            }
+        }
         
-        // 5. Continuar para a próxima função/rota
+        // 6. Continuar para a próxima função/rota
         next();
     } catch (err) {
         console.error("Erro authMiddleware:", err.message);
