@@ -1,651 +1,835 @@
-// controllers/refuelingController.js
-const db = require('../database');
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const multer = require('multer');
-const nodemailer = require('nodemailer');
+import React, { useState, useEffect, useMemo } from 'react';
+import { X, Loader, Info, Lock, FileText, Wallet, Edit, Clock, Activity, TrendingUp, Mail, Send } from 'lucide-react';
+import { getAllowedReadingTypes } from '../../utils/vehicleRules';
 
-// --- CONFIGURAÇÃO NODEMAILER ---
-// Configure as variáveis no seu arquivo .env para segurança
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port: process.env.EMAIL_PORT || 587,
-    secure: false, // true para 465, false para outras portas
-    auth: {
-        user: process.env.EMAIL_USER || 'seu-email@exemplo.com',
-        pass: process.env.EMAIL_PASS || 'sua-senha-de-app' // Use Senha de App
-    },
-    tls: {
-        rejectUnauthorized: false
-    }
-});
+const RefuelingOrderModal = ({
+    user,
+    orderToEdit,
+    vehicles = [],
+    obras = [],
+    partners = [],
+    employees = [],
+    refuelings = [], 
+    expenses = [], 
+    onClose,
+    setAlertMessage,
+    onGeneratePDF,
+    extraObraOptions = [],
+    ConfirmationModal,
+    PasswordConfirmationModal,
+    vehicleGroups = {},
+    apiClient,
+    reloadData,
+    solicitacaoData = null 
+}) => {
+    
+    // --- HELPERS DE DATA ---
+    const isValidDbDate = (dateString) => {
+        if (!dateString) return false;
+        const str = String(dateString);
+        return str.length > 5 && !str.startsWith('0000') && str !== '1970-01-01T00:00:00.000Z';
+    };
 
-// --- CONFIGURAÇÃO MULTER (UPLOAD COM AUTO-LIMPEZA) ---
+    const getSafeDateObj = (dateInput) => {
+        if (!isValidDbDate(dateInput)) return new Date(0);
+        try {
+            let dateStr = String(dateInput);
+            if (dateStr.includes(' ') && !dateStr.includes('T')) dateStr = dateStr.replace(' ', 'T');
+            const d = new Date(dateStr);
+            return isNaN(d.getTime()) ? new Date(0) : d;
+        } catch { return new Date(0); }
+    };
 
-// Função para limpar arquivos antigos (> 30 dias)
-const cleanupOldFiles = (directory) => {
-    fs.readdir(directory, (err, files) => {
-        if (err) return console.error("Erro ao ler diretório para limpeza:", err);
+    const formatDateDisplay = (dateInput) => {
+        if (!isValidDbDate(dateInput)) return 'N/A';
+        try {
+            let dateStr = String(dateInput);
+            if (dateStr.includes(' ') && !dateStr.includes('T')) dateStr = dateStr.replace(' ', 'T');
+            const date = new Date(dateStr);
+            if (isNaN(date.getTime())) return 'Data Inválida';
+            return new Date(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()).toLocaleDateString('pt-BR');
+        } catch { return 'Erro'; }
+    };
 
-        const now = Date.now();
-        const maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias em milissegundos
+    // Helper ROBUSTO para normalizar tipo de combustível
+    const normalizeFuelType = (val) => {
+        if (!val) return '';
+        const v = val.toString().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+        
+        const map = {
+            'DIESEL S10': 'dieselS10',
+            'DIESEL S-10': 'dieselS10',
+            'DIESEL S500': 'dieselS500',
+            'DIESEL S-500': 'dieselS500',
+            'GASOLINA COMUM': 'gasolinaComum',
+            'GASOLINA': 'gasolinaComum', 
+            'GASOLINA ADITIVADA': 'gasolinaAditivada',
+            'ETANOL': 'etanol',
+            'ARLA 32': 'arla32',
+            'ARLA': 'arla32'
+        };
 
-        files.forEach(file => {
-            const filePath = path.join(directory, file);
-            fs.stat(filePath, (err, stats) => {
-                if (err) return;
-                if (now - stats.mtime.getTime() > maxAge) {
-                    fs.unlink(filePath, (err) => {
-                        if (err) console.error(`Erro ao deletar arquivo antigo ${file}:`, err);
-                    });
-                }
-            });
-        });
+        if (map[v]) return map[v];
+        if (v.includes('S10') || v.includes('S-10')) return 'dieselS10';
+        if (v.includes('S500') || v.includes('S-500')) return 'dieselS500';
+        if (v.includes('ADITIVADA')) return 'gasolinaAditivada';
+        if (v.includes('GASOLINA')) return 'gasolinaComum';
+        if (v.includes('DIESEL')) return 'dieselS10';
+        if (v.includes('ETANOL')) return 'etanol';
+
+        return '';
+    };
+
+    // --- ESTADOS ---
+    const [formData, setFormData] = useState({
+        vehicleId: '',
+        partnerId: '',
+        obraId: '',
+        employeeId: '',
+        date: new Date().toISOString().split('T')[0],
+        odometro: '',
+        horimetro: '',
+        isFillUp: false,
+        litrosLiberados: '',
+        fuelType: '',
+        needsArla: false,
+        isFillUpArla: false,
+        litrosLiberadosArla: '',
+        outros: '',
+        outrosGeraValor: false,
+        outrosValor: '',
     });
-};
 
-const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        // Caminho para salvar os arquivos
-        const uploadPath = path.join(__dirname, '../public/uploads/orders');
-        
-        // Garante que a pasta existe
-        if (!fs.existsSync(uploadPath)){
-            fs.mkdirSync(uploadPath, { recursive: true });
-        }
-        
-        // Executa limpeza assíncrona
-        cleanupOldFiles(uploadPath);
-
-        cb(null, uploadPath);
-    },
-    filename: function (req, file, cb) {
-        // Nome único e seguro para o arquivo
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, 'order-' + uniqueSuffix + '.pdf');
-    }
-});
-
-const upload = multer({ storage: storage });
-
-// --- HELPERS ---
-const safeNum = (val, returnZero = false) => {
-    if (val === null || typeof val === 'undefined' || val === '') {
-        return returnZero ? 0 : null;
-    }
-    const num = parseFloat(val);
-    return isNaN(num) ? (returnZero ? 0 : null) : num;
-};
-
-const parseJsonSafe = (field) => {
-    if (!field) return null;
-    if (typeof field === 'object') return field;
-    try {
-        return JSON.parse(field);
-    } catch (e) {
-        return null;
-    }
-};
-
-const parseRefuelingRows = (rows) => {
-    return rows.map(row => ({
-        ...row,
-        createdBy: parseJsonSafe(row.createdBy),
-        confirmedBy: parseJsonSafe(row.confirmedBy),
-        editedBy: parseJsonSafe(row.editedBy),
-        litrosAbastecidos: row.litrosAbastecidos ? parseFloat(row.litrosAbastecidos) : 0,
-        pricePerLiter: row.pricePerLiter ? parseFloat(row.pricePerLiter) : 0,
-        outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
-        outrosGeraValor: !!row.outrosGeraValor,
-        invoiceNumber: row.invoiceNumber || null 
-    }));
-};
-
-// --- ATUALIZAÇÃO DE DESPESAS MENSAIS ---
-const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
-    if (!obraId || !partnerId || !fuelType || !dateInput) return;
-
-    const [obraCheck] = await connection.execute('SELECT id FROM obras WHERE id = ?', [obraId]);
-    if (obraCheck.length === 0) return; 
-
-    const dateObj = new Date(dateInput);
-    const month = dateObj.getMonth();
-    const year = dateObj.getFullYear();
-    const startDate = new Date(year, month, 1);
-    const endDate = new Date(year, month + 1, 0, 23, 59, 59);
-
-    const [partners] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
-    const partnerName = partners[0]?.razaoSocial || 'Posto Desconhecido';
-
-    const querySum = `
-        SELECT SUM(
-            (COALESCE(litrosAbastecidos, 0) * COALESCE(pricePerLiter, 0)) + 
-            COALESCE(outrosValor, 0)
-        ) as total
-        FROM refuelings
-        WHERE obraId = ? 
-          AND partnerId = ? 
-          AND fuelType = ?
-          AND data BETWEEN ? AND ?
-          AND status = 'Concluída' -- Importante: Somar apenas concluídas para não duplicar valores pendentes
-    `;
-
-    const [rows] = await connection.execute(querySum, [obraId, partnerId, fuelType, startDate, endDate]);
-    const totalAmount = rows[0]?.total || 0;
-
-    const monthName = startDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
-    const description = `Combustível: ${fuelType} - ${partnerName} (${monthName})`;
-
-    const [existingExpense] = await connection.execute(
-        'SELECT id FROM expenses WHERE obraId = ? AND description = ?',
-        [obraId, description]
-    );
-
-    if (totalAmount > 0) {
-        if (existingExpense.length > 0) {
-            await connection.execute(
-                'UPDATE expenses SET amount = ?, weekStartDate = ? WHERE id = ?',
-                [totalAmount, startDate, existingExpense[0].id]
-            );
-        } else {
-            const newId = crypto.randomUUID();
-            await connection.execute(
-                `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, weekStartDate, partnerName, fuelType)
-                 VALUES (?, ?, ?, ?, 'Combustível', NOW(), ?, ?, ?)`,
-                [newId, obraId, description, totalAmount, startDate, partnerName, fuelType]
-            );
-        }
-    } else {
-        if (existingExpense.length > 0) {
-            await connection.execute('DELETE FROM expenses WHERE id = ?', [existingExpense[0].id]);
-        }
-    }
-};
-
-// --- CONTROLLER DE UPLOAD ---
-const uploadOrderPdf = async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
-        }
-        const fileUrl = `/uploads/orders/${req.file.filename}`;
-        // Retorna também o filename para facilitar o envio de email (localizar no disco)
-        res.json({ url: fileUrl, filename: req.file.filename });
-    } catch (error) {
-        console.error('Erro no upload do PDF:', error);
-        res.status(500).json({ error: 'Falha ao salvar PDF no servidor.' });
-    }
-};
-
-// --- NOVO: CONTROLLER DE ENVIO DE EMAIL ---
-const sendOrderEmail = async (req, res) => {
-    const { orderData, partnerEmail, pdfFilename, pdfUrl } = req.body;
-
-    if (!partnerEmail) {
-        return res.status(400).json({ error: 'Email do destinatário não informado.' });
-    }
-
-    try {
-        // Tenta localizar o arquivo físico para anexo
-        // O pdfFilename vem do retorno do uploadOrderPdf
-        let filenameToUse = pdfFilename;
-        if (!filenameToUse && pdfUrl) {
-            filenameToUse = path.basename(pdfUrl);
-        }
-
-        const filePath = path.join(__dirname, '../public/uploads/orders', filenameToUse);
-        
-        let attachments = [];
-        if (fs.existsSync(filePath)) {
-            attachments.push({
-                filename: `Autorizacao_${orderData.authNumber}.pdf`,
-                path: filePath
+    // Efeito para Inicialização de Dados
+    useEffect(() => {
+        if (orderToEdit && orderToEdit.id && orderToEdit.id !== 'PREVIEW') {
+            setFormData({
+                vehicleId: orderToEdit.vehicleId || '',
+                partnerId: orderToEdit.partnerId || '',
+                obraId: orderToEdit.obraId || '',
+                employeeId: orderToEdit.employeeId || '',
+                date: orderToEdit.date 
+                    ? getSafeDateObj(orderToEdit.date).toISOString().split('T')[0] 
+                    : new Date().toISOString().split('T')[0],
+                odometro: orderToEdit.odometro?.toString() || '',
+                horimetro: orderToEdit.horimetro?.toString() || '',
+                isFillUp: orderToEdit.isFillUp || false,
+                litrosLiberados: orderToEdit.litrosLiberados?.toString() || '',
+                fuelType: orderToEdit.fuelType || '',
+                needsArla: orderToEdit.needsArla || false,
+                isFillUpArla: orderToEdit.isFillUpArla || false,
+                litrosLiberadosArla: orderToEdit.litrosLiberadosArla?.toString() || '',
+                outros: orderToEdit.outros || '',
+                outrosGeraValor: orderToEdit.outrosGeraValor || false,
+                outrosValor: orderToEdit.outrosValor?.toString() || '',
             });
+        } else if (solicitacaoData) {
+            setFormData({
+                vehicleId: solicitacaoData.veiculo_id || '',
+                partnerId: solicitacaoData.posto_id || '',
+                obraId: solicitacaoData.obra_id || '',
+                employeeId: solicitacaoData.funcionario_id || '',
+                date: new Date().toISOString().split('T')[0],
+                odometro: solicitacaoData.odometro_informado?.toString() || '',
+                horimetro: solicitacaoData.horimetro_informado?.toString() || '',
+                isFillUp: !!solicitacaoData.flag_tanque_cheio,
+                litrosLiberados: solicitacaoData.litragem_solicitada?.toString() || '',
+                fuelType: normalizeFuelType(solicitacaoData.tipo_combustivel),
+                needsArla: solicitacaoData.observacao && solicitacaoData.observacao.toUpperCase().includes('ARLA') ? true : false,
+                isFillUpArla: false,
+                litrosLiberadosArla: '',
+                outros: solicitacaoData.observacao || '',
+                outrosGeraValor: false,
+                outrosValor: '',
+            });
+        }
+    }, [orderToEdit, solicitacaoData]);
+
+    const [isSaving, setIsSaving] = useState(false);
+    const [blockReason, setBlockReason] = useState(null); 
+    const [budgetWarning, setBudgetWarning] = useState(null);
+    const [requiresBudgetOverride, setRequiresBudgetOverride] = useState(false);
+    
+    const [showPasswordModal, setShowPasswordModal] = useState(false);
+    const [passwordAction, setPasswordAction] = useState(null); 
+    
+    const [warnings, setWarnings] = useState([]); 
+    const [lastRefuelData, setLastRefuelData] = useState(null);
+    const [lastAverage, setLastAverage] = useState(null); 
+    const [obraStatus, setObraStatus] = useState(null);
+
+    const isEditing = !!orderToEdit && !!orderToEdit.id && orderToEdit.id !== 'PREVIEW';
+    const isSolicitacao = !!solicitacaoData;
+
+    // --- CÁLCULO DE PROGRESSO FINANCEIRO ---
+    useEffect(() => {
+        if (formData.obraId && obras.length > 0) { 
+            const obra = obras.find(o => o.id === formData.obraId);
+            
+            if (!obra || (extraObraOptions && extraObraOptions.includes(formData.obraId))) {
+                setObraStatus(null);
+                return;
+            }
+
+            const totalFuelExpenses = expenses
+                .filter(e => e.obraId === formData.obraId && (e.category === 'Combustível' || e.fuelType))
+                .reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
+
+            const valorTotalObra = parseFloat(obra.valorTotalContrato || obra.valorContrato || 0);
+            
+            if (valorTotalObra > 0) {
+                const percentual = (totalFuelExpenses / valorTotalObra) * 100;
+                setObraStatus({
+                    totalGasto: totalFuelExpenses,
+                    valorContrato: valorTotalObra,
+                    percentual: percentual
+                });
+            } else {
+                setObraStatus(null);
+            }
         } else {
-            console.warn(`Arquivo PDF não encontrado no disco para anexo: ${filePath}`);
-            // Se não achar o arquivo, enviaremos apenas o link no corpo do email
+            setObraStatus(null);
+        }
+    }, [formData.obraId, obras, expenses, extraObraOptions]);
+
+
+    const sortedVehicles = useMemo(() => [...vehicles].sort((a,b) => (a.registroInterno || '').localeCompare(b.registroInterno || '')), [vehicles]);
+    const sortedEmployees = useMemo(() => [...employees].sort((a,b) => (a.nome || '').localeCompare(b.nome || '')), [employees]);
+    const sortedPartners = useMemo(() => [...partners].sort((a,b) => (a.razaoSocial || '').localeCompare(b.razaoSocial || '')), [partners]);
+    const sortedObras = useMemo(() => [...obras].filter(o => o.status === 'ativa').sort((a,b) => (a.nome || '').localeCompare(b.nome || '')), [obras]);
+
+    // Helpers de Grupo (usando vehicleRules)
+    const selectedVehicle = useMemo(() => vehicles.find(v => v.id === formData.vehicleId), [formData.vehicleId, vehicles]);
+    
+    useEffect(() => {
+        if (selectedVehicle) {
+            const history = refuelings
+                .filter(r => r.vehicleId === selectedVehicle.id && r.status === 'Concluída')
+                .sort((a,b) => {
+                    const dateA = a.data || a.date;
+                    const dateB = b.data || b.date;
+                    return getSafeDateObj(dateB).getTime() - getSafeDateObj(dateA).getTime();
+                });
+            
+            const last = history[0];
+            setLastRefuelData(last);
+
+            if (!isEditing && !isSolicitacao) {
+                let autoEmployeeId = formData.employeeId;
+                let autoObraId = formData.obraId;
+
+                if (selectedVehicle.obraAtualId) {
+                    const obra = obras.find(o => o.id === selectedVehicle.obraAtualId);
+                    if (obra && obra.status === 'ativa') {
+                        autoObraId = selectedVehicle.obraAtualId;
+                        const alocacao = obra?.historicoVeiculos?.find(h => h.veiculoId === selectedVehicle.id && !h.dataSaida);
+                        if (alocacao?.employeeId) autoEmployeeId = alocacao.employeeId;
+                    }
+                }
+                
+                let autoPartnerId = formData.partnerId;
+                let autoFuelType = formData.fuelType;
+                let autoLitros = formData.litrosLiberados;
+
+                if (last) {
+                    autoPartnerId = last.partnerId || '';
+                    autoFuelType = last.fuelType || '';
+                    autoLitros = last.litrosAbastecidos ? last.litrosAbastecidos.toString() : '';
+                }
+
+                setFormData(prev => ({
+                    ...prev,
+                    employeeId: autoEmployeeId || prev.employeeId,
+                    obraId: autoObraId || prev.obraId,
+                    partnerId: autoPartnerId || prev.partnerId,
+                    fuelType: autoFuelType || prev.fuelType,
+                    litrosLiberados: autoLitros || prev.litrosLiberados,
+                    odometro: prev.odometro || selectedVehicle.odometro?.toString() || '',
+                    horimetro: prev.horimetro || selectedVehicle.horimetro?.toString() || ''
+                }));
+            }
+
+            const newWarnings = [];
+            if (selectedVehicle.naoPodeCircular) newWarnings.push("⚠️ 'NÃO PODE CIRCULAR'");
+            if (selectedVehicle.status === 'manutencao') newWarnings.push("🔧 Em manutenção.");
+            setWarnings(newWarnings);
+
+            if (last && history[1]) {
+                const prev = history[1];
+                const litros = parseFloat(last.litrosAbastecidos || 0);
+                let diff = 0;
+                let unit = 'Km/L';
+
+                const allowed = getAllowedReadingTypes(selectedVehicle.tipo);
+                if (allowed.includes('horimetro')) {
+                    const lastHr = parseFloat(last.horimetro || 0); 
+                    const prevHr = parseFloat(prev.horimetro || 0);
+                    diff = lastHr - prevHr;
+                    unit = 'L/Hr';
+                } else {
+                    const lastKm = parseFloat(last.odometro || 0);
+                    const prevKm = parseFloat(prev.odometro || 0);
+                    diff = lastKm - prevKm;
+                }
+
+                if (diff > 0 && litros > 0) {
+                    const avg = unit === 'Km/L' ? (diff / litros) : (litros / diff);
+                    setLastAverage(`${avg.toFixed(2)} ${unit}`);
+                } else {
+                    setLastAverage('Incalculável');
+                }
+            } else {
+                setLastAverage(null);
+            }
+        }
+    }, [selectedVehicle, obras, refuelings, isEditing, isSolicitacao]);
+
+    useEffect(() => {
+        setBlockReason(null);
+        if (!selectedVehicle) return;
+
+        const allowed = getAllowedReadingTypes(selectedVehicle.tipo);
+        const isKm = allowed.includes('odometro');
+        const isHr = allowed.includes('horimetro');
+
+        let reason = null;
+
+        if (isKm && formData.odometro) {
+            const current = parseFloat(formData.odometro);
+            const last = parseFloat(selectedVehicle.odometro || 0);
+
+            if (!isNaN(current) && last > 0) {
+                 if (current <= last) reason = `Odômetro (${current}) menor/igual ao atual (${last}).`;
+                 else if (current - last > 1000) reason = `Salto excessivo de Km (> 1000).`;
+            }
         }
 
-        const mailOptions = {
-            from: `"Frotas MAK" <${process.env.EMAIL_USER}>`,
-            to: partnerEmail,
-            subject: `Autorização de Abastecimento #${orderData.authNumber} - ${orderData.partnerName || 'Frotas MAK'}`,
-            html: `
-                <div style="font-family: Arial, sans-serif; color: #333;">
-                    <h2>Autorização de Abastecimento</h2>
-                    <p>Olá,</p>
-                    <p>Segue em anexo a autorização de abastecimento emitida pelo sistema Frotas MAK.</p>
+        if (isHr && formData.horimetro) {
+            const current = parseFloat(formData.horimetro);
+            let last = parseFloat(selectedVehicle.horimetro || 0);
+
+            if (!isNaN(current) && last > 0) {
+                if (current <= last) reason = `Horímetro (${current}) menor/igual ao atual (${last}).`;
+                else if (current - last > 50) reason = `Salto excessivo (> 50h).`;
+            }
+        }
+
+        if (reason) setBlockReason(reason);
+    }, [formData.odometro, formData.horimetro, selectedVehicle]);
+
+    useEffect(() => {
+        if (formData.obraId && obras.length > 0) {
+            const obra = obras.find(o => o.id === formData.obraId);
+            if (!obra || extraObraOptions.includes(formData.obraId)) {
+                setBudgetWarning(null);
+                setRequiresBudgetOverride(false);
+                return;
+            }
+
+            if (!obra.valorContrato || obra.valorContrato <= 0) {
+                setBudgetWarning(null);
+                setRequiresBudgetOverride(false);
+                return;
+            }
+
+            const totalFuelExpenses = expenses
+                .filter(e => e.obraId === formData.obraId && e.category === 'Combustível')
+                .reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
+
+            const limit = obra.valorContrato * 0.20; 
+            
+            if (totalFuelExpenses >= limit) {
+                setBudgetWarning(`Combustível atingiu 20% do contrato.`);
+                setRequiresBudgetOverride(true);
+            } else {
+                setBudgetWarning(null);
+                setRequiresBudgetOverride(false);
+            }
+        } else {
+            setBudgetWarning(null);
+            setRequiresBudgetOverride(false);
+        }
+    }, [formData.obraId, obras, expenses, extraObraOptions]);
+
+    const handleChange = (e) => {
+        const { name, value, type, checked } = e.target;
+        setFormData(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
+        if (name === 'isFillUp' && checked) setFormData(prev => ({ ...prev, litrosLiberados: '' }));
+    };
+
+    // --- LÓGICA DE DISTRIBUIÇÃO INTELIGENTE (AGORA COM MAILTO) ---
+    const processDistribution = async (orderData) => {
+        console.log(">>> [DEBUG] Iniciando Distribuição. Dados da Ordem:", orderData);
+
+        const vehicle = vehicles.find(v => v.id === formData.vehicleId);
+        const partner = partners.find(p => p.id === formData.partnerId);
+        const employee = employees.find(e => e.id === formData.employeeId);
+        
+        // 1. Dados Finais Formatados
+        const finalData = orderData || {
+            ...formData,
+            id: orderToEdit?.id || 'PREVIEW',
+            authNumber: orderToEdit?.authNumber || 'NOVA',
+            partnerName: partner?.razaoSocial,
+            vehicleInfo: `${vehicle?.modelo || ''} - ${vehicle?.placa || ''}`
+        };
+
+        // 2. Verificar se tem email
+        const partnerEmail = partner?.email;
+        const hasEmail = partnerEmail && partnerEmail.includes('@');
+
+        if (!onGeneratePDF) {
+            console.error("Função onGeneratePDF não fornecida.");
+            return;
+        }
+
+        try {
+            // 3. Gerar PDF Blob e Fazer Upload (Para obter Link)
+            const pdfBlob = await onGeneratePDF(finalData, vehicles, partners, employees, vehicleGroups, true);
+            
+            // Nome do Arquivo
+            const emissionDateStr = getSafeDateObj(finalData.date).toLocaleDateString('pt-BR');
+            const safeDate = emissionDateStr.replace(/\//g, '-');
+            const reCode = vehicle?.registroInterno || 'SN';
+            const pdfFileName = `Autorizacao_${finalData.authNumber}_RE${reCode}_${safeDate}.pdf`;
+
+            // 4. Upload do PDF (Necessário para gerar o link que vai no email)
+            const formDataUpload = new FormData();
+            formDataUpload.append('file', pdfBlob, pdfFileName);
+
+            const getToken = () => {
+                const t = localStorage.getItem('token') || localStorage.getItem('authToken');
+                if (t) return t;
+                const u = localStorage.getItem('user');
+                if (u) try { return JSON.parse(u).token; } catch {}
+                return '';
+            };
+            
+            // Ajustar URL base da API
+            let baseUrl = '';
+            if (apiClient.defaults.baseURL) {
+                baseUrl = apiClient.defaults.baseURL.replace(/\/$/, '');
+            } else if (process.env.REACT_APP_API_URL) {
+                baseUrl = process.env.REACT_APP_API_URL;
+            }
+
+            const uploadUrl = `${baseUrl}/refuelings/upload-pdf`;
+            
+            const response = await fetch(uploadUrl, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${getToken()}` },
+                body: formDataUpload
+            });
+
+            if (!response.ok) throw new Error("Falha no upload do PDF");
+            
+            const uploadResult = await response.json();
+            const pdfUrl = uploadResult.url;
+            
+            // Construir Link Absoluto (Importante para o email externo)
+            let absoluteLink = pdfUrl;
+            if (pdfUrl && !pdfUrl.startsWith('http')) {
+                // Tenta pegar a base da URL da API ou da janela atual
+                let urlDomain = window.location.origin;
+                // Se a API estiver em outro domínio, idealmente usamos o domínio da API
+                if (baseUrl.startsWith('http')) {
+                    urlDomain = baseUrl;
+                }
+                
+                // Remove /api ou duplicatas se necessário, mas geralmente uploads ficam na raiz pública
+                // Se pdfUrl já vier com /uploads/orders/..., apenas concatenamos
+                absoluteLink = `${urlDomain.replace('/api', '')}${pdfUrl.startsWith('/') ? '' : '/'}${pdfUrl}`;
+            }
+
+            // 5. Decisão: Email (Cliente Local) ou WhatsApp
+            if (hasEmail) {
+                setAlertMessage(`Abrindo E-mail para ${partnerEmail}...`);
+                
+                // Monta o corpo do email para o cliente local (Outlook/Thunderbird/Mail)
+                const subject = `Autorização de Abastecimento #${finalData.authNumber} - ${finalData.partnerName || 'Frotas MAK'}`;
+                const body = `Olá,
+
+Segue a autorização de abastecimento emitida pelo sistema Frotas MAK.
+
+--- RESUMO ---
+Número: #${finalData.authNumber}
+Veículo: ${finalData.vehicleInfo || 'N/A'}
+Combustível: ${finalData.fuelType}
+Quantidade: ${finalData.isFillUp ? 'COMPLETAR TANQUE' : (finalData.litrosLiberados + ' Litros')}
+
+--- DOWNLOAD DA AUTORIZAÇÃO (PDF) ---
+Clique no link abaixo para baixar o documento oficial:
+${absoluteLink}
+
+Por favor, realize o abastecimento conforme autorizado.
+
+Att,
+Equipe Frotas MAK`;
+
+                // Abre o cliente de email
+                window.location.href = `mailto:${partnerEmail}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+                
+                // Não abrimos o WhatsApp se foi por e-mail
+                return; 
+            } else {
+                 setAlertMessage("Posto sem e-mail. Abrindo WhatsApp...");
+            }
+
+            // 6. Fallback para WhatsApp (se não tiver email)
+            triggerWhatsApp(finalData, partner, vehicle, employee, absoluteLink);
+
+        } catch (err) {
+            console.error(">>> [DEBUG] Erro na Distribuição:", err);
+            setAlertMessage("Erro ao processar envio. PDF gerado localmente.");
+            // Backup: Download direto se der erro no upload
+            onGeneratePDF(finalData, vehicles, partners, employees, vehicleGroups, false);
+        }
+    };
+
+    const triggerWhatsApp = (finalData, partner, vehicle, employee, pdfLink) => {
+        const phone = partner?.whatsapp || partner?.telefone;
+        if (!phone) {
+            setAlertMessage("Ordem salva! Posto sem WhatsApp/Email.");
+            return;
+        }
+
+        const allowedReadings = getAllowedReadingTypes(vehicle?.tipo);
+        let readingMsg = '';
+        if (allowedReadings.includes('odometro')) {
+             readingMsg = `*Hodômetro:* ${finalData.odometro ? finalData.odometro + ' Km' : 'N/A'}`;
+        } else {
+             readingMsg = `*Horímetro:* ${finalData.horimetro ? finalData.horimetro + ' Hr' : 'N/A'}`;
+        }
+        
+        const emissionDate = getSafeDateObj(finalData.date).toLocaleDateString('pt-BR');
+        const arlaMsg = formData.needsArla 
+            ? `\n*Arla 32:* ${formData.isFillUpArla ? 'COMPLETAR' : formData.litrosLiberadosArla + ' Litros'}` 
+            : '';
+
+        let msg = 
+`*ORDEM DE ABASTECIMENTO - FROTAS MAK*
+${pdfLink ? `Baixe a Autorização (PDF): ${pdfLink}` : '(PDF indisponível)'}
+
+*Resumo:*
+*Nº Ordem:* ${finalData.authNumber}
+*Data:* ${emissionDate}
+*Posto:* ${partner?.razaoSocial || 'N/A'}
+*Veículo:* ${vehicle?.marca || ''} ${vehicle?.modelo || ''} - ${vehicle?.placa} / ${vehicle?.registroInterno}
+*Combustível:* ${finalData.fuelType}
+*Qtd:* ${formData.isFillUp ? 'COMPLETAR TANQUE' : formData.litrosLiberados + ' Litros'}${arlaMsg}
+*Motorista:* ${employee?.nome || 'N/A'}
+${readingMsg}`;
+
+        setTimeout(() => {
+            window.open(`https://wa.me/55${phone.replace(/\D/g, '')}?text=${encodeURIComponent(msg)}`, '_blank');
+        }, 500);
+    };
+
+    const handleSaveClick = (e) => {
+        if(e) e.preventDefault();
+
+        if (!formData.vehicleId || !formData.employeeId || !formData.partnerId || !formData.fuelType) {
+            setAlertMessage("Preencha os campos obrigatórios.");
+            return;
+        }
+
+        if (blockReason) {
+            setPasswordAction('blockOverride');
+            setShowPasswordModal(true);
+            return;
+        }
+        if (requiresBudgetOverride) {
+            setPasswordAction('budgetOverride');
+            setShowPasswordModal(true);
+            return;
+        }
+        executeSave();
+    };
+
+    const executeSave = async () => {
+        setIsSaving(true);
+        setShowPasswordModal(false);
+
+        const safeFloat = (val) => {
+            const num = parseFloat(val);
+            return isNaN(num) ? null : num;
+        };
+
+        const payload = {
+            ...formData,
+            odometro: safeFloat(formData.odometro),
+            horimetro: safeFloat(formData.horimetro),
+            litrosLiberados: safeFloat(formData.litrosLiberados) || 0,
+            litrosLiberadosArla: safeFloat(formData.litrosLiberadosArla) || 0,
+            outrosValor: safeFloat(formData.outrosValor) || 0,
+            date: new Date(formData.date + 'T12:00:00Z').toISOString(),
+            createdBy: user,
+            solicitacaoId: solicitacaoData ? solicitacaoData.id : null 
+        };
+
+        const currentStatus = orderToEdit?.status ? orderToEdit.status.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "") : "";
+        
+        if (isEditing && (currentStatus === 'concluida' || currentStatus === 'confirmada')) {
+             payload.litrosAbastecidos = payload.litrosLiberados;
+             payload.litrosAbastecidosArla = payload.litrosLiberadosArla;
+        }
+
+        const partner = partners.find(p => p.id === formData.partnerId);
+        if (partner) payload.partnerName = partner.razaoSocial;
+
+        try {
+            let res;
+            if (isEditing && orderToEdit.id) {
+                res = await apiClient.updateRefuelingOrder(orderToEdit.id, payload);
+                setAlertMessage(`Ordem atualizada!`);
+            } else {
+                res = await apiClient.createRefuelingOrder(payload);
+                setAlertMessage(`Ordem Nº ${res.authNumber} emitida!`);
+            }
+            reloadData();
+            
+            if (res) {
+                 const fullOrderData = {
+                    ...payload,
+                    id: res.id || orderToEdit?.id,
+                    authNumber: res.authNumber || orderToEdit?.authNumber,
+                    createdBy: user 
+                 };
+                 // CHAMA O PROCESSO DE DISTRIBUIÇÃO INTELIGENTE
+                 await processDistribution(fullOrderData);
+            }
+            onClose();
+        } catch (error) {
+            console.error(">>> [DEBUG] Erro ao salvar ordem:", error);
+            setAlertMessage("Erro ao salvar: " + (error.response?.data?.error || error.message));
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const renderReadingInputs = () => {
+        if (!selectedVehicle) return null;
+        const allowed = getAllowedReadingTypes(selectedVehicle.tipo);
+
+        if (allowed.includes('odometro')) {
+            return (
+                <div className="col-span-2">
+                    <label className="block text-[10px] font-bold text-gray-700">Odômetro (Km) *</label>
+                    <input type="number" name="odometro" value={formData.odometro} onChange={handleChange} className="w-full p-1 border rounded" required placeholder={`Atual: ${selectedVehicle.odometro}`}/>
+                </div>
+            );
+        } else {
+            return (
+                <div className="col-span-2">
+                    <label className="block text-[10px] font-bold text-gray-700">Horímetro (Hr) *</label>
+                    <input type="number" name="horimetro" value={formData.horimetro} onChange={handleChange} className="w-full p-1 border rounded" required placeholder={`Atual: ${selectedVehicle.horimetro || 0}`}/>
+                    <p className="text-[9px] text-gray-400 mt-0.5">Campo Unificado</p>
+                </div>
+            );
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-2 backdrop-blur-sm">
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[98vh] flex flex-col overflow-hidden">
+                <div className="p-3 border-b flex justify-between items-center bg-gray-50 rounded-t-xl shrink-0">
+                    <h2 className="text-base font-bold text-gray-800 flex items-center gap-2">
+                        {isEditing ? <Edit size={16}/> : <FileText size={16}/>}
+                        {isEditing ? 'Editar' : 'Emitir'} Ordem
+                    </h2>
+                    <button onClick={onClose} className="p-1 hover:bg-gray-200 rounded-full transition"><X size={18}/></button>
+                </div>
+
+                <div className="px-4 pt-1 space-y-1 shrink-0">
+                    {warnings.map((w, i) => (
+                        <div key={i} className="flex items-center gap-2 p-1 bg-yellow-50 text-yellow-800 rounded border border-yellow-200 text-[10px] font-medium"><Info size={12}/> {w}</div>
+                    ))}
                     
-                    <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-                        <p><strong>Número:</strong> #${orderData.authNumber}</p>
-                        <p><strong>Veículo:</strong> ${orderData.vehicleInfo || 'N/A'}</p>
-                        <p><strong>Combustível:</strong> ${orderData.fuelType}</p>
-                        <p><strong>Quantidade:</strong> ${orderData.isFillUp ? 'COMPLETAR TANQUE' : (orderData.litrosLiberados + ' Litros')}</p>
+                    {blockReason && (
+                        <div className="flex items-center gap-2 p-1.5 bg-red-100 text-red-800 rounded border border-red-200 text-[10px] font-bold animate-pulse">
+                            <Lock size={12}/> BLOQUEIO: {blockReason}
+                        </div>
+                    )}
+
+                    {budgetWarning && (
+                        <div className="flex items-center gap-2 p-1.5 bg-orange-100 text-orange-900 rounded border border-orange-200 text-[10px] font-bold">
+                            <Wallet size={12}/> {budgetWarning} {requiresBudgetOverride && "(Requer Senha)"}
+                        </div>
+                    )}
+                </div>
+
+                <form onSubmit={handleSaveClick} className="p-3 overflow-y-auto flex-1 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+                    <div className="space-y-2 col-span-2 sm:col-span-1">
+                        <div>
+                            <label className="block font-bold text-gray-700 mb-0.5">Veículo *</label>
+                            <select name="vehicleId" value={formData.vehicleId} onChange={e => setFormData(p => ({...p, vehicleId: e.target.value}))} className="w-full p-1 border border-gray-300 rounded focus:ring-1 focus:ring-yellow-400 outline-none" required>
+                                <option value="">Selecione...</option>
+                                {sortedVehicles.map(v => <option key={v.id} value={v.id}>{v.registroInterno} - {v.placa} ({v.tipo})</option>)}
+                            </select>
+                        </div>
+                        
+                        {/* CARD ÚLTIMO ABASTECIMENTO COMPACTO */}
+                        {lastRefuelData && (
+                            <div className="bg-gray-100 p-1.5 rounded border border-gray-200 text-[10px] text-gray-600 flex justify-between items-center">
+                                <div>
+                                    <div className="font-bold text-gray-700 mb-0.5 flex items-center gap-1"><Clock size={10}/> Último: {formatDateDisplay(lastRefuelData.data || lastRefuelData.date)}</div>
+                                    <p>Posto: {lastRefuelData.partnerName || 'N/A'}</p>
+                                    <p>Litros: <strong>{lastRefuelData.litrosAbastecidos} L</strong> ({lastRefuelData.fuelType})</p>
+                                    
+                                    <div className="mt-0.5 pt-0.5 border-t border-gray-300 flex gap-2">
+                                        <p>Leitura: <strong>{lastRefuelData.horimetro || lastRefuelData.odometro || 'N/A'}</strong></p>
+                                    </div>
+                                </div>
+                                <div className="text-right">
+                                    <div className="font-bold text-gray-700 mb-0.5 flex items-center justify-end gap-1"><Activity size={10}/> Média</div>
+                                    <p className="text-xs font-bold text-blue-600">{lastAverage || '--'}</p>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="bg-gray-50 p-2 rounded border border-gray-200">
+                            <h3 className="text-[10px] font-bold text-gray-500 uppercase mb-1">Leituras Atuais</h3>
+                            <div className="grid grid-cols-2 gap-2">
+                                {renderReadingInputs()}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label className="block font-bold text-gray-700 mb-0.5">Motorista *</label>
+                            <select name="employeeId" value={formData.employeeId} onChange={handleChange} className="w-full p-1 border border-gray-300 rounded" required>
+                                <option value="">Selecione...</option>
+                                {sortedEmployees.map(e => <option key={e.id} value={e.id}>{e.nome}</option>)}
+                            </select>
+                        </div>
+
+                         <div>
+                            <label className="block font-bold text-gray-700 mb-0.5">Obra / Alocação *</label>
+                            <select name="obraId" value={formData.obraId} onChange={handleChange} className="w-full p-1 border border-gray-300 rounded" required>
+                                <option value="">Selecione...</option>
+                                <option value="Patio">Pátio</option>
+                                {sortedObras.map(o => <option key={o.id} value={o.id}>{o.nome}</option>)}
+                                {extraObraOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                            </select>
+                        </div>
+
+                        {/* PROGRESSO FINANCEIRO */}
+                        {obraStatus && (
+                            <div className="p-2 bg-blue-50 border border-blue-200 rounded text-[10px]">
+                                <h4 className="font-bold text-blue-800 flex items-center gap-1 mb-1">
+                                    <TrendingUp size={12}/> Progresso Financeiro
+                                </h4>
+                                <div className="flex justify-between text-blue-700">
+                                    <span>Gasto Combustível:</span>
+                                    <span>{obraStatus.totalGasto.toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'})}</span>
+                                </div>
+                                <div className="flex justify-between text-blue-700">
+                                    <span>Contrato Total:</span>
+                                    <span>{obraStatus.valorContrato.toLocaleString('pt-BR', {style: 'currency', currency: 'BRL'})}</span>
+                                </div>
+                                <div className="mt-1 w-full bg-blue-200 rounded-full h-1.5">
+                                    <div 
+                                        className={`h-1.5 rounded-full ${obraStatus.percentual > 80 ? 'bg-red-500' : 'bg-blue-600'}`} 
+                                        style={{width: `${Math.min(obraStatus.percentual, 100)}%`}}
+                                    ></div>
+                                </div>
+                                <div className="text-right mt-0.5 text-blue-600 font-bold">
+                                    {obraStatus.percentual.toFixed(1)}% utilizado
+                                </div>
+                            </div>
+                        )}
                     </div>
 
-                    <p>Por favor, realize o abastecimento conforme autorizado.</p>
-                    
-                    ${attachments.length === 0 ? `<p><strong>Link para Download:</strong> <a href="${pdfUrl}">${pdfUrl}</a></p>` : ''}
-                    
-                    <hr/>
-                    <small>Este é um e-mail automático. Não responda.</small>
+                    <div className="space-y-2 col-span-2 sm:col-span-1">
+                        <div>
+                            <label className="block font-bold text-gray-700 mb-0.5">Posto *</label>
+                            <select name="partnerId" value={formData.partnerId} onChange={handleChange} className="w-full p-1 border border-gray-300 rounded" required>
+                                <option value="">Selecione...</option>
+                                {sortedPartners.map(p => <option key={p.id} value={p.id}>{p.razaoSocial}</option>)}
+                            </select>
+                        </div>
+
+                        <div className="bg-blue-50 p-2 rounded border border-blue-100">
+                            <label className="block text-[10px] font-bold text-blue-900 mb-1">Combustível *</label>
+                            <select name="fuelType" value={formData.fuelType} onChange={handleChange} className="w-full p-1 border border-blue-200 rounded mb-1 bg-white text-xs" required>
+                                <option value="">Selecione...</option>
+                                <option value="gasolinaComum">Gasolina Comum</option>
+                                <option value="gasolinaAditivada">Gasolina Aditivada</option>
+                                <option value="dieselS500">Diesel S500</option>
+                                <option value="dieselS10">Diesel S10</option>
+                                <option value="etanol">Etanol</option>
+                            </select>
+                            
+                            <div className="flex items-center gap-1 mb-1">
+                                <input type="checkbox" id="fill" name="isFillUp" checked={formData.isFillUp} onChange={handleChange} className="w-3 h-3 text-blue-600 rounded"/>
+                                <label htmlFor="fill" className="text-[10px] font-medium text-blue-800">Completar Tanque</label>
+                            </div>
+                            {!formData.isFillUp && (
+                                <input type="number" name="litrosLiberados" value={formData.litrosLiberados} onChange={handleChange} className="w-full p-1 border rounded" placeholder="Qtd. Litros"/>
+                            )}
+
+                            <div className="mt-1 pt-1 border-t border-blue-200">
+                                <div className="flex items-center gap-1 mb-1">
+                                    <input type="checkbox" id="arla" name="needsArla" checked={formData.needsArla} onChange={handleChange} className="w-3 h-3 text-blue-600 rounded"/>
+                                    <label htmlFor="arla" className="text-[10px] font-bold text-blue-900">Arla 32</label>
+                                </div>
+                                {formData.needsArla && (
+                                    <div className="pl-3 space-y-1">
+                                        <div className="flex items-center gap-1">
+                                            <input type="checkbox" name="isFillUpArla" checked={formData.isFillUpArla} onChange={handleChange} className="w-3 h-3"/>
+                                            <label className="text-[10px]">Completar Arla</label>
+                                        </div>
+                                        {!formData.isFillUpArla && (
+                                             <input type="number" name="litrosLiberadosArla" value={formData.litrosLiberadosArla} onChange={handleChange} className="w-full p-1 border rounded text-xs" placeholder="Litros Arla"/>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                         <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <label className="block text-[10px] font-bold text-gray-700 mb-0.5">Data</label>
+                                <input type="date" name="date" value={formData.date} onChange={handleChange} className="w-full p-1 border rounded"/>
+                            </div>
+                             <div>
+                                <label className="block text-[10px] font-bold text-gray-700 mb-0.5">Outros</label>
+                                <input type="text" name="outros" value={formData.outros} onChange={handleChange} className="w-full p-1 border rounded" placeholder="Obs..."/>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                            <input type="checkbox" id="geraValor" name="outrosGeraValor" checked={formData.outrosGeraValor} onChange={handleChange} className="w-3 h-3 text-green-600"/>
+                            <label htmlFor="geraValor" className="text-[10px] font-medium text-gray-700">Preenchimento Gera Valor</label>
+                        </div>
+                    </div>
+                </form>
+
+                <div className="p-2 border-t bg-gray-50 flex justify-end gap-2 rounded-b-xl shrink-0">
+                    <button onClick={onClose} className="px-3 py-1.5 text-xs font-bold text-gray-600 hover:bg-gray-200 rounded transition">Cancelar</button>
+                    {/* Botão Condicional para Bloqueio */}
+                    {blockReason || requiresBudgetOverride ? (
+                        <button onClick={handleSaveClick} className="px-3 py-1.5 bg-red-500 text-white font-bold text-xs rounded shadow hover:bg-red-600 transition flex items-center gap-1">
+                            <Lock size={12}/> Liberar
+                        </button>
+                    ) : (
+                        <button onClick={handleSaveClick} disabled={isSaving} className="px-3 py-1.5 bg-yellow-400 text-gray-900 font-bold text-xs rounded shadow hover:bg-yellow-500 transition disabled:opacity-50 flex items-center gap-1">
+                            {isSaving ? <Loader className="animate-spin" size={12}/> : (
+                                <><Send size={12} /> Salvar & Enviar</>
+                            )}
+                        </button>
+                    )}
                 </div>
-            `,
-            attachments: attachments
-        };
+            </div>
 
-        await transporter.sendMail(mailOptions);
-        res.json({ message: 'Email enviado com sucesso!' });
-
-    } catch (error) {
-        console.error("Erro ao enviar email:", error);
-        res.status(500).json({ error: 'Falha ao enviar e-mail: ' + error.message });
-    }
+            {showPasswordModal && (
+                <PasswordConfirmationModal
+                    message={passwordAction === 'blockOverride' ? `BLOQUEIO: ${blockReason}` : `BLOQUEIO FINANCEIRO: Orçamento excedido.`}
+                    onConfirm={executeSave}
+                    onClose={() => setShowPasswordModal(false)}
+                    apiClient={apiClient}
+                />
+            )}
+        </div>
+    );
 };
 
-// --- CRUD ---
-
-const getAllRefuelings = async (req, res) => {
-    try {
-        const [rows] = await db.execute('SELECT * FROM refuelings ORDER BY id DESC');
-        res.json(parseRefuelingRows(rows));
-    } catch (error) {
-        console.error('Erro GET refuelings:', error);
-        res.status(500).json({ error: 'Erro ao buscar dados.' });
-    }
-};
-
-const getRefuelingById = async (req, res) => {
-    try {
-        const [rows] = await db.execute('SELECT * FROM refuelings WHERE id = ?', [req.params.id]);
-        if (rows.length === 0) return res.status(404).json({ error: 'Não encontrado' });
-        res.json(parseRefuelingRows(rows)[0]);
-    } catch (error) {
-        res.status(500).json({ error: 'Erro ao buscar dados.' });
-    }
-};
-
-const createRefuelingOrder = async (req, res) => {
-    const data = req.body;
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    try {
-        const id = crypto.randomUUID();
-        const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
-        const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
-
-        let dataAbastecimento = new Date();
-        if (data.date) {
-             const dateStr = data.date.toString().includes('T') ? data.date : `${data.date}T12:00:00`;
-             dataAbastecimento = new Date(dateStr);
-        }
-
-        let finalPartnerName = data.partnerName;
-        if (!finalPartnerName && data.partnerId) {
-            const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [data.partnerId]);
-            if (pRows.length > 0) {
-                finalPartnerName = pRows[0].razaoSocial;
-            }
-        }
-
-        const createdByData = data.createdBy || {};
-        if (data.solicitacaoId) {
-            createdByData.linkedSolicitacaoId = data.solicitacaoId;
-        }
-
-        const refuelingData = {
-            id: id,
-            authNumber: newAuthNumber,
-            vehicleId: data.vehicleId,
-            partnerId: data.partnerId,
-            partnerName: finalPartnerName || null,
-            employeeId: data.employeeId || null,
-            obraId: data.obraId || null, 
-            fuelType: data.fuelType || null,
-            data: dataAbastecimento,
-            status: data.status || 'Aberta',
-            isFillUp: data.isFillUp ? 1 : 0,
-            needsArla: data.needsArla ? 1 : 0,
-            isFillUpArla: data.isFillUpArla ? 1 : 0,
-            outrosGeraValor: data.outrosGeraValor ? 1 : 0,
-            litrosLiberados: safeNum(data.litrosLiberados, true),
-            litrosLiberadosArla: safeNum(data.litrosLiberadosArla, true),
-            odometro: safeNum(data.odometro),
-            horimetro: safeNum(data.horimetro), 
-            outrosValor: safeNum(data.outrosValor, true),
-            outros: data.outros || null,
-            createdBy: JSON.stringify(createdByData),
-            confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
-            editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
-            invoiceNumber: data.invoiceNumber || null
-        };
-
-        const fields = Object.keys(refuelingData);
-        const values = Object.values(refuelingData);
-        const placeholders = fields.map(() => '?').join(', ');
-        
-        await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
-        await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
-
-        if (data.solicitacaoId) {
-            const userId = data.createdBy && data.createdBy.id ? data.createdBy.id : null;
-            await connection.execute(
-                'UPDATE solicitacoes_abastecimento SET status = "LIBERADO", data_aprovacao = NOW(), aprovado_por_usuario_id = ? WHERE id = ?',
-                [userId, data.solicitacaoId]
-            );
-        }
-
-        const vehicleUpdate = {};
-        const newOdometro = safeNum(data.odometro);
-        const newHorimetro = safeNum(data.horimetro);
-
-        if (newOdometro > 0) vehicleUpdate.odometro = newOdometro;
-        if (newHorimetro > 0) {
-            vehicleUpdate.horimetro = newHorimetro;
-        }
-
-        if (Object.keys(vehicleUpdate).length > 0) {
-            const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
-            await connection.execute(
-                `UPDATE vehicles SET ${vFields} WHERE id = ?`, 
-                [...Object.values(vehicleUpdate), data.vehicleId]
-            );
-        }
-
-        if (refuelingData.status === 'Concluída' && refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
-            await updateMonthlyExpense(connection, refuelingData.obraId, refuelingData.partnerId, refuelingData.fuelType, refuelingData.data);
-        }
-
-        await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes'] }); 
-        res.status(201).json({ id: id, message: 'Ordem emitida.', authNumber: newAuthNumber });
-    } catch (error) {
-        await connection.rollback();
-        console.error('Erro CREATE:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        connection.release();
-    }
-};
-
-const updateRefuelingOrder = async (req, res) => {
-    const { id } = req.params;
-    const data = req.body;
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    try {
-        const [oldData] = await connection.execute('SELECT * FROM refuelings WHERE id = ?', [id]);
-        if (oldData.length === 0) throw new Error('Ordem não encontrada');
-        const oldRefueling = oldData[0];
-
-        const updateData = {};
-        if (data.date) {
-            const dateStr = data.date.toString().replace(' ', 'T');
-            updateData.data = new Date(dateStr);
-        }
-        if (data.editedBy) updateData.editedBy = JSON.stringify(data.editedBy);
-        if (data.status) updateData.status = data.status;
-        
-        if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
-        if (data.litrosAbastecidos !== undefined) updateData.litrosAbastecidos = safeNum(data.litrosAbastecidos, true);
-        if (data.litrosAbastecidosArla !== undefined) updateData.litrosAbastecidosArla = safeNum(data.litrosAbastecidosArla, true);
-
-        if (data.odometro !== undefined) updateData.odometro = safeNum(data.odometro);
-        if (data.horimetro !== undefined) updateData.horimetro = safeNum(data.horimetro);
-
-        if (data.outrosValor !== undefined) updateData.outrosValor = safeNum(data.outrosValor, true);
-        
-        if (data.partnerId !== undefined) {
-            updateData.partnerId = data.partnerId;
-             const [pRows] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [data.partnerId]);
-             if (pRows.length > 0) updateData.partnerName = pRows[0].razaoSocial;
-        }
-
-        if (data.obraId !== undefined) updateData.obraId = data.obraId || null;
-        if (data.fuelType !== undefined) updateData.fuelType = data.fuelType || null;
-        if (data.outrosGeraValor !== undefined) updateData.outrosGeraValor = data.outrosGeraValor ? 1 : 0;
-        if (data.outros !== undefined) updateData.outros = data.outros || null;
-
-        if (data.invoiceNumber !== undefined) {
-            const newInvoiceNumber = data.invoiceNumber ? data.invoiceNumber.toString().trim() : null;
-            if (newInvoiceNumber) {
-                const partnerIdToCheck = updateData.partnerId || oldRefueling.partnerId;
-                const [duplicateCheck] = await connection.execute(
-                    'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
-                    [partnerIdToCheck, newInvoiceNumber, id]
-                );
-                if (duplicateCheck.length > 0) {
-                    throw new Error(`A Nota Fiscal ${newInvoiceNumber} já está cadastrada para este posto.`);
-                }
-                updateData.invoiceNumber = newInvoiceNumber;
-            } else {
-                updateData.invoiceNumber = null;
-            }
-        }
-
-        Object.keys(updateData).forEach(key => updateData[key] === undefined && delete updateData[key]);
-
-        if (Object.keys(updateData).length > 0) {
-            const setClause = Object.keys(updateData).map(k => `${k} = ?`).join(', ');
-            await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
-        }
-
-        const vehicleUpdate = {};
-        if (updateData.odometro > 0) vehicleUpdate.odometro = updateData.odometro;
-        if (updateData.horimetro > 0) {
-            vehicleUpdate.horimetro = updateData.horimetro;
-        }
-        
-        if (Object.keys(vehicleUpdate).length > 0) {
-             const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
-             const vId = oldRefueling.vehicleId;
-             await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), vId]);
-        }
-
-        const currentObra = updateData.obraId || oldRefueling.obraId;
-        const currentPartner = updateData.partnerId || oldRefueling.partnerId;
-        const currentFuel = updateData.fuelType || oldRefueling.fuelType;
-        const currentDate = updateData.data || oldRefueling.data;
-
-        if (currentObra && currentPartner && currentFuel) {
-            await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
-        }
-
-        if (
-            (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
-            (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
-            (updateData.fuelType && updateData.fuelType !== oldRefueling.fuelType)
-        ) {
-            if (oldRefueling.obraId && oldRefueling.partnerId && oldRefueling.fuelType) {
-                await updateMonthlyExpense(connection, oldRefueling.obraId, oldRefueling.partnerId, oldRefueling.fuelType, oldRefueling.data);
-            }
-        }
-
-        await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles'] });
-        res.json({ message: 'Ordem atualizada.' });
-    } catch (error) {
-        await connection.rollback();
-        console.error('Erro UPDATE:', error);
-        res.status(500).json({ error: error.message });
-    } finally {
-        connection.release();
-    }
-};
-
-const confirmRefuelingOrder = async (req, res) => {
-    const { id } = req.params;
-    const { 
-        litrosAbastecidos, 
-        litrosAbastecidosArla, 
-        pricePerLiter, 
-        confirmedReading, 
-        confirmedBy, 
-        outrosValor, 
-        invoiceNumber, 
-        updatePartnerPrice 
-    } = req.body;
-    
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    try {
-        const [orders] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
-        if (orders.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ error: 'Ordem não encontrada.' });
-        }
-        const order = orders[0];
-
-        if (invoiceNumber) {
-            const nfStr = invoiceNumber.toString().trim();
-            if (nfStr) {
-                const [duplicates] = await connection.execute(
-                    'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
-                    [order.partnerId, nfStr, id]
-                );
-                if (duplicates.length > 0) {
-                    throw new Error(`A Nota Fiscal ${nfStr} já consta lançada para este posto.`);
-                }
-            }
-        }
-
-        const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
-        const vehicle = vehicles[0];
-        
-        const vehicleUpdate = {};
-        const readingVal = safeNum(confirmedReading);
-
-        if (readingVal) {
-            if (order.odometro > 0 || (vehicle.odometro > 0 && vehicle.tipo !== 'Caminhão')) {
-                 vehicleUpdate.odometro = readingVal;
-            } else {
-                 vehicleUpdate.horimetro = readingVal;
-            }
-        }
-
-        if (Object.keys(vehicleUpdate).length > 0) {
-            const vFields = Object.keys(vehicleUpdate).map(k => `${k} = ?`).join(', ');
-            await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), order.vehicleId]);
-        }
-
-        const safePrice = safeNum(pricePerLiter, true);
-        
-        if (order.partnerId && safePrice > 0 && order.fuelType && updatePartnerPrice === true) {
-            const priceQuery = `
-                INSERT INTO partner_fuel_prices (partnerId, fuelType, price) 
-                VALUES (?, ?, ?) 
-                ON DUPLICATE KEY UPDATE price = VALUES(price)
-            `;
-            await connection.execute(priceQuery, [order.partnerId, order.fuelType, safePrice]);
-        }
-
-        const orderUpdate = {
-            status: 'Concluída',
-            litrosAbastecidos: safeNum(litrosAbastecidos, true),
-            litrosAbastecidosArla: safeNum(litrosAbastecidosArla, true),
-            pricePerLiter: safePrice,
-            confirmedBy: JSON.stringify(confirmedBy),
-            outrosValor: safeNum(outrosValor, true),
-            invoiceNumber: invoiceNumber ? invoiceNumber.toString().trim() : null,
-            ...(vehicleUpdate.odometro ? { odometro: vehicleUpdate.odometro } : {}),
-            ...(vehicleUpdate.horimetro ? { horimetro: vehicleUpdate.horimetro } : {}),
-        };
-
-        const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
-        await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
-
-        let linkedSolicitacaoId = null;
-        if (order.createdFromSolicitacaoId) linkedSolicitacaoId = order.createdFromSolicitacaoId;
-        if (!linkedSolicitacaoId && order.createdBy) {
-            try {
-                const cbObj = JSON.parse(order.createdBy);
-                if (cbObj.linkedSolicitacaoId) linkedSolicitacaoId = cbObj.linkedSolicitacaoId;
-            } catch (e) {}
-        }
-
-        if (linkedSolicitacaoId) {
-            await connection.execute(
-                'UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?',
-                [linkedSolicitacaoId]
-            );
-        }
-
-        if (order.obraId && order.partnerId && order.fuelType) {
-            await updateMonthlyExpense(connection, order.obraId, order.partnerId, order.fuelType, order.data);
-        }
-
-        await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'partners', 'solicitacoes'] });
-        res.json({ message: 'Abastecimento confirmado com sucesso.' });
-
-    } catch (error) {
-        await connection.rollback();
-        console.error('Erro CONFIRM:', error);
-        res.status(500).json({ error: 'Erro ao confirmar: ' + error.message });
-    } finally {
-        connection.release();
-    }
-};
-
-const deleteRefuelingOrder = async (req, res) => {
-    const { id } = req.params;
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    try {
-        const [rows] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
-        if (rows.length === 0) {
-             await connection.rollback();
-             return res.status(404).json({ error: 'Ordem não encontrada' });
-        }
-        const ref = rows[0];
-
-        await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
-
-        let linkedSolicitacaoId = null;
-        if (ref.createdFromSolicitacaoId) linkedSolicitacaoId = ref.createdFromSolicitacaoId;
-        if (!linkedSolicitacaoId && ref.createdBy) {
-            try {
-                const cbObj = JSON.parse(ref.createdBy);
-                if (cbObj.linkedSolicitacaoId) linkedSolicitacaoId = cbObj.linkedSolicitacaoId;
-            } catch (e) {}
-        }
-
-        if (linkedSolicitacaoId) {
-            await connection.execute(
-                'UPDATE solicitacoes_abastecimento SET status = "NEGADO", motivo_negativa = "Ordem Excluída Manualmente pelo Gestor (Estorno)" WHERE id = ?',
-                [linkedSolicitacaoId]
-            );
-        }
-
-        if (ref.obraId && ref.partnerId && ref.fuelType) {
-            await updateMonthlyExpense(connection, ref.obraId, ref.partnerId, ref.fuelType, ref.data);
-        }
-
-        await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'solicitacoes'] });
-        res.status(204).end();
-    } catch (error) {
-        await connection.rollback();
-        console.error('Erro DELETE:', error);
-        res.status(500).json({ error: 'Erro ao deletar ordem.' });
-    } finally {
-        connection.release();
-    }
-};
-
-module.exports = {
-    getAllRefuelings,
-    getRefuelingById,
-    createRefuelingOrder,
-    updateRefuelingOrder,
-    confirmRefuelingOrder,
-    deleteRefuelingOrder,
-    upload,          
-    uploadOrderPdf,
-    sendOrderEmail 
-};
+export default RefuelingOrderModal;
