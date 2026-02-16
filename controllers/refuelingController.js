@@ -7,14 +7,14 @@ const multer = require('multer');
 const nodemailer = require('nodemailer');
 
 // --- CONFIGURAÇÃO NODEMAILER ---
-// Configure suas credenciais reais no arquivo .env
+// Configure as variáveis no seu arquivo .env para segurança
 const transporter = nodemailer.createTransport({
     host: process.env.EMAIL_HOST || 'smtp.gmail.com',
     port: process.env.EMAIL_PORT || 587,
     secure: false, // true para 465, false para outras portas
     auth: {
         user: process.env.EMAIL_USER || 'seu-email@exemplo.com',
-        pass: process.env.EMAIL_PASS || 'senha-de-app' // Use Senha de App se for Gmail
+        pass: process.env.EMAIL_PASS || 'sua-senha-de-app' // Use Senha de App
     },
     tls: {
         rejectUnauthorized: false
@@ -170,6 +170,7 @@ const uploadOrderPdf = async (req, res) => {
             return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
         }
         const fileUrl = `/uploads/orders/${req.file.filename}`;
+        // Retorna também o filename para facilitar o envio de email (localizar no disco)
         res.json({ url: fileUrl, filename: req.file.filename });
     } catch (error) {
         console.error('Erro no upload do PDF:', error);
@@ -177,7 +178,7 @@ const uploadOrderPdf = async (req, res) => {
     }
 };
 
-// --- NOVO: ENVIAR EMAIL ---
+// --- NOVO: CONTROLLER DE ENVIO DE EMAIL ---
 const sendOrderEmail = async (req, res) => {
     const { orderData, partnerEmail, pdfFilename, pdfUrl } = req.body;
 
@@ -203,6 +204,7 @@ const sendOrderEmail = async (req, res) => {
             });
         } else {
             console.warn(`Arquivo PDF não encontrado no disco para anexo: ${filePath}`);
+            // Se não achar o arquivo, enviaremos apenas o link no corpo do email
         }
 
         const mailOptions = {
@@ -227,7 +229,7 @@ const sendOrderEmail = async (req, res) => {
                     ${attachments.length === 0 ? `<p><strong>Link para Download:</strong> <a href="${pdfUrl}">${pdfUrl}</a></p>` : ''}
                     
                     <hr/>
-                    <small>Este é um e-mail automático.</small>
+                    <small>Este é um e-mail automático. Não responda.</small>
                 </div>
             `,
             attachments: attachments

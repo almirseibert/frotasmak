@@ -10,6 +10,9 @@ router.use(authMiddleware);
 // Se ficar depois, o sistema acha que "upload-pdf" é um ID de abastecimento
 router.post('/upload-pdf', refuelingController.upload.single('file'), refuelingController.uploadOrderPdf);
 
+// --- NOVA ROTA: Envio de Email ---
+router.post('/send-email', refuelingController.sendOrderEmail);
+
 // Rotas CRUD padrão
 router.get('/', refuelingController.getAllRefuelings);
 router.get('/:id', refuelingController.getRefuelingById);
