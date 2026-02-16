@@ -4,6 +4,22 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
+const nodemailer = require('nodemailer');
+
+// --- CONFIGURAÇÃO NODEMAILER ---
+// Configure suas credenciais reais no arquivo .env
+const transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+    port: process.env.EMAIL_PORT || 587,
+    secure: false, // true para 465, false para outras portas
+    auth: {
+        user: process.env.EMAIL_USER || 'seu-email@exemplo.com',
+        pass: process.env.EMAIL_PASS || 'senha-de-app' // Use Senha de App se for Gmail
+    },
+    tls: {
+        rejectUnauthorized: false
+    }
+});
 
 // --- CONFIGURAÇÃO MULTER (UPLOAD COM AUTO-LIMPEZA) ---
 
@@ -154,10 +170,75 @@ const uploadOrderPdf = async (req, res) => {
             return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
         }
         const fileUrl = `/uploads/orders/${req.file.filename}`;
-        res.json({ url: fileUrl });
+        res.json({ url: fileUrl, filename: req.file.filename });
     } catch (error) {
         console.error('Erro no upload do PDF:', error);
         res.status(500).json({ error: 'Falha ao salvar PDF no servidor.' });
+    }
+};
+
+// --- NOVO: ENVIAR EMAIL ---
+const sendOrderEmail = async (req, res) => {
+    const { orderData, partnerEmail, pdfFilename, pdfUrl } = req.body;
+
+    if (!partnerEmail) {
+        return res.status(400).json({ error: 'Email do destinatário não informado.' });
+    }
+
+    try {
+        // Tenta localizar o arquivo físico para anexo
+        // O pdfFilename vem do retorno do uploadOrderPdf
+        let filenameToUse = pdfFilename;
+        if (!filenameToUse && pdfUrl) {
+            filenameToUse = path.basename(pdfUrl);
+        }
+
+        const filePath = path.join(__dirname, '../public/uploads/orders', filenameToUse);
+        
+        let attachments = [];
+        if (fs.existsSync(filePath)) {
+            attachments.push({
+                filename: `Autorizacao_${orderData.authNumber}.pdf`,
+                path: filePath
+            });
+        } else {
+            console.warn(`Arquivo PDF não encontrado no disco para anexo: ${filePath}`);
+        }
+
+        const mailOptions = {
+            from: `"Frotas MAK" <${process.env.EMAIL_USER}>`,
+            to: partnerEmail,
+            subject: `Autorização de Abastecimento #${orderData.authNumber} - ${orderData.partnerName || 'Frotas MAK'}`,
+            html: `
+                <div style="font-family: Arial, sans-serif; color: #333;">
+                    <h2>Autorização de Abastecimento</h2>
+                    <p>Olá,</p>
+                    <p>Segue em anexo a autorização de abastecimento emitida pelo sistema Frotas MAK.</p>
+                    
+                    <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                        <p><strong>Número:</strong> #${orderData.authNumber}</p>
+                        <p><strong>Veículo:</strong> ${orderData.vehicleInfo || 'N/A'}</p>
+                        <p><strong>Combustível:</strong> ${orderData.fuelType}</p>
+                        <p><strong>Quantidade:</strong> ${orderData.isFillUp ? 'COMPLETAR TANQUE' : (orderData.litrosLiberados + ' Litros')}</p>
+                    </div>
+
+                    <p>Por favor, realize o abastecimento conforme autorizado.</p>
+                    
+                    ${attachments.length === 0 ? `<p><strong>Link para Download:</strong> <a href="${pdfUrl}">${pdfUrl}</a></p>` : ''}
+                    
+                    <hr/>
+                    <small>Este é um e-mail automático.</small>
+                </div>
+            `,
+            attachments: attachments
+        };
+
+        await transporter.sendMail(mailOptions);
+        res.json({ message: 'Email enviado com sucesso!' });
+
+    } catch (error) {
+        console.error("Erro ao enviar email:", error);
+        res.status(500).json({ error: 'Falha ao enviar e-mail: ' + error.message });
     }
 };
 
@@ -207,7 +288,6 @@ const createRefuelingOrder = async (req, res) => {
             }
         }
 
-        // --- CORREÇÃO: Embedar o ID da Solicitação no JSON createdBy para evitar erro de coluna inexistente ---
         const createdByData = data.createdBy || {};
         if (data.solicitacaoId) {
             createdByData.linkedSolicitacaoId = data.solicitacaoId;
@@ -234,11 +314,10 @@ const createRefuelingOrder = async (req, res) => {
             horimetro: safeNum(data.horimetro), 
             outrosValor: safeNum(data.outrosValor, true),
             outros: data.outros || null,
-            createdBy: JSON.stringify(createdByData), // Salvando aqui o vínculo
+            createdBy: JSON.stringify(createdByData),
             confirmedBy: data.confirmedBy ? JSON.stringify(data.confirmedBy) : null,
             editedBy: data.editedBy ? JSON.stringify(data.editedBy) : null,
             invoiceNumber: data.invoiceNumber || null
-            // createdFromSolicitacaoId REMOVIDO PARA CORRIGIR ERRO 500
         };
 
         const fields = Object.keys(refuelingData);
@@ -248,7 +327,6 @@ const createRefuelingOrder = async (req, res) => {
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
-        // --- INTEGRAÇÃO UNIFICADA: Atualiza a solicitação se o ID for fornecido ---
         if (data.solicitacaoId) {
             const userId = data.createdBy && data.createdBy.id ? data.createdBy.id : null;
             await connection.execute(
@@ -256,9 +334,7 @@ const createRefuelingOrder = async (req, res) => {
                 [userId, data.solicitacaoId]
             );
         }
-        // --------------------------------------------------------------------------
 
-        // Atualização de Leitura do Veículo
         const vehicleUpdate = {};
         const newOdometro = safeNum(data.odometro);
         const newHorimetro = safeNum(data.horimetro);
@@ -276,7 +352,6 @@ const createRefuelingOrder = async (req, res) => {
             );
         }
 
-        // Se a ordem já nascer concluída (raro via API direta, mas possível), atualiza despesas
         if (refuelingData.status === 'Concluída' && refuelingData.obraId && refuelingData.partnerId && refuelingData.fuelType) {
             await updateMonthlyExpense(connection, refuelingData.obraId, refuelingData.partnerId, refuelingData.fuelType, refuelingData.data);
         }
@@ -356,7 +431,6 @@ const updateRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE refuelings SET ${setClause} WHERE id = ?`, [...Object.values(updateData), id]);
         }
 
-        // Atualização de Veículo na Edição (Opcional, mas mantém consistência)
         const vehicleUpdate = {};
         if (updateData.odometro > 0) vehicleUpdate.odometro = updateData.odometro;
         if (updateData.horimetro > 0) {
@@ -369,18 +443,15 @@ const updateRefuelingOrder = async (req, res) => {
              await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), vId]);
         }
 
-        // Recalcular Despesas Mensais
         const currentObra = updateData.obraId || oldRefueling.obraId;
         const currentPartner = updateData.partnerId || oldRefueling.partnerId;
         const currentFuel = updateData.fuelType || oldRefueling.fuelType;
         const currentDate = updateData.data || oldRefueling.data;
 
-        // Atualiza a despesa do "destino" (seja novo valor ou atual)
         if (currentObra && currentPartner && currentFuel) {
             await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
         }
 
-        // Se houve mudança de chaves (Obra/Posto/Combustível), atualiza também a despesa de "origem" para remover o valor antigo
         if (
             (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
             (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
@@ -427,7 +498,6 @@ const confirmRefuelingOrder = async (req, res) => {
         }
         const order = orders[0];
 
-        // Validação de Duplicidade de NF
         if (invoiceNumber) {
             const nfStr = invoiceNumber.toString().trim();
             if (nfStr) {
@@ -441,7 +511,6 @@ const confirmRefuelingOrder = async (req, res) => {
             }
         }
 
-        // Atualização do Veículo
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [order.vehicleId]);
         const vehicle = vehicles[0];
         
@@ -461,7 +530,6 @@ const confirmRefuelingOrder = async (req, res) => {
             await connection.execute(`UPDATE vehicles SET ${vFields} WHERE id = ?`, [...Object.values(vehicleUpdate), order.vehicleId]);
         }
 
-        // Atualização de Preço do Posto (Opcional via checkbox)
         const safePrice = safeNum(pricePerLiter, true);
         
         if (order.partnerId && safePrice > 0 && order.fuelType && updatePartnerPrice === true) {
@@ -473,7 +541,6 @@ const confirmRefuelingOrder = async (req, res) => {
             await connection.execute(priceQuery, [order.partnerId, order.fuelType, safePrice]);
         }
 
-        // Atualiza Ordem
         const orderUpdate = {
             status: 'Concluída',
             litrosAbastecidos: safeNum(litrosAbastecidos, true),
@@ -489,12 +556,8 @@ const confirmRefuelingOrder = async (req, res) => {
         const oFields = Object.keys(orderUpdate).map(k => `${k} = ?`).join(', ');
         await connection.execute(`UPDATE refuelings SET ${oFields} WHERE id = ?`, [...Object.values(orderUpdate), id]);
 
-        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO (Baixa Automática) ---
-        // Verificação Robusta: Procura também no JSON createdBy
         let linkedSolicitacaoId = null;
-        // 1. Tenta campo legado (se existir em outros)
         if (order.createdFromSolicitacaoId) linkedSolicitacaoId = order.createdFromSolicitacaoId;
-        // 2. Tenta no JSON createdBy (solução nova)
         if (!linkedSolicitacaoId && order.createdBy) {
             try {
                 const cbObj = JSON.parse(order.createdBy);
@@ -508,9 +571,7 @@ const confirmRefuelingOrder = async (req, res) => {
                 [linkedSolicitacaoId]
             );
         }
-        // ---------------------------------------------------------------
 
-        // Atualiza Despesas
         if (order.obraId && order.partnerId && order.fuelType) {
             await updateMonthlyExpense(connection, order.obraId, order.partnerId, order.fuelType, order.data);
         }
@@ -543,8 +604,6 @@ const deleteRefuelingOrder = async (req, res) => {
 
         await connection.execute('DELETE FROM refuelings WHERE id = ?', [id]);
 
-        // --- INTEGRAÇÃO COM MÓDULO DE SOLICITAÇÃO (Estorno) ---
-        // Verificação Robusta: Procura também no JSON createdBy
         let linkedSolicitacaoId = null;
         if (ref.createdFromSolicitacaoId) linkedSolicitacaoId = ref.createdFromSolicitacaoId;
         if (!linkedSolicitacaoId && ref.createdBy) {
@@ -555,13 +614,11 @@ const deleteRefuelingOrder = async (req, res) => {
         }
 
         if (linkedSolicitacaoId) {
-            // Se a ordem foi excluída, marcamos a solicitação como NEGADA para que o usuário saiba que foi cancelada
             await connection.execute(
                 'UPDATE solicitacoes_abastecimento SET status = "NEGADO", motivo_negativa = "Ordem Excluída Manualmente pelo Gestor (Estorno)" WHERE id = ?',
                 [linkedSolicitacaoId]
             );
         }
-        // ------------------------------------------------------
 
         if (ref.obraId && ref.partnerId && ref.fuelType) {
             await updateMonthlyExpense(connection, ref.obraId, ref.partnerId, ref.fuelType, ref.data);
@@ -587,5 +644,6 @@ module.exports = {
     confirmRefuelingOrder,
     deleteRefuelingOrder,
     upload,          
-    uploadOrderPdf   
+    uploadOrderPdf,
+    sendOrderEmail 
 };
