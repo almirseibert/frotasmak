@@ -207,7 +207,8 @@ const updateFuelPrices = async (req, res) => {
 // --- NOVO: UPDATE STATUS (Bloquear/Desbloquear) ---
 const updatePartnerStatus = async (req, res) => {
     const { id } = req.params;
-    const { status } = req.body; 
+    // CORREÇÃO: Aceita 'status' (enviado pelo novo apiClient) ou 'status_operacional' (fallback)
+    const status = req.body.status || req.body.status_operacional; 
 
     if (!status) {
         return res.status(400).json({ error: "Status é obrigatório." });
@@ -222,6 +223,7 @@ const updatePartnerStatus = async (req, res) => {
         res.status(500).json({ error: 'Erro ao atualizar status do parceiro.' });
     }
 };
+
 
 // --- DELETE: Deletar um parceiro ---
 const deletePartner = async (req, res) => {
