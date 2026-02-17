@@ -13,7 +13,11 @@ router.post('/', partnerController.createPartner);
 router.put('/:id', partnerController.updatePartner);
 router.delete('/:id', partnerController.deletePartner);
 
-// Nova rota para atualizar apenas os preços
+// Rota para atualizar apenas os preços
 router.put('/:id/prices', partnerController.updateFuelPrices);
+
+// NOVA ROTA: Atualizar status (Bloqueio)
+// Resolve o erro 404 que você estava recebendo
+router.put('/:id/status', partnerController.updatePartnerStatus);
 
 module.exports = router;

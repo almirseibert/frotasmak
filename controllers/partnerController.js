@@ -1,35 +1,25 @@
 // controllers/partnerController.js
 const db = require('../database');
-const { parseJsonSafe } = require('../utils/parseJsonSafe'); // Supondo que você criou um util
+const { parseJsonSafe } = require('../utils/parseJsonSafe'); 
 
 // --- Função Auxiliar para Conversão de JSON ---
-// Esta função não é mais necessária para fuel_prices
 const parsePartnerJsonFields = (partner) => {
     if (!partner) return null;
     const newPartner = { ...partner };
-    // Removemos fuel_prices daqui
     if (newPartner.ultima_alteracao) newPartner.ultima_alteracao = parseJsonSafe(newPartner.ultima_alteracao, 'ultima_alteracao');
     return newPartner;
 };
 
-// --- READ: Obter todos os parceiros (CORRIGIDO) ---
+// --- READ: Obter todos os parceiros ---
 const getAllPartners = async (req, res) => {
     try {
-        // 1. Busca todos os parceiros
         const [partnerRows] = await db.execute('SELECT * FROM partners');
-        
-        // 2. Busca todos os preços de combustível
         const [priceRows] = await db.execute('SELECT * FROM partner_fuel_prices');
         
-        // 3. Mapeia os preços para cada parceiro
         const partnersWithPrices = partnerRows.map(partner => {
             const parsedPartner = parsePartnerJsonFields(partner);
-            
-            // Filtra os preços para este parceiro
             const partnerPrices = priceRows.filter(p => p.partnerId === partner.id);
             
-            // Transforma o array de preços em um objeto (como o frontend espera)
-            // Ex: { "Diesel S10": 5.99, "Arla": 2.50 }
             parsedPartner.fuel_prices = partnerPrices.reduce((acc, priceEntry) => {
                 acc[priceEntry.fuelType] = priceEntry.price;
                 return acc;
@@ -45,7 +35,7 @@ const getAllPartners = async (req, res) => {
     }
 };
 
-// --- READ: Obter um único parceiro por ID (CORRIGIDO) ---
+// --- READ: Obter um único parceiro por ID ---
 const getPartnerById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM partners WHERE id = ?', [req.params.id]);
@@ -54,11 +44,8 @@ const getPartnerById = async (req, res) => {
         }
         
         const partner = parsePartnerJsonFields(rows[0]);
-        
-        // Busca os preços deste parceiro
         const [priceRows] = await db.execute('SELECT * FROM partner_fuel_prices WHERE partnerId = ?', [req.params.id]);
         
-        // Transforma e anexa os preços
         partner.fuel_prices = priceRows.reduce((acc, priceEntry) => {
             acc[priceEntry.fuelType] = priceEntry.price;
             return acc;
@@ -71,12 +58,10 @@ const getPartnerById = async (req, res) => {
     }
 };
 
-// --- CREATE: Criar um novo parceiro (CORRIGIDO) ---
+// --- CREATE: Criar um novo parceiro ---
 const createPartner = async (req, res) => {
-    // 1. Defina os campos que REALMENTE existem na tabela 'partners'
-    // (Baseado no seu frotasmak (1).sql e na sua confirmação)
     const allowedPartnerFields = [
-        'id', // ID é varchar(255) e vem do cliente
+        'id', 
         'razaoSocial',
         'cnpj',
         'inscricaoEstadual',
@@ -85,15 +70,13 @@ const createPartner = async (req, res) => {
         'whatsapp',
         'email',
         'contatoResponsavel',
-        'cidade' // Campo que você adicionou
+        'cidade',
+        'status_operacional'
     ];
 
     const data = req.body;
-    
-    // 2. Separe os preços (que não vão na tabela 'partners')
     const fuelPrices = data.fuel_prices;
     
-    // 3. Crie o objeto 'partnerData' APENAS com os campos permitidos
     const partnerData = {};
     Object.keys(data).forEach(key => {
         if (allowedPartnerFields.includes(key)) {
@@ -101,15 +84,9 @@ const createPartner = async (req, res) => {
         }
     });
 
-    // 4. Stringify JSON (se houver)
-    // O campo 'ultima_alteracao' NÃO existe na tabela partners, então removemos a lógica
-    // if (partnerData.ultima_alteracao) { ... }
-
-    // 5. Construa a query de forma segura
     const fields = Object.keys(partnerData);
     const values = Object.values(partnerData);
     
-    // Validação crucial: O ID deve estar presente
     if (!partnerData.id || !partnerData.razaoSocial) {
         return res.status(400).json({ error: 'ID e Razão Social são obrigatórios.' });
     }
@@ -121,11 +98,9 @@ const createPartner = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        const [result] = await connection.execute(query, values);
-        // O ID é o que veio do cliente (partnerData.id)
+        await connection.execute(query, values);
         const newPartnerId = partnerData.id; 
 
-        // Agora, insere os preços de combustível na tabela 'partner_fuel_prices'
         if (fuelPrices && typeof fuelPrices === 'object') {
             const pricePromises = Object.entries(fuelPrices).map(([fuelType, price]) => {
                 return connection.execute(
@@ -137,10 +112,7 @@ const createPartner = async (req, res) => {
         }
 
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['partners'] });
-
         res.status(201).json({ id: newPartnerId, ...req.body });
     } catch (error) {
         await connection.rollback();
@@ -152,12 +124,9 @@ const createPartner = async (req, res) => {
 };
 
 // --- UPDATE: Atualizar um parceiro existente ---
-// (Esta função só atualiza a tabela 'partners'. Preços são atualizados via 'updateFuelPrices')
 const updatePartner = async (req, res) => {
     const { id } = req.params;
 
-    // *** CORREÇÃO DO BUG 'ultima_alteracao' ***
-    // Esta lista agora reflete 100% a tabela 'partners' do seu .sql + 'cidade'
     const allowedPartnerFields = [
         'razaoSocial',
         'cnpj',
@@ -167,26 +136,20 @@ const updatePartner = async (req, res) => {
         'whatsapp',
         'email',
         'contatoResponsavel',
-        'cidade'
-        // 'ultima_alteracao' foi REMOVIDO pois não existe na tabela partners
+        'cidade',
+        'status_operacional'
     ];
 
     const data = req.body;
-    
-    // 1. Crie o objeto 'partnerData' APENAS com os campos permitidos
     const partnerData = {};
     Object.keys(data).forEach(key => {
-        if (allowedPartnerFields.includes(key) && key !== 'id') { // Ignora 'id'
+        if (allowedPartnerFields.includes(key) && key !== 'id') {
             partnerData[key] = data[key];
         }
     });
     
-    // 2. Stringify JSON (Lógica removida, 'ultima_alteracao' não está aqui)
-    // if (partnerData.ultima_alteracao) { ... }
-
-    // 3. Construa a query de forma segura
     const fields = Object.keys(partnerData);
-    const values = fields.map(field => partnerData[field]); // Pega os valores na ordem correta
+    const values = fields.map(field => partnerData[field]);
     const setClause = fields.map(field => `${field} = ?`).join(', ');
     
     if (fields.length === 0) {
@@ -197,10 +160,7 @@ const updatePartner = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['partners'] });
-
         res.json({ message: 'Parceiro atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar parceiro:', error);
@@ -208,10 +168,10 @@ const updatePartner = async (req, res) => {
     }
 };
 
-// --- UPDATE: Atualizar apenas os preços dos combustíveis (CORRIGIDO) ---
+// --- UPDATE: Atualizar apenas os preços dos combustíveis ---
 const updateFuelPrices = async (req, res) => {
-    const { id } = req.params; // partnerId
-    const prices = req.body; // Ex: { "Diesel S10": 5.99, "Arla": 2.50 }
+    const { id } = req.params;
+    const prices = req.body;
     
     if (!prices || typeof prices !== 'object' || Object.keys(prices).length === 0) {
         return res.status(400).json({ error: 'Dados de preços inválidos.' });
@@ -227,41 +187,47 @@ const updateFuelPrices = async (req, res) => {
                 VALUES (?, ?, ?)
                 ON DUPLICATE KEY UPDATE price = VALUES(price)
             `;
-            // Garante que o preço é um número, ou 0 se inválido
             const numericPrice = parseFloat(price);
             return connection.execute(query, [id, fuelType, isNaN(numericPrice) ? 0 : numericPrice]);
         });
         
         await Promise.all(priceUpdates);
-        
         await connection.commit();
-
-        // EMITIR EVENTO SOCKET.IO
-        // Fundamental para que novos abastecimentos peguem o preço correto instantaneamente
         req.io.emit('server:sync', { targets: ['partners'] });
-
         res.json({ message: 'Preços de combustível atualizados com sucesso.' });
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao atualizar preços:', error);
-        // Este é o "Erro 500 nos Postos" que você mencionou.
         res.status(500).json({ error: 'Erro ao atualizar os preços.' });
     } finally {
         connection.release();
     }
 };
 
+// --- NOVO: UPDATE STATUS (Bloquear/Desbloquear) ---
+const updatePartnerStatus = async (req, res) => {
+    const { id } = req.params;
+    const { status } = req.body; 
+
+    if (!status) {
+        return res.status(400).json({ error: "Status é obrigatório." });
+    }
+
+    try {
+        await db.execute('UPDATE partners SET status_operacional = ? WHERE id = ?', [status, id]);
+        req.io.emit('server:sync', { targets: ['partners'] });
+        res.json({ message: `Status do posto atualizado para ${status}.` });
+    } catch (error) {
+        console.error('Erro ao atualizar status:', error);
+        res.status(500).json({ error: 'Erro ao atualizar status do parceiro.' });
+    }
+};
+
 // --- DELETE: Deletar um parceiro ---
-// (Não precisa de mudança, o DB deve usar ON DELETE CASCADE)
 const deletePartner = async (req, res) => {
     try {
-        // O 'ON DELETE CASCADE' na tabela 'partner_fuel_prices' (definido no SQL)
-        // deve remover os preços automaticamente.
         await db.execute('DELETE FROM partners WHERE id = ?', [req.params.id]);
-
-        // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['partners'] });
-
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar parceiro:', error);
@@ -275,5 +241,6 @@ module.exports = {
     createPartner,
     updatePartner,
     updateFuelPrices,
+    updatePartnerStatus, // Exportando a nova função
     deletePartner,
 };
