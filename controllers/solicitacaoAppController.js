@@ -4,7 +4,6 @@ const fs = require('fs');
 const multer = require('multer');
 
 // --- CONFIGURAÇÃO MULTER (Uploads Otimizados) ---
-// Mantido aqui pois é o App que faz o upload
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = path.join(__dirname, '../public/uploads/solicitacoes');
@@ -58,7 +57,7 @@ const criarSolicitacao = async (req, res) => {
             tipo_combustivel, litragem, flag_tanque_cheio, 
             flag_outros, descricao_outros, horimetro, odometro, 
             latitude, longitude, observacao,
-            data_abastecimento // Novo campo recebido do front
+            data_abastecimento 
         } = req.body;
 
         const fotoPainel = req.file ? `/uploads/solicitacoes/${req.file.filename}` : null;
@@ -75,11 +74,13 @@ const criarSolicitacao = async (req, res) => {
         }
         const veiculo = vehicles[0];
 
-        // 1.1 Validar se já existe solicitação em aberto para este veículo (Regra de Negócio)
+        // 1.1 Validar se já existe solicitação em aberto para este veículo (Regra de Negócio com CORREÇÃO ANTI-TRAVAMENTO)
+        // Ignora solicitações travadas mais antigas que 48 horas (se houve erro sistêmico, o motorista consegue pedir de novo após 2 dias)
         const [duplicates] = await connection.execute(
             `SELECT id FROM solicitacoes_abastecimento 
              WHERE veiculo_id = ? 
-             AND status IN ('PENDENTE', 'LIBERADO', 'AGUARDANDO_BAIXA')`,
+             AND status IN ('PENDENTE', 'LIBERADO', 'AGUARDANDO_BAIXA')
+             AND data_solicitacao >= DATE_SUB(NOW(), INTERVAL 48 HOUR)`,
             [veiculo_id]
         );
 
@@ -125,7 +126,6 @@ const criarSolicitacao = async (req, res) => {
             return res.status(400).json({ error: `Erro de Leitura: ${erroValidacao} (Tentativa ${novasTentativas}/3).` });
         }
 
-        // Resetar tentativas se deu certo
         await connection.execute('UPDATE users SET tentativas_falhas_abastecimento = 0 WHERE id = ?', [usuarioId]);
 
         // 4. Trava Orçamentária
@@ -151,7 +151,6 @@ const criarSolicitacao = async (req, res) => {
             obsFinal = `[Item: ${descricao_outros}] ${obsFinal}`;
         }
 
-        // Define a data correta: Se o usuário enviou uma data, usa ela, senão usa NOW()
         const dataEfetiva = data_abastecimento ? data_abastecimento : new Date();
         
         // 6. Inserir
@@ -173,7 +172,6 @@ const criarSolicitacao = async (req, res) => {
 
         await connection.commit();
         
-        // Socket Notifications
         if (req.io) {
             req.io.emit('server:sync', { targets: ['solicitacoes'] });
             req.io.emit('admin:notificacao', { tipo: 'nova_solicitacao', id: result.insertId });
@@ -195,16 +193,12 @@ const listarMinhasSolicitacoes = async (req, res) => {
     try {
         const usuarioId = req.user.id;
         
-        // ALTERAÇÃO PARA VISÃO POR OBRA
-        // A lógica é: mostre as solicitações onde EU sou o criador
-        // OU as solicitações que pertencem a Obras onde EU já criei solicitações antes (associação implícita por contexto).
-        // Isso permite que o "João" veja o que o "Pedro" pediu na mesma obra, evitando duplicidade.
         const query = `
             SELECT s.*, 
                    v.placa, v.registroInterno as veiculo_nome, 
                    o.nome as obra_nome, 
                    p.razaoSocial as posto_nome,
-                   u.name as solicitante_nome -- Adicionado para saber quem pediu se não fui eu
+                   u.name as solicitante_nome
             FROM solicitacoes_abastecimento s
             LEFT JOIN vehicles v ON s.veiculo_id = v.id
             LEFT JOIN obras o ON s.obra_id = o.id
@@ -233,7 +227,6 @@ const enviarComprovante = async (req, res) => {
         if (!req.file) return res.status(400).json({ error: 'Foto obrigatória.' });
         const fotoPath = `/uploads/solicitacoes/${req.file.filename}`;
         
-        // Verifica se é o dono da solicitação ou se tem permissão na obra (Opcional, mantido simples aqui)
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?', [fotoPath, id]);
         
         if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
@@ -258,5 +251,5 @@ module.exports = {
     listarMinhasSolicitacoes,
     enviarComprovante,
     verificarStatusUsuario,
-    upload // Exporta o multer configurado para usar na rota
+    upload 
 };
