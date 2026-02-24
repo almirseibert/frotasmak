@@ -317,12 +317,8 @@ const completeRevision = async (req, res) => {
             let updateVehicleQuery = '';
             
             if (isHourBased) {
-                updateVehicleQuery = `
-                    UPDATE vehicles 
-                    SET horimetro = ?, 
-                        horimetroDigital = NULL, 
-                        horimetroAnalogico = NULL 
-                    WHERE id = ?`;
+                // Agora atualizamos apenas a coluna 'horimetro', condizente com sua nova estrutura
+                updateVehicleQuery = 'UPDATE vehicles SET horimetro = ? WHERE id = ?';
                 await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
             } else {
                 updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
