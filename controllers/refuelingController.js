@@ -222,6 +222,7 @@ const sendOrderEmail = async (req, res) => {
                         <p><strong>Veículo:</strong> ${orderData.vehicleInfo || 'N/A'}</p>
                         <p><strong>Combustível:</strong> ${orderData.fuelType}</p>
                         <p><strong>Quantidade:</strong> ${orderData.isFillUp ? 'COMPLETAR TANQUE' : (orderData.litrosLiberados + ' Litros')}</p>
+                        ${orderData.outros ? `<p><strong>Outros/Obs:</strong> ${orderData.outros}</p>` : ''}
                     </div>
 
                     <p>Por favor, realize o abastecimento conforme autorizado.</p>
@@ -520,7 +521,14 @@ const confirmRefuelingOrder = async (req, res) => {
         const readingVal = safeNum(confirmedReading);
 
         if (readingVal) {
-            if (order.odometro > 0 || (vehicle.odometro > 0 && vehicle.tipo !== 'Caminhão')) {
+            // Lógica mais robusta para garantir que Leves/Caminhões de Trecho usem Odômetro,
+            // espelhando as regras do Frontend (vehicleRules.js).
+            const isLeveOrTrecho = [
+                'Automóvel', 'Camionete', 'Utilitários', 'Moto', 
+                'Caminhão Prancha', 'Semirreboques'
+            ].includes(vehicle.tipo);
+
+            if (isLeveOrTrecho) {
                  vehicleUpdate.odometro = readingVal;
             } else {
                  vehicleUpdate.horimetro = readingVal;
