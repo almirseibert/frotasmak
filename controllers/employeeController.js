@@ -162,7 +162,6 @@ const createEmployee = async (req, res) => {
 
         const status = 'ativo';
 
-        // CORREÇÃO: Removemos 'telefone' pois o banco usa 'contato'
         const values = [
             newId, 
             valOrNull(data.nome), 
@@ -172,7 +171,6 @@ const createEmployee = async (req, res) => {
             valOrNull(data.rg), 
             dataNascimento, 
             valOrNull(data.funcao), 
-            // valOrNull(data.telefone), // REMOVIDO: Coluna telefone não existe, usamos contato
             valOrNull(data.contato), 
             valOrNull(data.email),
             valOrNull(data.endereco), 
@@ -259,7 +257,6 @@ const updateEmployee = async (req, res) => {
 
         let statusUpdateClause = "";
         
-        // CORREÇÃO: Removemos 'telefone' da atualização
         let params = [
             valOrNull(data.nome), 
             valOrNull(data.vulgo), 
@@ -268,7 +265,6 @@ const updateEmployee = async (req, res) => {
             valOrNull(data.rg), 
             dataNascimento, 
             valOrNull(data.funcao), 
-            // valOrNull(data.telefone), // REMOVIDO
             valOrNull(data.contato), 
             valOrNull(data.email), 
             valOrNull(data.endereco), 
