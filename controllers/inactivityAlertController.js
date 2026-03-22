@@ -3,11 +3,14 @@ const db = require('../database');
 
 const getAllInactivityAlerts = async (req, res) => {
     try {
-        // --- ROTINA DE AUTO-LIMPEZA (NOVO) ---
-        // Antes de devolver a lista, o sistema verifica se existem abastecimentos POSTERIORES
-        // à data do alerta. Se houver, marca o alerta como 'Resolvido' automaticamente.
+        // =========================================================================
+        // --- ROTINAS DE AUTO-LIMPEZA / VERIFICAÇÃO DIÁRIA CONSTANTE (NOVO) ---
+        // Como o frontend chama essa rota a cada 5 minutos no Dashboard, 
+        // estas queries funcionam perfeitamente como uma limpeza de fundo contínua.
+        // =========================================================================
         
-        const autoResolveQuery = `
+        // 1. Elimina (Resolve) Alertas de veículos que foram ABASTECIDOS posteriormente
+        const autoResolveByRefueling = `
             UPDATE inactivity_alerts ia
             JOIN refuelings r ON ia.vehicleId = r.vehicleId
             SET 
@@ -20,11 +23,25 @@ const getAllInactivityAlerts = async (req, res) => {
                 AND r.date > ia.lastRefuelingDate -- Abastecimento é mais novo que o alerta
         `;
 
+        // 2. Elimina (Resolve) Alertas de veículos que foram DESALOCADOS da obra
+        const autoResolveByDeallocation = `
+            UPDATE inactivity_alerts ia
+            JOIN vehicles v ON ia.vehicleId = v.id
+            SET 
+                ia.status = 'Resolvido',
+                ia.observation = 'Sistema: Resolvido automaticamente. Veículo desalocado da obra (ou não está mais operando nela).',
+                ia.dismissedAt = NOW()
+            WHERE 
+                ia.status IN ('Ativo', 'Pendente')
+                AND (v.status != 'Em Obra' OR v.obraAtualId IS NULL)
+        `;
+
         try {
-            await db.execute(autoResolveQuery);
+            await db.execute(autoResolveByRefueling);
+            await db.execute(autoResolveByDeallocation);
         } catch (cleanupError) {
             // Logamos o erro mas não travamos a requisição principal
-            console.warn('Aviso: Rotina de auto-limpeza falhou (verifique nomes das tabelas/colunas):', cleanupError.message);
+            console.warn('Aviso: Rotina de auto-limpeza de inatividade falhou (verifique nomes das tabelas/colunas):', cleanupError.message);
         }
         
         // --- FIM DA AUTO-LIMPEZA ---
@@ -43,10 +60,10 @@ const getAllInactivityAlerts = async (req, res) => {
 const createInactivityAlert = async (req, res) => {
     const data = req.body;
 
-    // --- VALIDAÇÃO PREVENTIVA (NOVO) ---
+    // --- VALIDAÇÃO PREVENTIVA ---
     // Impede a criação de alertas duplicados ou inválidos no momento da inserção
     try {
-        // 1. Verifica se já existe alerta Ativo para este veículo
+        // Verifica se já existe alerta Ativo para este veículo
         const [existing] = await db.execute(
             "SELECT id FROM inactivity_alerts WHERE vehicleId = ? AND status IN ('Ativo', 'Pendente')",
             [data.vehicleId]
