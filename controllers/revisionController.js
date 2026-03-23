@@ -290,8 +290,7 @@ const completeRevision = async (req, res) => {
             updatePlanParams.push(sanitizedAvisoDias);
         }
         
-        // NOVO: Usa 'proximaDescricao' para atualizar o nome do plano (O QUE SERÁ FEITO DEPOIS)
-        // Se o frontend mandar (mesmo que vazio), atualiza.
+        // Usa 'proximaDescricao' para atualizar o nome do plano (O QUE SERÁ FEITO DEPOIS)
         if (proximaDescricao !== undefined) {
             updatePlanQuery += ', descricao = ?';
             updatePlanParams.push(proximaDescricao);
@@ -311,25 +310,13 @@ const completeRevision = async (req, res) => {
         await connection.execute(updatePlanQuery, updatePlanParams);
 
         // 4. Atualizar Leitura do Veículo
-        const readingVal = parseFloat(leituraRealizada);
-        
-        if (!isNaN(readingVal) && readingVal > 0) {
-            let updateVehicleQuery = '';
-            
-            if (isHourBased) {
-                // Agora atualizamos apenas a coluna 'horimetro', condizente com sua nova estrutura
-                updateVehicleQuery = 'UPDATE vehicles SET horimetro = ? WHERE id = ?';
-                await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
-            } else {
-                updateVehicleQuery = 'UPDATE vehicles SET odometro = ? WHERE id = ?';
-                await connection.execute(updateVehicleQuery, [readingVal, vehicleId]);
-            }
-        }
+        // ATENÇÃO: A pedido, a atualização de odometro/horimetro no veículo ao concluir a revisão/manutenção foi removida.
+        // Isso evita que a leitura principal do veículo seja alterada erroneamente neste fluxo.
 
         await connection.commit();
 
-        req.io.emit('server:sync', { targets: ['revisions', 'vehicles'] });
-        res.json({ message: 'Revisão concluída e veículo atualizado com sucesso!' });
+        req.io.emit('server:sync', { targets: ['revisions'] });
+        res.json({ message: 'Revisão concluída com sucesso! (Leitura do veículo inalterada)' });
 
     } catch (error) {
         await connection.rollback();
