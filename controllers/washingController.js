@@ -33,6 +33,24 @@ const createPartner = async (req, res) => {
     }
 };
 
+const updatePartner = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { nome, telefone, endereco } = req.body;
+        
+        await db.execute(
+            'UPDATE washing_partners SET nome = ?, telefone = ?, endereco = ? WHERE id = ?',
+            [nome, telefone || null, endereco || null, id]
+        );
+        
+        req.io.emit('server:sync', { targets: ['washing_partners'] });
+        res.json({ message: 'Parceiro atualizado com sucesso' });
+    } catch (error) {
+        console.error('Erro PUT washing_partners:', error);
+        res.status(500).json({ error: 'Erro ao atualizar parceiro.' });
+    }
+};
+
 const deletePartner = async (req, res) => {
     try {
         await db.execute('DELETE FROM washing_partners WHERE id = ?', [req.params.id]);
@@ -111,6 +129,7 @@ const createWashing = async (req, res) => {
 module.exports = {
     getPartners,
     createPartner,
+    updatePartner, // Exportando a nova função
     deletePartner,
     getWashings,
     createWashing
