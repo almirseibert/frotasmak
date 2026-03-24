@@ -41,6 +41,8 @@ const obraSupervisorRoutes = require('./routes/obraSupervisorRoutes');
 // Certifique-se de que estes arquivos existem no diretório 'routes'
 const solicitacaoRoutes = require('./routes/solicitacaoRoutes');
 const billingRoutes = require('./routes/billingRoutes');
+const maintenanceRoutes = require('./routes/maintenanceRoutes');
+const washingRoutes = require('./routes/washingRoutes');
 
 const app = express();
 const port = process.env.PORT || 3001;
@@ -107,6 +109,10 @@ apiRouter.use('/supervisor', obraSupervisorRoutes);
 apiRouter.use('/billing', billingRoutes);
 apiRouter.use('/solicitacoes', solicitacaoRoutes);
 
+// Integração das Novas Funcionalidades
+apiRouter.use('/maintenances', maintenanceRoutes);
+apiRouter.use('/washings', washingRoutes);
+
 
 app.use('/api', apiRouter);
 
@@ -134,4 +140,6 @@ server.listen(port, () => {
     console.log(`🚀 Servidor rodando (HTTP + Socket.io) na porta ${port}`);
     console.log(`- Rotas de Billing registradas em /api/billing`);
     console.log(`- Rotas de Solicitações registradas em /api/solicitacoes`);
+    console.log(`- Rotas de Manutenções registradas em /api/maintenances`);
+    console.log(`- Rotas de Lavagens registradas em /api/washings`);
 });
