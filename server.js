@@ -24,6 +24,7 @@ const revisionRoutes = require('./routes/revisionRoutes');
 const fineRoutes = require('./routes/fineRoutes');
 const refuelingRoutes = require('./routes/refuelingRoutes');
 const comboioTransactionRoutes = require('./routes/comboioTransactionRoutes');
+const agendaRoutes = require('./routes/agendaRoutes');
 const diarioDeBordoRoutes = require('./routes/diarioDeBordoRoutes');
 const orderRoutes = require('./routes/orderRoutes');
 const counterRoutes = require('./routes/counterRoutes');
@@ -47,10 +48,8 @@ const washingRoutes = require('./routes/washingRoutes');
 const app = express();
 const port = process.env.PORT || 3001;
 
-// <--- 3. Criar o servidor HTTP explicitamente usando o app do Express
 const server = http.createServer(app);
 
-// <--- 4. Configurar o Socket.io com CORS (Permite conexão do Frontend)
 const io = new Server(server, {
     cors: {
         origin: "*", // Aceita conexões de qualquer origem (ideal para dev/fases iniciais)
@@ -112,6 +111,7 @@ apiRouter.use('/solicitacoes', solicitacaoRoutes);
 // Integração das Novas Funcionalidades
 apiRouter.use('/maintenances', maintenanceRoutes);
 apiRouter.use('/washings', washingRoutes);
+apiRouter.use('/agenda', agendaRoutes);
 
 
 app.use('/api', apiRouter);
@@ -134,6 +134,11 @@ db.getConnection()
     .catch(err => {
         console.error('Erro ao conectar ao banco de dados:', err.stack);
     });
+
+    // ==========================================
+// IMPORTAR E INICIAR SERVIÇOS EM SEGUNDO PLANO
+// ==========================================
+require('./services/cronService'); // <--- Inicia a rotina da Agenda Automática
 
 // <--- 7. IMPORTANTE: Mude app.listen para server.listen
 server.listen(port, () => {
