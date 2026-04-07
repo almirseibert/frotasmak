@@ -1,10 +1,12 @@
 const express = require('express');
 const router = express.Router();
 const agendaController = require('../controllers/agendaController');
-const { protect } = require('../middlewares/authMiddleware'); // Garantindo acesso seguro via JWT
+
+// CORREÇÃO: Importando o middleware diretamente, no padrão do seu projeto
+const authMiddleware = require('../middlewares/authMiddleware'); 
 
 // Todas as rotas de agenda são protegidas (o usuário precisa estar logado)
-router.use(protect);
+router.use(authMiddleware);
 
 // Rotas CRUD
 router.get('/', agendaController.getEventos);
