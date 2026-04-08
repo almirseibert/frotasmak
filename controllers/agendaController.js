@@ -1,8 +1,12 @@
 const db = require('../database');
 
-// Função auxiliar para extrair o ID do usuário de forma segura
+// Função auxiliar para extrair o ID do usuário de forma segura (Aprimorada para Firebase/Tokens)
 const getUserId = (req) => {
-    return req.user?.id || req.userId || req.user?.userId || (typeof req.user === 'number' ? req.user : null);
+    // Procura por uid (Firebase), id, userId, ou verifica se o próprio req.user já é a string
+    const id = req.user?.uid || req.user?.id || req.user?.userId || req.userId || req.uid;
+    if (id) return id;
+    if (typeof req.user === 'string' || typeof req.user === 'number') return req.user;
+    return null;
 };
 
 // Função auxiliar para evitar o erro de "undefined" no mysql2
@@ -14,7 +18,9 @@ exports.getEventos = async (req, res) => {
         if (!userId) return res.status(401).json({ error: 'Usuário não autenticado.' });
 
         const [eventos] = await db.query('SELECT * FROM user_agenda WHERE user_id = ? ORDER BY event_datetime ASC', [userId]);
-        res.status(200).json(eventos);
+        
+        // Garante que retorne um array (evita TypeError: .map is not a function no Frontend)
+        res.status(200).json(eventos || []);
     } catch (error) {
         console.error('Erro DB (getEventos):', error);
         res.status(500).json({ error: 'Erro interno ao buscar eventos.' });
@@ -134,7 +140,9 @@ exports.getNotificacoesPendentes = async (req, res) => {
             ORDER BY event_datetime ASC LIMIT 5
         `;
         const [notificacoes] = await db.query(query, [userId]);
-        res.status(200).json(notificacoes);
+        
+        // Garante que retorne um array
+        res.status(200).json(notificacoes || []);
     } catch (error) {
         console.error('Erro DB (getNotificacoes):', error);
         res.status(500).json({ error: 'Erro interno ao buscar notificações.' });
