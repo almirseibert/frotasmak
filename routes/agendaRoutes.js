@@ -14,6 +14,9 @@ router.post('/', agendaController.criarEvento);
 router.put('/:id', agendaController.atualizarEvento);
 router.delete('/:id', agendaController.deletarEvento);
 
+// Adicione esta linha no seu agendaRoutes.js
+router.put('/:id/concluir', agendaController.marcarConcluido);
+
 // Rotas Específicas de UI/UX (Sininho e Checklist)
 router.patch('/:id/concluir', agendaController.marcarConcluido);
 router.get('/notificacoes', agendaController.getNotificacoesPendentes);
