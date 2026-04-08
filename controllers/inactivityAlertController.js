@@ -15,12 +15,12 @@ const getAllInactivityAlerts = async (req, res) => {
             JOIN refuelings r ON ia.vehicleId = r.vehicleId
             SET 
                 ia.status = 'Resolvido',
-                ia.observation = CONCAT('Sistema: Resolvido automaticamente. Abastecimento detectado em ', DATE_FORMAT(r.date, '%d/%m/%Y')),
+                ia.observation = CONCAT('Sistema: Resolvido automaticamente. Abastecimento detectado em ', DATE_FORMAT(r.data, '%d/%m/%Y')),
                 ia.dismissedAt = NOW()
             WHERE 
                 ia.status IN ('Ativo', 'Pendente') -- Apenas alertas abertos
                 AND r.status = 'Concluída'        -- Apenas abastecimentos válidos
-                AND r.date > ia.lastRefuelingDate -- Abastecimento é mais novo que o alerta
+                AND r.data > ia.lastRefuelingDate -- Abastecimento é mais novo que o alerta
         `;
 
         // 2. Elimina (Resolve) Alertas de veículos que foram DESALOCADOS da obra
