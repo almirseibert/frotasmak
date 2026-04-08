@@ -1,15 +1,12 @@
 const db = require('../database');
 
-// Função auxiliar para extrair o ID do usuário de forma segura (Aprimorada para Firebase/Tokens)
 const getUserId = (req) => {
-    // Procura por uid (Firebase), id, userId, ou verifica se o próprio req.user já é a string
     const id = req.user?.uid || req.user?.id || req.user?.userId || req.userId || req.uid;
     if (id) return id;
     if (typeof req.user === 'string' || typeof req.user === 'number') return req.user;
     return null;
 };
 
-// Função auxiliar para evitar o erro de "undefined" no mysql2
 const safeParam = (param) => param === undefined ? null : param;
 
 exports.getEventos = async (req, res) => {
@@ -18,8 +15,6 @@ exports.getEventos = async (req, res) => {
         if (!userId) return res.status(401).json({ error: 'Usuário não autenticado.' });
 
         const [eventos] = await db.query('SELECT * FROM user_agenda WHERE user_id = ? ORDER BY event_datetime ASC', [userId]);
-        
-        // Garante que retorne um array (evita TypeError: .map is not a function no Frontend)
         res.status(200).json(eventos || []);
     } catch (error) {
         console.error('Erro DB (getEventos):', error);
@@ -40,11 +35,10 @@ exports.criarEvento = async (req, res) => {
 
         const query = `
             INSERT INTO user_agenda 
-            (user_id, title, description, event_datetime, reminder_time, related_type, related_id, color_hex) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, title, description, event_datetime, reminder_time, related_type, related_id, color_hex, notification_status) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
         `;
         
-        // Usando safeParam e new Date() para garantir tipos compatíveis com o MySQL
         const values = [
             userId, 
             title, 
@@ -68,9 +62,8 @@ exports.atualizarEvento = async (req, res) => {
     try {
         const userId = getUserId(req);
         const eventId = req.params.id;
-        const { title, description, event_datetime, color_hex } = req.body;
+        const { title, description, event_datetime, color_hex, reminder_time } = req.body;
 
-        // Construção dinâmica da query para atualizar apenas o que foi enviado (evita sobreposição nula)
         let updateFields = [];
         let values = [];
 
@@ -78,17 +71,21 @@ exports.atualizarEvento = async (req, res) => {
         if (description !== undefined) { updateFields.push('description = ?'); values.push(description); }
         if (event_datetime !== undefined) { updateFields.push('event_datetime = ?'); values.push(new Date(event_datetime)); }
         if (color_hex !== undefined) { updateFields.push('color_hex = ?'); values.push(color_hex); }
+        if (reminder_time !== undefined) { updateFields.push('reminder_time = ?'); values.push(reminder_time); }
+
+        // Se atualizou qualquer coisa (principalmente a hora), reseta o status para ele avisar de novo
+        updateFields.push("notification_status = 'pending'");
 
         if (updateFields.length === 0) {
             return res.status(400).json({ error: 'Nenhum campo enviado para atualização.' });
         }
 
         const query = `UPDATE user_agenda SET ${updateFields.join(', ')} WHERE id = ? AND user_id = ?`;
-        values.push(eventId, userId); // Adiciona os IDs no final dos valores
+        values.push(eventId, userId);
 
         const [result] = await db.query(query, values);
         
-        if (result.affectedRows === 0) return res.status(404).json({ error: 'Evento não encontrado ou você não tem permissão.' });
+        if (result.affectedRows === 0) return res.status(404).json({ error: 'Evento não encontrado ou sem permissão.' });
         res.status(200).json({ message: 'Evento atualizado com sucesso!' });
     } catch (error) {
         console.error('Erro DB (atualizarEvento):', error);
@@ -102,7 +99,6 @@ exports.marcarConcluido = async (req, res) => {
         const eventId = req.params.id;
         const { is_completed } = req.body;
 
-        // Força a conversão correta para TINYINT do MySQL (1 ou 0)
         const isCompletedValue = (is_completed === true || is_completed === 'true' || is_completed === 1) ? 1 : 0;
 
         const [result] = await db.query('UPDATE user_agenda SET is_completed = ? WHERE id = ? AND user_id = ?', [isCompletedValue, eventId, userId]);
@@ -141,7 +137,6 @@ exports.getNotificacoesPendentes = async (req, res) => {
         `;
         const [notificacoes] = await db.query(query, [userId]);
         
-        // Garante que retorne um array
         res.status(200).json(notificacoes || []);
     } catch (error) {
         console.error('Erro DB (getNotificacoes):', error);
