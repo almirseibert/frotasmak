@@ -100,19 +100,19 @@ cron.schedule('0 8 * * *', async () => {
 // ====================================================================
 cron.schedule('* * * * *', async () => {
     try {
-        // Busca eventos não concluídos 
+        // Usa DATE_FORMAT para obter a data exatamente como foi salva e ignorar o fuso horário do servidor
         const [eventos] = await db.query(`
-            SELECT id, user_id, title, event_datetime, reminders 
+            SELECT id, user_id, title, DATE_FORMAT(event_datetime, '%Y-%m-%dT%H:%i:%s') as event_datetime_str, reminders 
             FROM user_agenda 
             WHERE is_completed = 0
         `);
 
         if (eventos.length === 0) return;
 
-        const agora = new Date().getTime();
+        const agora = Date.now();
 
         for (const evento of eventos) {
-            if (!evento.reminders) continue;
+            if (!evento.reminders || !evento.event_datetime_str) continue;
 
             let reminders = [];
             try {
@@ -125,7 +125,11 @@ cron.schedule('* * * * *', async () => {
             if (!Array.isArray(reminders) || reminders.length === 0) continue;
 
             let atualizouBanco = false;
-            const dataEventoMs = new Date(evento.event_datetime).getTime();
+
+            // Forçamos a string do banco de dados a ser interpretada como UTC-3 (Horário de Brasília)
+            // Isso previne o bug onde o Node.js em UTC via a data do Brasil como 3 horas no passado, 
+            // fazendo o alerta disparar instantaneamente logo após a criação do evento.
+            const dataEventoMs = new Date(evento.event_datetime_str + '-03:00').getTime();
 
             for (let i = 0; i < reminders.length; i++) {
                 const rem = reminders[i];
@@ -134,17 +138,34 @@ cron.schedule('* * * * *', async () => {
                 if (rem.sent) continue;
 
                 let subtrairMs = 0;
-                if (rem.unit === 'minutos') subtrairMs = rem.value * 60000;
-                else if (rem.unit === 'horas') subtrairMs = rem.value * 3600000;
-                else if (rem.unit === 'dias') subtrairMs = rem.value * 86400000;
-                else if (rem.unit === 'semanas') subtrairMs = rem.value * 604800000;
+
+                // Prioriza os minutos exatos calculados pelo frontend (suporta 'meses' corretamente e resolve bugs)
+                if (rem.minutes !== undefined) {
+                    subtrairMs = rem.minutes * 60000;
+                } else {
+                    // Fallback para eventos antigos caso o 'minutes' não exista na linha do banco
+                    if (rem.unit === 'minutos') subtrairMs = rem.value * 60000;
+                    else if (rem.unit === 'horas') subtrairMs = rem.value * 3600000;
+                    else if (rem.unit === 'dias') subtrairMs = rem.value * 86400000;
+                    else if (rem.unit === 'semanas') subtrairMs = rem.value * 604800000;
+                    else if (rem.unit === 'meses') subtrairMs = rem.value * 2592000000;
+                }
 
                 const dataGatilhoMs = dataEventoMs - subtrairMs;
 
                 // Se a hora atual já passou ou é igual à hora calculada pro gatilho
                 if (agora >= dataGatilhoMs) {
                     if (global.io) {
-                        const mensagem = `Lembrete: "${evento.title}" começará em ${rem.value} ${rem.unit}.`;
+                        let msgTempo = '';
+                        if (rem.unit === 'na_hora') {
+                            msgTempo = 'começará agora!';
+                        } else if (rem.label) {
+                            msgTempo = `começará em ${rem.label.replace(' antes', '')}.`;
+                        } else {
+                            msgTempo = `começará em ${rem.value} ${rem.unit}.`;
+                        }
+
+                        const mensagem = `Lembrete: "${evento.title}" ${msgTempo}`;
                         
                         global.io.emit('agenda:alerta', {
                             userId: evento.user_id,
