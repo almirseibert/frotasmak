@@ -53,7 +53,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
         origin: "*", // Aceita conexões de qualquer origem (ideal para dev/fases iniciais)
-        methods: ["GET", "POST", "PUT", "DELETE"]
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
     }
 });
 global.io = io;

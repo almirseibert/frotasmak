@@ -18,12 +18,19 @@ exports.getEventos = async (req, res) => {
         const query = `
             SELECT id, user_id, title, description, 
             DATE_FORMAT(event_datetime, '%Y-%m-%dT%H:%i:%s') as event_datetime, 
-            color_hex, is_completed 
+            color_hex, is_completed, reminders
             FROM user_agenda 
             WHERE user_id = ? ORDER BY event_datetime ASC
         `;
         const [eventos] = await db.query(query, [userId]);
-        res.status(200).json(eventos || []);
+        
+        // Parse do JSON de reminders para enviar certinho pro front
+        const eventosFormatados = eventos.map(ev => ({
+            ...ev,
+            reminders: ev.reminders ? (typeof ev.reminders === 'string' ? JSON.parse(ev.reminders) : ev.reminders) : []
+        }));
+
+        res.status(200).json(eventosFormatados || []);
     } catch (error) {
         console.error('Erro DB (getEventos):', error);
         res.status(500).json({ error: 'Erro interno ao buscar eventos.' });
@@ -33,31 +40,29 @@ exports.getEventos = async (req, res) => {
 exports.criarEvento = async (req, res) => {
     try {
         const userId = getUserId(req);
-        if (!userId) return res.status(401).json({ error: 'Usuário não autenticado.' });
+        if (!userId) return res.status(401).json({ error: 'Não autenticado.' });
 
         const { title, description, event_datetime, color_hex, reminders } = req.body;
 
         if (!title || !event_datetime) {
-            return res.status(400).json({ error: 'Título e Data/Hora são obrigatórios.' });
+            return res.status(400).json({ error: 'Título e data/hora são obrigatórios.' });
         }
 
-        const [result] = await db.query(
-            `INSERT INTO user_agenda (user_id, title, description, event_datetime, color_hex) VALUES (?, ?, ?, ?, ?)`, 
-            [userId, title, safeParam(description), event_datetime, safeParam(color_hex) || '#3B82F6']
-        );
-        const agendaId = result.insertId;
+        // Formata os lembretes garantindo que iniciem com sent: false
+        const formatedReminders = Array.isArray(reminders) ? reminders.map(r => ({
+            ...r,
+            sent: false
+        })) : [];
 
-        // Salva os N lembretes na nova tabela
-        if (reminders && Array.isArray(reminders)) {
-            for (const r of reminders) {
-                await db.query(
-                    `INSERT INTO agenda_reminders (agenda_id, minutes_before, is_sent) VALUES (?, ?, FALSE)`,
-                    [agendaId, r.minutes]
-                );
-            }
-        }
+        const remindersJson = JSON.stringify(formatedReminders);
 
-        res.status(201).json({ message: 'Evento criado com sucesso!', id: agendaId });
+        const [result] = await db.query(`
+            INSERT INTO user_agenda 
+            (user_id, title, description, event_datetime, color_hex, notification_status, reminders) 
+            VALUES (?, ?, ?, ?, ?, 'pending', ?)
+        `, [userId, title, description || '', event_datetime, color_hex || '#3B82F6', remindersJson]);
+
+        res.status(201).json({ message: 'Evento criado!', id: result.insertId });
     } catch (error) {
         console.error('Erro DB (criarEvento):', error);
         res.status(500).json({ error: 'Erro interno ao criar evento.' });
@@ -68,27 +73,21 @@ exports.atualizarEvento = async (req, res) => {
     try {
         const userId = getUserId(req);
         const eventId = req.params.id;
-        const { title, description, event_datetime, color_hex } = req.body;
+        const { title, description, event_datetime, color_hex, reminders } = req.body;
 
-        let updateFields = [];
-        let values = [];
+        const remindersJson = Array.isArray(reminders) ? JSON.stringify(reminders) : JSON.stringify([]);
 
-        if (title !== undefined) { updateFields.push('title = ?'); values.push(title); }
-        if (description !== undefined) { updateFields.push('description = ?'); values.push(description); }
-        if (event_datetime !== undefined) { updateFields.push('event_datetime = ?'); values.push(event_datetime); }
-        if (color_hex !== undefined) { updateFields.push('color_hex = ?'); values.push(color_hex); }
+        const [result] = await db.query(`
+            UPDATE user_agenda 
+            SET title = ?, description = ?, event_datetime = ?, color_hex = ?, reminders = ?
+            WHERE id = ? AND user_id = ?
+        `, [title, description || '', event_datetime, color_hex, remindersJson, eventId, userId]);
 
-        if (updateFields.length === 0) return res.status(400).json({ error: 'Nenhum campo para atualização.' });
-
-        const query = `UPDATE user_agenda SET ${updateFields.join(', ')} WHERE id = ? AND user_id = ?`;
-        values.push(eventId, userId);
-
-        const [result] = await db.query(query, values);
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Evento não encontrado.' });
         res.status(200).json({ message: 'Evento atualizado!' });
     } catch (error) {
         console.error('Erro DB (atualizarEvento):', error);
-        res.status(500).json({ error: 'Erro interno ao atualizar.' });
+        res.status(500).json({ error: 'Erro ao atualizar evento.' });
     }
 };
 

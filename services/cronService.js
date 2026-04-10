@@ -100,80 +100,73 @@ cron.schedule('0 8 * * *', async () => {
 // ====================================================================
 cron.schedule('* * * * *', async () => {
     try {
-        // Busca eventos que não foram concluídos e estão na janela de ação (-1h a +2 dias)
-        const query = `
-            SELECT id, user_id, title, event_datetime, reminder_time, notification_status 
+        // Busca eventos não concluídos 
+        const [eventos] = await db.query(`
+            SELECT id, user_id, title, event_datetime, reminders 
             FROM user_agenda 
-            WHERE is_completed = FALSE 
-            AND event_datetime BETWEEN NOW() - INTERVAL 1 HOUR AND NOW() + INTERVAL 2 DAY
-        `;
-        const [eventos] = await db.query(query);
+            WHERE is_completed = 0
+        `);
 
-        const agora = new Date();
+        if (eventos.length === 0) return;
+
+        const agora = new Date().getTime();
 
         for (const evento of eventos) {
-            const dataEvento = new Date(evento.event_datetime);
-            const diffMinutos = Math.floor((dataEvento - agora) / (1000 * 60)); // Diferença em minutos
+            if (!evento.reminders) continue;
 
-            let precisaAvisar = false;
-            let novaCategoriaStatus = evento.notification_status || 'pending';
-            let mensagem = '';
-
-            // Lógica Normal (15 min, 60 min, 1440 min)
-            if (evento.reminder_time > 0) {
-                if (diffMinutos <= evento.reminder_time && diffMinutos >= 0 && (evento.notification_status === 'pending' || !evento.notification_status)) {
-                    precisaAvisar = true;
-                    novaCategoriaStatus = 'sent';
-                    mensagem = `⏳ Lembrete: Este evento começa em ${evento.reminder_time >= 60 ? (evento.reminder_time/60)+' hora(s)' : evento.reminder_time+' minutos'}.`;
-                }
-            } 
-            // Lógica Padrão (Na hora exata - 0)
-            else if (evento.reminder_time === 0) {
-                 if (diffMinutos <= 0 && diffMinutos >= -5 && (evento.notification_status === 'pending' || !evento.notification_status)) {
-                    precisaAvisar = true;
-                    novaCategoriaStatus = 'sent';
-                    mensagem = `🔴 O evento está começando agora!`;
-                 }
-            }
-            // Lógica de Cascata Crítica (-1)
-            else if (evento.reminder_time === -1) {
-                if (diffMinutos <= 1440 && diffMinutos > 60 && (!evento.notification_status || evento.notification_status === 'pending')) {
-                    precisaAvisar = true;
-                    novaCategoriaStatus = 'sent_1440';
-                    mensagem = `📅 CRÍTICO (1 Dia): Este evento importante acontece amanhã!`;
-                } else if (diffMinutos <= 60 && diffMinutos > 15 && (evento.notification_status === 'pending' || evento.notification_status === 'sent_1440')) {
-                    precisaAvisar = true;
-                    novaCategoriaStatus = 'sent_60';
-                    mensagem = `⏰ CRÍTICO (1 Hora): O evento importante será em 1 hora!`;
-                } else if (diffMinutos <= 15 && diffMinutos > 0 && (evento.notification_status === 'pending' || evento.notification_status === 'sent_1440' || evento.notification_status === 'sent_60')) {
-                    precisaAvisar = true;
-                    novaCategoriaStatus = 'sent_15';
-                    mensagem = `⚠️ URGENTE: O evento crítico começa em 15 minutos!`;
-                } else if (diffMinutos <= 0 && diffMinutos >= -5 && (evento.notification_status !== 'sent_0')) {
-                    precisaAvisar = true;
-                    novaCategoriaStatus = 'sent_0';
-                    mensagem = `🚨 O EVENTO CRÍTICO ESTÁ COMEÇANDO AGORA!`;
-                }
+            let reminders = [];
+            try {
+                reminders = typeof evento.reminders === 'string' ? JSON.parse(evento.reminders) : evento.reminders;
+            } catch (e) {
+                console.error(`[CRON] Erro ao parsear lembretes do evento ID: ${evento.id}`);
+                continue;
             }
 
-            // Se a lógica detectou que deve avisar, dispara o alerta!
-            if (precisaAvisar) {
-                // 1. Atualiza o banco para não repetir o mesmo aviso
-                await db.query('UPDATE user_agenda SET notification_status = ? WHERE id = ?', [novaCategoriaStatus, evento.id]);
+            if (!Array.isArray(reminders) || reminders.length === 0) continue;
 
-                // 2. Dispara o alerta instantâneo pelo Socket.io
-                if (global.io) {
-                    global.io.emit('agenda:alerta', {
-                        userId: evento.user_id,
-                        title: evento.title,
-                        message: mensagem,
-                        eventId: evento.id
-                    });
+            let atualizouBanco = false;
+            const dataEventoMs = new Date(evento.event_datetime).getTime();
+
+            for (let i = 0; i < reminders.length; i++) {
+                const rem = reminders[i];
+
+                // Se o lembrete já foi enviado, ignora
+                if (rem.sent) continue;
+
+                let subtrairMs = 0;
+                if (rem.unit === 'minutos') subtrairMs = rem.value * 60000;
+                else if (rem.unit === 'horas') subtrairMs = rem.value * 3600000;
+                else if (rem.unit === 'dias') subtrairMs = rem.value * 86400000;
+                else if (rem.unit === 'semanas') subtrairMs = rem.value * 604800000;
+
+                const dataGatilhoMs = dataEventoMs - subtrairMs;
+
+                // Se a hora atual já passou ou é igual à hora calculada pro gatilho
+                if (agora >= dataGatilhoMs) {
+                    if (global.io) {
+                        const mensagem = `Lembrete: "${evento.title}" começará em ${rem.value} ${rem.unit}.`;
+                        
+                        global.io.emit('agenda:alerta', {
+                            userId: evento.user_id,
+                            eventId: evento.id,
+                            title: 'Lembrete de Agenda',
+                            message: mensagem
+                        });
+                        console.log(`[CRON AGENDA] Alerta disparado para usuário ${evento.user_id} - Evento: ${evento.title}`);
+                    }
+                    rem.sent = true;
+                    atualizouBanco = true;
                 }
+            }
+
+            // Atualiza o banco para não repetir
+            if (atualizouBanco) {
+                const novosLembretes = JSON.stringify(reminders);
+                await db.query('UPDATE user_agenda SET reminders = ? WHERE id = ?', [novosLembretes, evento.id]);
             }
         }
     } catch (error) {
-        console.error('❌ [CRON MINUTO] Erro na rotina de lembretes da agenda:', error);
+        console.error('❌ [CRON AGENDA] Erro na rotina de lembretes da agenda:', error);
     }
 });
 
