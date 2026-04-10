@@ -56,6 +56,7 @@ const io = new Server(server, {
         methods: ["GET", "POST", "PUT", "DELETE"]
     }
 });
+global.io = io;
 
 app.use(cors());
 app.use(express.json()); 
