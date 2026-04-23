@@ -113,23 +113,15 @@ exports.getDashboardData = async (req, res) => {
         // 2. Obras Normais por Data de Término (Mais próxima primeiro)
         // 3. Obras Ocultas/Centro de Custo por último
         dashboardData.sort((a, b) => {
-            // Regra 1: Ocultos vão para o final
             if (a.kpi.is_hidden && !b.kpi.is_hidden) return 1;
             if (!a.kpi.is_hidden && b.kpi.is_hidden) return -1;
-            
-            // Regra 2: Críticos vão para o topo (se ambos não forem ocultos)
             if (a.kpi.is_critical && !b.kpi.is_critical) return -1;
             if (!a.kpi.is_critical && b.kpi.is_critical) return 1;
-
-            // Regra 3: Data de Término (Menor data = termina antes = aparece antes)
             if (a.previsao.data_termino_estimada && b.previsao.data_termino_estimada) {
                 return new Date(a.previsao.data_termino_estimada) - new Date(b.previsao.data_termino_estimada);
             }
-            
-            // Se um tem data e o outro não (e não são ocultos), o que tem data vem primeiro (prioridade)
             if (a.previsao.data_termino_estimada) return -1;
             if (b.previsao.data_termino_estimada) return 1;
-            
             return 0;
         });
         
@@ -158,7 +150,6 @@ exports.getObraDetails = async (req, res) => {
         const [expensesCategory] = await db.query(`SELECT category, SUM(amount) as total FROM expenses WHERE obraId = ? GROUP BY category`, [id]);
         const totalDespesas = expensesCategory.reduce((acc, curr) => acc + parseFloat(curr.total), 0);
 
-        // Capacidade Média (Histórica) - Para exibição de detalhes, mantemos a média real dos registros
         const [recentActivity] = await db.query(`
             SELECT date, SUM(totalHours) as total_dia
             FROM daily_work_logs 
@@ -180,7 +171,6 @@ exports.getObraDetails = async (req, res) => {
             ORDER BY c.created_at DESC
         `, [id]);
 
-        // DETALHES DO VEÍCULO (Incluindo Operador se disponível no JSON assignment)
         const [vehicles] = await db.query('SELECT id, placa, modelo, tipo, marca, operationalAssignment FROM vehicles WHERE obraAtualId = ?', [id]);
         
         const machinePredictions = await Promise.all(vehicles.map(async (v) => {
@@ -189,7 +179,6 @@ exports.getObraDetails = async (req, res) => {
                 FROM daily_work_logs WHERE vehicleId = ? AND obraId = ? AND date >= DATE_SUB(CURDATE(), INTERVAL 15 DAY)
             `, [v.id, id]);
             
-            // Total Executado na Obra (Para o PDF)
             const [totalLogs] = await db.query(`
                 SELECT SUM(totalHours) as total_absoluto
                 FROM daily_work_logs WHERE vehicleId = ? AND obraId = ?
@@ -208,7 +197,6 @@ exports.getObraDetails = async (req, res) => {
                         : v.operationalAssignment;
                         
                     nextAllocation = assignment.next_mission || {};
-                    // Tenta pegar o nome do funcionário alocado
                     if (assignment.employeeName) operatorName = assignment.employeeName;
                     else if (assignment.motorista) operatorName = assignment.motorista;
                 }
@@ -218,7 +206,7 @@ exports.getObraDetails = async (req, res) => {
                 ...v,
                 media_diaria: mediaIndividual,
                 total_executado: totalIndividual,
-                operador_atual: operatorName, // Campo para o PDF
+                operador_atual: operatorName, 
                 proximo_destino: nextAllocation.location || '',
                 data_liberacao_manual: nextAllocation.release_date || null
             };
@@ -358,7 +346,7 @@ exports.upsertContract = async (req, res) => {
     
     if (!data_inicio) data_inicio = null;
     if (!data_fim_contratual) data_fim_contratual = null;
-    const hiddenVal = is_hidden ? 1 : 0; // Converte booleano para INT (MySQL)
+    const hiddenVal = is_hidden ? 1 : 0; 
 
     try {
         const [existing] = await db.query('SELECT id FROM obra_contracts WHERE obra_id = ?', [obra_id]);
@@ -384,3 +372,135 @@ function getStatusColor(perc) {
     if (perc >= 30) return 'yellow';
     return 'green';
 }
+
+// ==================================================================================
+// BI E ANÁLISE DE PRODUTIVIDADE (NOVO)
+// ==================================================================================
+exports.getAnalyticsData = async (req, res) => {
+    const { obraId, dias = 15 } = req.query;
+
+    try {
+        const isGeral = !obraId || obraId === 'geral';
+
+        // 1. Frota e Capacidade Produtiva Atual
+        // Conta apenas Máquinas Pesadas e Caminhões (Foco em Produtividade real em horas)
+        let vehiclesQuery = `
+            SELECT id, tipo, status, obraAtualId,
+                   (CASE 
+                     WHEN status = 'Ativo' AND obraAtualId IS NOT NULL THEN 'em_obra'
+                     WHEN status = 'Disponível' OR status = 'Ativo' THEN 'disponivel'
+                     WHEN status IN ('Em Manutenção', 'Aguardando Manutenção', 'Em Manutencao') THEN 'manutencao'
+                     WHEN status = 'Sucata' THEN 'sucata'
+                     ELSE 'disponivel'
+                   END) as estado_calculado
+            FROM vehicles 
+            WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete')
+        `;
+        const [vehicles] = await db.query(vehiclesQuery);
+
+        let capEmObra = 0, capDisponivel = 0, capManutencao = 0;
+        const frotaPorTipo = {};
+
+        vehicles.forEach(v => {
+            let countIt = false;
+            if (!isGeral) {
+                // Se filtrou obra específica, só calcula se estiver alocado nela
+                if (v.obraAtualId == obraId) countIt = true;
+            } else {
+                countIt = true;
+            }
+
+            if (countIt) {
+                if (v.estado_calculado === 'em_obra') capEmObra += 8;
+                else if (v.estado_calculado === 'disponivel' && isGeral) capDisponivel += 8; // Disponível só faz sentido na visão geral
+                else if (v.estado_calculado === 'manutencao') capManutencao += 8;
+
+                if (v.estado_calculado !== 'sucata') {
+                    if (!frotaPorTipo[v.tipo]) frotaPorTipo[v.tipo] = { qtd: 0, cap: 0, horas_executadas: 0 };
+                    frotaPorTipo[v.tipo].qtd += 1;
+                    frotaPorTipo[v.tipo].cap += 8;
+                }
+            }
+        });
+
+        // 2. Horas Executadas (Faturadas) nos últimos X dias
+        let logsQuery = `
+            SELECT DATE_FORMAT(l.date, '%Y-%m-%d') as data_log, SUM(l.totalHours) as horas
+            FROM daily_work_logs l
+            WHERE l.date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+        `;
+        let queryParams = [parseInt(dias)];
+
+        if (!isGeral) {
+            logsQuery += ` AND l.obraId = ?`;
+            queryParams.push(obraId);
+        }
+        logsQuery += ` GROUP BY data_log ORDER BY data_log ASC`;
+
+        const [logs] = await db.query(logsQuery, queryParams);
+
+        // Preenche as datas vazias do período para que o gráfico não fique "quebrado"
+        const chartData = [];
+        const today = new Date();
+        today.setHours(12, 0, 0, 0); // Trava o meio dia para evitar pulo de fuso (GMT-3)
+        
+        for (let i = parseInt(dias) - 1; i >= 0; i--) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            const dateStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+            
+            const logFound = logs.find(l => l.data_log === dateStr);
+            chartData.push({
+                date: dateStr,
+                horas_faturadas: logFound ? parseFloat(logFound.horas) : 0,
+                capacidade_alocada: capEmObra,
+                capacidade_disponivel: isGeral ? capDisponivel : 0,
+                capacidade_manutencao: capManutencao
+            });
+        }
+
+        // 3. Horas por tipo para o Painel Financeiro
+        let typeQuery = `
+            SELECT v.tipo, SUM(l.totalHours) as horas
+            FROM daily_work_logs l
+            JOIN vehicles v ON l.vehicleId = v.id
+            WHERE l.date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+        `;
+        let typeParams = [parseInt(dias)];
+        if (!isGeral) {
+            typeQuery += ` AND l.obraId = ?`;
+            typeParams.push(obraId);
+        }
+        typeQuery += ` GROUP BY v.tipo`;
+
+        const [typeLogs] = await db.query(typeQuery, typeParams);
+
+        typeLogs.forEach(t => {
+            const tipoStr = t.tipo || 'Outros';
+            if (frotaPorTipo[tipoStr]) {
+                frotaPorTipo[tipoStr].horas_executadas = parseFloat(t.horas) || 0;
+            } else {
+                frotaPorTipo[tipoStr] = { qtd: 0, cap: 0, horas_executadas: parseFloat(t.horas) || 0 };
+            }
+        });
+
+        // Calcula OEE médio executado
+        const totalExecutado = chartData.reduce((acc, c) => acc + c.horas_faturadas, 0);
+        const mediaExecutada = totalExecutado / parseInt(dias);
+
+        res.json({
+            chartData,
+            summary: {
+                capEmObra,
+                capDisponivel: isGeral ? capDisponivel : 0,
+                capManutencao,
+                mediaExecutada: parseFloat(mediaExecutada.toFixed(1))
+            },
+            frotaPorTipo
+        });
+
+    } catch (error) {
+        console.error("Erro no BI Supervisor:", error);
+        res.status(500).json({ error: error.message });
+    }
+};
