@@ -374,7 +374,7 @@ function getStatusColor(perc) {
 }
 
 // ==================================================================================
-// BI E ANÁLISE DE PRODUTIVIDADE (NOVO)
+// BI E ANÁLISE DE PRODUTIVIDADE
 // ==================================================================================
 exports.getAnalyticsData = async (req, res) => {
     const { obraId, dias = 15 } = req.query;
@@ -382,9 +382,7 @@ exports.getAnalyticsData = async (req, res) => {
     try {
         const isGeral = !obraId || obraId === 'geral';
 
-        // 1. Frota e Capacidade Produtiva Atual
-        // Conta apenas Máquinas Pesadas e Caminhões (Foco em Produtividade real em horas)
-        // Filtros aplicados: Exclui inativos (ativo = 0), terceirizados (isOutsourced = 1) e tipos complementares
+        // Filtros aplicados: Exclui inativos (ativo = 0), terceirizados (isOutsurced = 1) e tipos complementares
         let vehiclesQuery = `
             SELECT id, tipo, status, obraAtualId,
                    (CASE 
@@ -395,9 +393,9 @@ exports.getAnalyticsData = async (req, res) => {
                      ELSE 'disponivel'
                    END) as estado_calculado
             FROM vehicles 
-            WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria', 'Caminhão Prancha')
+            WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria')
               AND (ativo IS NULL OR ativo != 0)
-              AND (isOutsourced IS NULL OR isOutsourced != 1)
+              AND (isOutsurced IS NULL OR isOutsurced != 1)
         `;
         const [vehicles] = await db.query(vehiclesQuery);
 
@@ -407,7 +405,6 @@ exports.getAnalyticsData = async (req, res) => {
         vehicles.forEach(v => {
             let countIt = false;
             if (!isGeral) {
-                // Se filtrou obra específica, só calcula se estiver alocado nela
                 if (v.obraAtualId == obraId) countIt = true;
             } else {
                 countIt = true;
@@ -415,7 +412,7 @@ exports.getAnalyticsData = async (req, res) => {
 
             if (countIt) {
                 if (v.estado_calculado === 'em_obra') capEmObra += 8;
-                else if (v.estado_calculado === 'disponivel' && isGeral) capDisponivel += 8; // Disponível só faz sentido na visão geral
+                else if (v.estado_calculado === 'disponivel' && isGeral) capDisponivel += 8; 
                 else if (v.estado_calculado === 'manutencao') capManutencao += 8;
 
                 if (v.estado_calculado !== 'sucata') {
@@ -426,7 +423,6 @@ exports.getAnalyticsData = async (req, res) => {
             }
         });
 
-        // 2. Horas Executadas (Faturadas) nos últimos X dias
         let logsQuery = `
             SELECT DATE_FORMAT(l.date, '%Y-%m-%d') as data_log, SUM(l.totalHours) as horas
             FROM daily_work_logs l
@@ -442,10 +438,9 @@ exports.getAnalyticsData = async (req, res) => {
 
         const [logs] = await db.query(logsQuery, queryParams);
 
-        // Preenche as datas vazias do período para que o gráfico não fique "quebrado"
         const chartData = [];
         const today = new Date();
-        today.setHours(12, 0, 0, 0); // Trava o meio dia para evitar pulo de fuso (GMT-3)
+        today.setHours(12, 0, 0, 0); 
         
         for (let i = parseInt(dias) - 1; i >= 0; i--) {
             const d = new Date(today);
@@ -462,7 +457,6 @@ exports.getAnalyticsData = async (req, res) => {
             });
         }
 
-        // 3. Horas por tipo para o Painel Financeiro
         let typeQuery = `
             SELECT v.tipo, SUM(l.totalHours) as horas
             FROM daily_work_logs l
@@ -487,7 +481,6 @@ exports.getAnalyticsData = async (req, res) => {
             }
         });
 
-        // Calcula OEE médio executado
         const totalExecutado = chartData.reduce((acc, c) => acc + c.horas_faturadas, 0);
         const mediaExecutada = totalExecutado / parseInt(dias);
 
@@ -504,6 +497,56 @@ exports.getAnalyticsData = async (req, res) => {
 
     } catch (error) {
         console.error("Erro no BI Supervisor:", error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// ==================================================================================
+// CONFIGURAÇÃO DO TICKET MÉDIO (PERSISTÊNCIA)
+// ==================================================================================
+exports.getTicketMedio = async (req, res) => {
+    try {
+        // Cria a tabela de forma segura caso o sistema seja recém atualizado
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_ticket_config (
+                tipo VARCHAR(100) PRIMARY KEY, 
+                valor DECIMAL(10,2)
+            )
+        `);
+        const [rows] = await db.query('SELECT tipo, valor FROM vehicle_ticket_config');
+        const tickets = {};
+        rows.forEach(r => tickets[r.tipo] = parseFloat(r.valor));
+        res.json(tickets);
+    } catch (error) {
+        console.error("Erro ao ler Ticket Médio:", error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+exports.saveTicketMedio = async (req, res) => {
+    try {
+        const { tickets } = req.body;
+        
+        // Garante que a tabela existe
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_ticket_config (
+                tipo VARCHAR(100) PRIMARY KEY, 
+                valor DECIMAL(10,2)
+            )
+        `);
+        
+        // Grava os novos valores no banco (Insere ou Atualiza)
+        for (const tipo of Object.keys(tickets)) {
+            const valor = tickets[tipo];
+            await db.query(`
+                INSERT INTO vehicle_ticket_config (tipo, valor) 
+                VALUES (?, ?) 
+                ON DUPLICATE KEY UPDATE valor = ?
+            `, [tipo, valor, valor]);
+        }
+        res.json({ success: true, message: "Tickets guardados com sucesso." });
+    } catch (error) {
+        console.error("Erro ao guardar Ticket Médio:", error);
         res.status(500).json({ error: error.message });
     }
 };

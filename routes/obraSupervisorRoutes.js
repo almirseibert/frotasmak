@@ -11,10 +11,14 @@ router.post('/crm', controller.addCrmLog);
 router.post('/contract', controller.upsertContract);
 router.post('/vehicle-mission', controller.updateVehicleNextMission);
 
-// Rota para a listagem global de equipamentos
+// Nova rota para a listagem global de equipamentos
 router.get('/allocations', controller.getAllocationForecast);
 
-// ROTA NOVA DE BI (Análise de Produtividade)
+// Rotas de BI (Análise de Produtividade)
 router.get('/analytics', controller.getAnalyticsData);
+
+// Novas Rotas para guardar e ler os Tickets Médios globais
+router.get('/tickets', controller.getTicketMedio);
+router.post('/tickets', controller.saveTicketMedio);
 
 module.exports = router;
