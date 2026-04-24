@@ -393,7 +393,7 @@ exports.getAnalyticsData = async (req, res) => {
                      ELSE 'disponivel'
                    END) as estado_calculado
             FROM vehicles 
-            WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria')
+            WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria', 'Caminhão Prancha')
               AND (ativo IS NULL OR ativo != 0)
               AND (isOutsurced IS NULL OR isOutsurced != 1)
         `;
