@@ -382,7 +382,7 @@ exports.getAnalyticsData = async (req, res) => {
     try {
         const isGeral = !obraId || obraId === 'geral';
 
-        // Filtros aplicados: Exclui inativos (ativo = 0), terceirizados (isOutsurced = 1) e tipos complementares
+        // Filtros aplicados: Exclui inativos (ativo = 0), terceirizados (isOutsourced = 1) e tipos complementares
         let vehiclesQuery = `
             SELECT id, tipo, status, obraAtualId,
                    (CASE 
@@ -395,7 +395,7 @@ exports.getAnalyticsData = async (req, res) => {
             FROM vehicles 
             WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria', 'Caminhão Prancha')
               AND (ativo IS NULL OR ativo != 0)
-              AND (isOutsurced IS NULL OR isOutsurced != 1)
+              AND (isOutsourced IS NULL OR isOutsourced != 1)
         `;
         const [vehicles] = await db.query(vehiclesQuery);
 
