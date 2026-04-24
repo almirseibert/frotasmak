@@ -384,6 +384,7 @@ exports.getAnalyticsData = async (req, res) => {
 
         // 1. Frota e Capacidade Produtiva Atual
         // Conta apenas Máquinas Pesadas e Caminhões (Foco em Produtividade real em horas)
+        // Filtros aplicados: Exclui inativos (ativo = 0), terceirizados (isOutsurced = 1) e tipos complementares
         let vehiclesQuery = `
             SELECT id, tipo, status, obraAtualId,
                    (CASE 
@@ -394,7 +395,9 @@ exports.getAnalyticsData = async (req, res) => {
                      ELSE 'disponivel'
                    END) as estado_calculado
             FROM vehicles 
-            WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete')
+            WHERE tipo NOT IN ('Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro', 'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria')
+              AND (ativo IS NULL OR ativo != 0)
+              AND (isOutsurced IS NULL OR isOutsurced != 1)
         `;
         const [vehicles] = await db.query(vehiclesQuery);
 
