@@ -4,6 +4,7 @@ const router = express.Router();
 const adminController = require('../controllers/adminController');
 const authMiddleware = require('../middlewares/authMiddleware');
 const db = require('../database'); // Necessário para as novas rotas inline
+const whatsappService = require('../services/whatsappService');
 
 router.use(authMiddleware);
 
@@ -96,6 +97,26 @@ router.put('/users/:id/unlock', adminOnly, async (req, res) => {
     } catch (error) {
         console.error("Erro ao desbloquear usuário:", error);
         res.status(500).json({ error: 'Erro ao desbloquear usuário.' });
+    }
+});
+
+// Rota temporária para teste de disparo
+router.post('/teste-whatsapp', async (req, res) => {
+    try {
+        // Você pode passar o número no corpo da requisição ou deixar um fixo para teste
+        const numeroTeste = req.body.numero; 
+        const mensagem = '🚜 *Teste Frotas MAK (v2.0)* 🚜\n\nSe você recebeu esta mensagem, a Evolution API está conectada com sucesso ao backend!';
+
+        const resultado = await whatsappService.enviarMensagem(numeroTeste, mensagem);
+        
+        res.status(200).json({ 
+            sucesso: true, 
+            mensagem: 'Comando de envio disparado para a Evolution API!',
+            detalhes: resultado
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ sucesso: false, erro: 'Falha na comunicação com a Evolution API.' });
     }
 });
 
