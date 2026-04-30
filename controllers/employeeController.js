@@ -155,8 +155,8 @@ const createEmployee = async (req, res) => {
         const cnhNumero = valOrNull(data.cnhNumero || cnhObj.numero);
         const cnhCategoria = valOrNull(data.cnhCategoria || cnhObj.categoria);
         const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
-        
-        // Novos Campos
+
+        // Novos Campos de RH
         const cnhEmissao = toDateOrNull(data.cnhEmissao);
         let exameToxicologicoVencimento = toDateOrNull(data.exameToxicologicoVencimento);
 
@@ -174,14 +174,33 @@ const createEmployee = async (req, res) => {
         const status = 'ativo';
 
         const values = [
-            newId, valOrNull(data.nome), valOrNull(data.vulgo), valOrNull(data.registroInterno), 
-            valOrNull(data.cpf), valOrNull(data.rg), dataNascimento, valOrNull(data.funcao), 
-            valOrNull(data.contato), valOrNull(data.email), valOrNull(data.endereco), valOrNull(data.cidade), 
-            dataAdmissao, dataContratacao, status,
-            cnhNumero, cnhCategoria, cnhVencimento, cnhEmissao, exameToxicologicoVencimento,
-            aso, epi, cnhJson, certificados
+            newId, 
+            valOrNull(data.nome), 
+            valOrNull(data.vulgo), 
+            valOrNull(data.registroInterno), 
+            valOrNull(data.cpf), 
+            valOrNull(data.rg), 
+            dataNascimento, 
+            valOrNull(data.funcao), 
+            valOrNull(data.contato), 
+            valOrNull(data.email),
+            valOrNull(data.endereco), 
+            valOrNull(data.cidade), 
+            dataAdmissao, 
+            dataContratacao, 
+            status,
+            cnhNumero, 
+            cnhCategoria, 
+            cnhVencimento,
+            cnhEmissao,
+            exameToxicologicoVencimento,
+            aso, 
+            epi, 
+            cnhJson, 
+            certificados
         ];
 
+        // Query sem a coluna telefone, mas com as novas colunas
         await connection.execute(
             `INSERT INTO employees (
                 id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, contato, email, 
@@ -218,7 +237,10 @@ const createEmployee = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('Erro CREATE employee:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: error.message,
+            sqlMessage: error.sqlMessage 
+        });
     } finally {
         connection.release();
     }
@@ -241,7 +263,8 @@ const updateEmployee = async (req, res) => {
         const cnhNumero = valOrNull(data.cnhNumero || cnhObj.numero);
         const cnhCategoria = valOrNull(data.cnhCategoria || cnhObj.categoria);
         const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
-        
+
+        // Novos Campos RH
         const cnhEmissao = toDateOrNull(data.cnhEmissao);
         let exameToxicologicoVencimento = toDateOrNull(data.exameToxicologicoVencimento);
 
@@ -258,12 +281,28 @@ const updateEmployee = async (req, res) => {
         let statusUpdateClause = "";
         
         let params = [
-            valOrNull(data.nome), valOrNull(data.vulgo), valOrNull(data.registroInterno), 
-            valOrNull(data.cpf), valOrNull(data.rg), dataNascimento, valOrNull(data.funcao), 
-            valOrNull(data.contato), valOrNull(data.email), valOrNull(data.endereco), valOrNull(data.cidade), 
+            valOrNull(data.nome), 
+            valOrNull(data.vulgo), 
+            valOrNull(data.registroInterno), 
+            valOrNull(data.cpf), 
+            valOrNull(data.rg), 
+            dataNascimento, 
+            valOrNull(data.funcao), 
+            valOrNull(data.contato), 
+            valOrNull(data.email), 
+            valOrNull(data.endereco), 
+            valOrNull(data.cidade), 
             dataAdmissao, 
-            cnhNumero, cnhCategoria, cnhVencimento, cnhEmissao, exameToxicologicoVencimento,
-            aso, epi, cnhJson, certificados, dataDesligamento
+            cnhNumero, 
+            cnhCategoria, 
+            cnhVencimento,
+            cnhEmissao,
+            exameToxicologicoVencimento,
+            aso, 
+            epi, 
+            cnhJson, 
+            certificados, 
+            dataDesligamento
         ];
 
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
@@ -311,73 +350,6 @@ const deleteEmployee = async (req, res) => {
         res.json({ message: 'Funcionário excluído.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao excluir funcionário.' });
-    }
-};
-
-// --- REGISTRAR NOVO EXAME TOXICOLÓGICO ---
-const registerExamUpdate = async (req, res) => {
-    const { id } = req.params;
-    const { dataExame, proximoVencimento } = req.body;
-
-    if (!dataExame || !proximoVencimento) {
-        return res.status(400).json({ error: "Data do exame e próximo vencimento são obrigatórios." });
-    }
-
-    const connection = await db.getConnection();
-    await connection.beginTransaction();
-
-    try {
-        // Atualiza no cadastro do funcionário
-        await connection.execute(
-            `UPDATE employees SET exameToxicologicoVencimento = ? WHERE id = ?`,
-            [proximoVencimento, id]
-        );
-
-        // Insere log de auditoria
-        const logId = uuidv4();
-        await connection.execute(
-            `INSERT INTO employee_exam_logs (id, employeeId, dataExame, proximoVencimento, registradoPor) VALUES (?, ?, ?, ?, ?)`,
-            [logId, id, dataExame, proximoVencimento, req.user ? req.user.name : 'Sistema']
-        );
-
-        await connection.commit();
-        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
-        res.json({ message: 'Exame toxicológico atualizado com sucesso.' });
-    } catch (error) {
-        await connection.rollback();
-        res.status(500).json({ error: 'Erro ao atualizar exame.' });
-    } finally {
-        connection.release();
-    }
-};
-
-// --- ALTERAR STATUS DE AFASTAMENTO / FÉRIAS ---
-const updateLeaveStatus = async (req, res) => {
-    const { id } = req.params;
-    const { tipo, dataTermino } = req.body;
-
-    try {
-        if (!tipo) {
-            // Cancelar ou remover afastamento
-            await db.execute(
-                `UPDATE employees SET statusAfastamentoTipo = NULL, statusAfastamentoTermino = NULL, dataRetornoAfastamento = CURDATE() WHERE id = ?`,
-                [id]
-            );
-        } else {
-            // Inserir afastamento
-            if (!['ferias', 'atestado'].includes(tipo) || !dataTermino) {
-                return res.status(400).json({ error: "Tipo inválido ou data de término não informada." });
-            }
-            await db.execute(
-                `UPDATE employees SET statusAfastamentoTipo = ?, statusAfastamentoTermino = ? WHERE id = ?`,
-                [tipo, dataTermino, id]
-            );
-        }
-
-        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
-        res.json({ message: 'Status de afastamento atualizado.' });
-    } catch (error) {
-        res.status(500).json({ error: 'Erro ao atualizar afastamento.' });
     }
 };
 
@@ -487,6 +459,7 @@ const updateEmployeeStatus = async (req, res) => {
     }
 };
 
+// --- SINCRONIZAR USUÁRIOS ---
 const syncActiveEmployeesToUsers = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
@@ -521,6 +494,75 @@ const syncActiveEmployeesToUsers = async (req, res) => {
     }
 };
 
+// --- REGISTRAR NOVO EXAME TOXICOLÓGICO (NOVO) ---
+const registerExamUpdate = async (req, res) => {
+    const { id } = req.params;
+    const { dataExame, proximoVencimento } = req.body;
+
+    if (!dataExame || !proximoVencimento) {
+        return res.status(400).json({ error: "Data do exame e próximo vencimento são obrigatórios." });
+    }
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        // Atualiza no cadastro do funcionário
+        await connection.execute(
+            `UPDATE employees SET exameToxicologicoVencimento = ? WHERE id = ?`,
+            [proximoVencimento, id]
+        );
+
+        // Insere log de auditoria na nova tabela criada
+        const logId = uuidv4();
+        await connection.execute(
+            `INSERT INTO employee_exam_logs (id, employeeId, dataExame, proximoVencimento, registradoPor) VALUES (?, ?, ?, ?, ?)`,
+            [logId, id, dataExame, proximoVencimento, req.user ? req.user.name : 'Sistema']
+        );
+
+        await connection.commit();
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
+        res.json({ message: 'Exame toxicológico atualizado com sucesso.' });
+    } catch (error) {
+        await connection.rollback();
+        console.error("Erro registerExamUpdate:", error);
+        res.status(500).json({ error: 'Erro ao atualizar exame.' });
+    } finally {
+        connection.release();
+    }
+};
+
+// --- ALTERAR STATUS DE AFASTAMENTO / FÉRIAS (NOVO) ---
+const updateLeaveStatus = async (req, res) => {
+    const { id } = req.params;
+    const { tipo, dataTermino } = req.body;
+
+    try {
+        if (!tipo) {
+            // Cancelar ou remover afastamento
+            await db.execute(
+                `UPDATE employees SET statusAfastamentoTipo = NULL, statusAfastamentoTermino = NULL, dataRetornoAfastamento = CURDATE() WHERE id = ?`,
+                [id]
+            );
+        } else {
+            // Inserir afastamento
+            if (!['ferias', 'atestado'].includes(tipo) || !dataTermino) {
+                return res.status(400).json({ error: "Tipo inválido ou data de término não informada." });
+            }
+            await db.execute(
+                `UPDATE employees SET statusAfastamentoTipo = ?, statusAfastamentoTermino = ? WHERE id = ?`,
+                [tipo, dataTermino, id]
+            );
+        }
+
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
+        res.json({ message: 'Status de afastamento atualizado.' });
+    } catch (error) {
+        console.error("Erro updateLeaveStatus:", error);
+        res.status(500).json({ error: 'Erro ao atualizar afastamento.' });
+    }
+};
+
 module.exports = {
     getAllEmployees,
     getEmployeeById,
@@ -529,5 +571,7 @@ module.exports = {
     deleteEmployee,
     getEmployeeHistory,
     updateEmployeeStatus,
-    syncActiveEmployeesToUsers
+    syncActiveEmployeesToUsers,
+    registerExamUpdate,
+    updateLeaveStatus
 };
