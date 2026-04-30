@@ -155,6 +155,17 @@ const createEmployee = async (req, res) => {
         const cnhNumero = valOrNull(data.cnhNumero || cnhObj.numero);
         const cnhCategoria = valOrNull(data.cnhCategoria || cnhObj.categoria);
         const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
+        
+        // Novos Campos
+        const cnhEmissao = toDateOrNull(data.cnhEmissao);
+        let exameToxicologicoVencimento = toDateOrNull(data.exameToxicologicoVencimento);
+
+        // Lógica: Sugerir vencimento de toxicológico 2 anos e meio (30 meses) após emissão
+        if (cnhEmissao && !exameToxicologicoVencimento) {
+            const dataEmissaoObj = new Date(cnhEmissao);
+            dataEmissaoObj.setMonth(dataEmissaoObj.getMonth() + 30);
+            exameToxicologicoVencimento = dataEmissaoObj.toISOString().split('T')[0];
+        }
 
         const dataNascimento = toDateOrNull(data.dataNascimento);
         const dataAdmissao = toDateOrNull(data.dataAdmissao);
@@ -163,38 +174,21 @@ const createEmployee = async (req, res) => {
         const status = 'ativo';
 
         const values = [
-            newId, 
-            valOrNull(data.nome), 
-            valOrNull(data.vulgo), 
-            valOrNull(data.registroInterno), 
-            valOrNull(data.cpf), 
-            valOrNull(data.rg), 
-            dataNascimento, 
-            valOrNull(data.funcao), 
-            valOrNull(data.contato), 
-            valOrNull(data.email),
-            valOrNull(data.endereco), 
-            valOrNull(data.cidade), 
-            dataAdmissao, 
-            dataContratacao, 
-            status,
-            cnhNumero, 
-            cnhCategoria, 
-            cnhVencimento,
-            aso, 
-            epi, 
-            cnhJson, 
-            certificados
+            newId, valOrNull(data.nome), valOrNull(data.vulgo), valOrNull(data.registroInterno), 
+            valOrNull(data.cpf), valOrNull(data.rg), dataNascimento, valOrNull(data.funcao), 
+            valOrNull(data.contato), valOrNull(data.email), valOrNull(data.endereco), valOrNull(data.cidade), 
+            dataAdmissao, dataContratacao, status,
+            cnhNumero, cnhCategoria, cnhVencimento, cnhEmissao, exameToxicologicoVencimento,
+            aso, epi, cnhJson, certificados
         ];
 
-        // Query sem a coluna telefone
         await connection.execute(
             `INSERT INTO employees (
                 id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, contato, email, 
                 endereco, cidade, dataAdmissao, dataContratacao, status, 
-                cnhNumero, cnhCategoria, cnhVencimento,
+                cnhNumero, cnhCategoria, cnhVencimento, cnhEmissao, exameToxicologicoVencimento,
                 aso, epi, cnh, certificados
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             values
         );
 
@@ -224,10 +218,7 @@ const createEmployee = async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('Erro CREATE employee:', error);
-        res.status(500).json({ 
-            error: error.message,
-            sqlMessage: error.sqlMessage 
-        });
+        res.status(500).json({ error: error.message });
     } finally {
         connection.release();
     }
@@ -250,6 +241,15 @@ const updateEmployee = async (req, res) => {
         const cnhNumero = valOrNull(data.cnhNumero || cnhObj.numero);
         const cnhCategoria = valOrNull(data.cnhCategoria || cnhObj.categoria);
         const cnhVencimento = toDateOrNull(data.cnhVencimento || cnhObj.validade);
+        
+        const cnhEmissao = toDateOrNull(data.cnhEmissao);
+        let exameToxicologicoVencimento = toDateOrNull(data.exameToxicologicoVencimento);
+
+        if (cnhEmissao && !exameToxicologicoVencimento) {
+            const dataEmissaoObj = new Date(cnhEmissao);
+            dataEmissaoObj.setMonth(dataEmissaoObj.getMonth() + 30);
+            exameToxicologicoVencimento = dataEmissaoObj.toISOString().split('T')[0];
+        }
 
         const dataNascimento = toDateOrNull(data.dataNascimento);
         const dataAdmissao = toDateOrNull(data.dataAdmissao);
@@ -258,26 +258,12 @@ const updateEmployee = async (req, res) => {
         let statusUpdateClause = "";
         
         let params = [
-            valOrNull(data.nome), 
-            valOrNull(data.vulgo), 
-            valOrNull(data.registroInterno), 
-            valOrNull(data.cpf), 
-            valOrNull(data.rg), 
-            dataNascimento, 
-            valOrNull(data.funcao), 
-            valOrNull(data.contato), 
-            valOrNull(data.email), 
-            valOrNull(data.endereco), 
-            valOrNull(data.cidade), 
+            valOrNull(data.nome), valOrNull(data.vulgo), valOrNull(data.registroInterno), 
+            valOrNull(data.cpf), valOrNull(data.rg), dataNascimento, valOrNull(data.funcao), 
+            valOrNull(data.contato), valOrNull(data.email), valOrNull(data.endereco), valOrNull(data.cidade), 
             dataAdmissao, 
-            cnhNumero, 
-            cnhCategoria, 
-            cnhVencimento,
-            aso, 
-            epi, 
-            cnhJson, 
-            certificados, 
-            dataDesligamento
+            cnhNumero, cnhCategoria, cnhVencimento, cnhEmissao, exameToxicologicoVencimento,
+            aso, epi, cnhJson, certificados, dataDesligamento
         ];
 
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
@@ -292,7 +278,7 @@ const updateEmployee = async (req, res) => {
                 nome=?, vulgo=?, registroInterno=?, cpf=?, rg=?, dataNascimento=?, funcao=?, 
                 contato=?, email=?, endereco=?, cidade=?, 
                 dataAdmissao=?, 
-                cnhNumero=?, cnhCategoria=?, cnhVencimento=?,
+                cnhNumero=?, cnhCategoria=?, cnhVencimento=?, cnhEmissao=?, exameToxicologicoVencimento=?,
                 aso=?, epi=?, cnh=?, certificados=?, dataDesligamento=?
                 ${statusUpdateClause}
              WHERE id=?`,
@@ -325,6 +311,73 @@ const deleteEmployee = async (req, res) => {
         res.json({ message: 'Funcionário excluído.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao excluir funcionário.' });
+    }
+};
+
+// --- REGISTRAR NOVO EXAME TOXICOLÓGICO ---
+const registerExamUpdate = async (req, res) => {
+    const { id } = req.params;
+    const { dataExame, proximoVencimento } = req.body;
+
+    if (!dataExame || !proximoVencimento) {
+        return res.status(400).json({ error: "Data do exame e próximo vencimento são obrigatórios." });
+    }
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        // Atualiza no cadastro do funcionário
+        await connection.execute(
+            `UPDATE employees SET exameToxicologicoVencimento = ? WHERE id = ?`,
+            [proximoVencimento, id]
+        );
+
+        // Insere log de auditoria
+        const logId = uuidv4();
+        await connection.execute(
+            `INSERT INTO employee_exam_logs (id, employeeId, dataExame, proximoVencimento, registradoPor) VALUES (?, ?, ?, ?, ?)`,
+            [logId, id, dataExame, proximoVencimento, req.user ? req.user.name : 'Sistema']
+        );
+
+        await connection.commit();
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
+        res.json({ message: 'Exame toxicológico atualizado com sucesso.' });
+    } catch (error) {
+        await connection.rollback();
+        res.status(500).json({ error: 'Erro ao atualizar exame.' });
+    } finally {
+        connection.release();
+    }
+};
+
+// --- ALTERAR STATUS DE AFASTAMENTO / FÉRIAS ---
+const updateLeaveStatus = async (req, res) => {
+    const { id } = req.params;
+    const { tipo, dataTermino } = req.body;
+
+    try {
+        if (!tipo) {
+            // Cancelar ou remover afastamento
+            await db.execute(
+                `UPDATE employees SET statusAfastamentoTipo = NULL, statusAfastamentoTermino = NULL, dataRetornoAfastamento = CURDATE() WHERE id = ?`,
+                [id]
+            );
+        } else {
+            // Inserir afastamento
+            if (!['ferias', 'atestado'].includes(tipo) || !dataTermino) {
+                return res.status(400).json({ error: "Tipo inválido ou data de término não informada." });
+            }
+            await db.execute(
+                `UPDATE employees SET statusAfastamentoTipo = ?, statusAfastamentoTermino = ? WHERE id = ?`,
+                [tipo, dataTermino, id]
+            );
+        }
+
+        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
+        res.json({ message: 'Status de afastamento atualizado.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao atualizar afastamento.' });
     }
 };
 
