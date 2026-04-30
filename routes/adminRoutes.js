@@ -105,7 +105,7 @@ router.post('/teste-whatsapp', async (req, res) => {
     try {
         // Você pode passar o número no corpo da requisição ou deixar um fixo para teste
         const numeroTeste = req.body.numero; 
-        const mensagem = '🚜 *Teste Frotas MAK (v2.0)* 🚜\n\nSe você recebeu esta mensagem, a Evolution API está conectada com sucesso ao backend!';
+        const mensagem = '🚜 *Teste Frotas MAK (v2.0)* 🚜\n\nSe você recebeu esta mensagem, acabamos de dar mais um passo em direção à otimização, agora o sistema de Frotas MAK envia automáticamente mensagens pelo Whatsapp';
 
         const resultado = await whatsappService.enviarMensagem(numeroTeste, mensagem);
         
