@@ -34,7 +34,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
-const uploadRoutes = require('./routes/uploadRoutes');
+const uploadRoutes = require('./routes/uploadRoutes'); // <--- IMPORTAÇÃO DA ROTA DE UPLOAD
 const tireRoutes = require('./routes/tireRoutes');
 const obraSupervisorRoutes = require('./routes/obraSupervisorRoutes');
 
@@ -61,6 +61,7 @@ global.io = io;
 app.use(cors());
 app.use(express.json()); 
 
+// Configuração para permitir acesso público aos uploads
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 
 // <--- 5. Middleware para disponibilizar o 'io' em todas as requisições (req.io)
@@ -84,7 +85,7 @@ apiRouter.use('/registrationRequests', registrationRequestRoutes);
 apiRouter.use(authMiddleware);
 
 // Rota de Upload Genérica
-apiRouter.use('/upload', uploadRoutes);
+apiRouter.use('/upload', uploadRoutes); // <--- REGISTRO DA ROTA DE UPLOAD
 
 // Rotas Protegidas do Sistema
 apiRouter.use('/vehicles', vehicleRoutes);
@@ -136,7 +137,7 @@ db.getConnection()
         console.error('Erro ao conectar ao banco de dados:', err.stack);
     });
 
-    // ==========================================
+// ==========================================
 // IMPORTAR E INICIAR SERVIÇOS EM SEGUNDO PLANO
 // ==========================================
 require('./services/cronService'); // <--- Inicia a rotina da Agenda Automática
