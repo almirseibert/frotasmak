@@ -3,17 +3,40 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs'); // <--- Adicionado para manipulação de pastas
 const db = require('./database');
-const http = require('http'); // <--- 1. Importar módulo HTTP nativo
-const { Server } = require("socket.io"); // <--- 2. Importar Socket.io
+const http = require('http'); // Importar módulo HTTP nativo
+const { Server } = require("socket.io"); // Importar Socket.io
 
-// Importa o multer
+// ====================================================================
+// CONFIGURAÇÃO DO MULTER (UPLOAD DE ARQUIVOS DIRETO NO SERVER.JS)
+// Isso previne erros 404 por falha de leitura de arquivos externos de rota
+// ====================================================================
 const multer = require('multer');
 
-// Middlewares
+const uploadDir = path.join(__dirname, 'public/uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const cleanOriginalName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+        cb(null, uniqueSuffix + '-' + cleanOriginalName);
+    }
+});
+const upload = multer({ storage: storage });
+
+
+// ====================================================================
+// IMPORTAÇÃO DE MIDDLEWARES E ROTAS EXISTENTES
+// ====================================================================
 const authMiddleware = require('./middlewares/authMiddleware');
 
-// Rotas Existentes
 const authRoutes = require('./routes/authRoutes');
 const vehicleRoutes = require('./routes/vehicleRoutes');
 const obraRoutes = require('./routes/obraRoutes');
@@ -34,12 +57,10 @@ const adminRoutes = require('./routes/adminRoutes');
 const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
-const uploadRoutes = require('./routes/uploadRoutes'); // <--- IMPORTAÇÃO DA ROTA DE UPLOAD
 const tireRoutes = require('./routes/tireRoutes');
 const obraSupervisorRoutes = require('./routes/obraSupervisorRoutes');
 
 // --- NOVAS ROTAS ---
-// Certifique-se de que estes arquivos existem no diretório 'routes'
 const solicitacaoRoutes = require('./routes/solicitacaoRoutes');
 const billingRoutes = require('./routes/billingRoutes');
 const maintenanceRoutes = require('./routes/maintenanceRoutes');
@@ -52,7 +73,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: "*", // Aceita conexões de qualquer origem (ideal para dev/fases iniciais)
+        origin: "*", 
         methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
     }
 });
@@ -61,10 +82,10 @@ global.io = io;
 app.use(cors());
 app.use(express.json()); 
 
-// Configuração para permitir acesso público aos uploads
-app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+// Configuração para permitir acesso público aos uploads de imagens e PDFs
+app.use('/uploads', express.static(uploadDir));
 
-// <--- 5. Middleware para disponibilizar o 'io' em todas as requisições (req.io)
+// Middleware para disponibilizar o 'io' em todas as requisições (req.io)
 app.use((req, res, next) => {
     req.io = io;
     next();
@@ -81,13 +102,33 @@ apiRouter.get('/', (req, res) => {
 apiRouter.use('/auth', authRoutes);
 apiRouter.use('/registrationRequests', registrationRequestRoutes);
 
-// Middleware de Autenticação para todas as rotas abaixo
+// ====================================================================
+// MIDDLEWARE DE AUTENTICAÇÃO (Tudo abaixo disso requer token)
+// ====================================================================
 apiRouter.use(authMiddleware);
 
-// Rota de Upload Genérica
-apiRouter.use('/upload', uploadRoutes); // <--- REGISTRO DA ROTA DE UPLOAD
+// --- ROTA DE UPLOAD GENÉRICA (GARANTIDA E EMBUTIDA NO SERVER.JS) ---
+// Responde ao 'POST /api/upload'
+apiRouter.post('/upload', upload.single('file'), (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'Nenhum arquivo recebido.' });
+        }
+        
+        const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+        
+        res.status(200).json({
+            message: 'Upload realizado com sucesso.',
+            url: fileUrl,
+            filename: req.file.filename
+        });
+    } catch (error) {
+        console.error('Erro no upload genérico:', error);
+        res.status(500).json({ error: 'Falha interna ao processar o upload do arquivo.' });
+    }
+});
 
-// Rotas Protegidas do Sistema
+// --- ROTAS PROTEGIDAS DO SISTEMA ---
 apiRouter.use('/vehicles', vehicleRoutes);
 apiRouter.use('/obras', obraRoutes);
 apiRouter.use('/employees', employeeRoutes);
@@ -115,10 +156,9 @@ apiRouter.use('/maintenances', maintenanceRoutes);
 apiRouter.use('/washings', washingRoutes);
 apiRouter.use('/agenda', agendaRoutes);
 
-
 app.use('/api', apiRouter);
 
-// <--- 6. (Opcional) Log de conexões Socket para Debug
+// (Opcional) Log de conexões Socket para Debug
 io.on('connection', (socket) => {
     console.log('🔌 Cliente conectado via Socket:', socket.id);
     
@@ -140,11 +180,12 @@ db.getConnection()
 // ==========================================
 // IMPORTAR E INICIAR SERVIÇOS EM SEGUNDO PLANO
 // ==========================================
-require('./services/cronService'); // <--- Inicia a rotina da Agenda Automática
+require('./services/cronService'); 
 
-// <--- 7. IMPORTANTE: Mude app.listen para server.listen
+// IMPORTANTE: server.listen (inicia a API)
 server.listen(port, () => {
     console.log(`🚀 Servidor rodando (HTTP + Socket.io) na porta ${port}`);
+    console.log(`- Rotas de Upload Genérico registradas em /api/upload`);
     console.log(`- Rotas de Billing registradas em /api/billing`);
     console.log(`- Rotas de Solicitações registradas em /api/solicitacoes`);
     console.log(`- Rotas de Manutenções registradas em /api/maintenances`);
