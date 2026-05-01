@@ -13,4 +13,7 @@ router.post('/', fineController.createFine);
 router.put('/:id', fineController.updateFine);
 router.delete('/:id', fineController.deleteFine);
 
+// Rota de Notificação via WhatsApp API
+router.post('/:id/notify', fineController.notifyEmployee);
+
 module.exports = router;

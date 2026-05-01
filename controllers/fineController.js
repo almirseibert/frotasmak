@@ -1,6 +1,7 @@
 // controllers/fineController.js
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
+const whatsappService = require('../services/whatsappService');
 
 // --- Função Auxiliar para Conversão de JSON ---
 const parseJsonSafe = (field, key) => {
@@ -243,10 +244,85 @@ const deleteFine = async (req, res) => {
     }
 };
 
+// --- NOTIFY (NOVO: Envio de Mensagem WhatsApp via API) ---
+const notifyEmployee = async (req, res) => {
+    const { id } = req.params;
+    const { pdfUrl } = req.body;
+    
+    try {
+        // Busca os dados da multa e do funcionário
+        const query = `
+            SELECT 
+                f.*, 
+                v.placa, 
+                v.registroInterno, 
+                e.nome as employeeName, 
+                e.contato, 
+                e.telefone 
+            FROM fines f
+            LEFT JOIN vehicles v ON f.vehicleId = v.id
+            LEFT JOIN employees e ON f.employeeId = e.id
+            WHERE f.id = ?
+        `;
+        const [rows] = await db.execute(query, [id]);
+        
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Multa não encontrada' });
+        }
+        
+        const fine = rows[0];
+        const rawPhone = fine.contato || fine.telefone; // Em alguns BDs pode existir whatsapp
+        
+        if (!rawPhone) {
+            return res.status(400).json({ error: 'Funcionário selecionado não possui número de contato cadastrado.' });
+        }
+        
+        const firstName = fine.employeeName ? fine.employeeName.split(' ')[0] : 'Colaborador';
+        
+        // Constrói a mensagem
+        const msg = 
+`*NOTIFICAÇÃO DE INFRAÇÃO DE TRÂNSITO - FROTAS MAK*
+
+Olá, ${firstName}.
+Informamos que recebemos uma notificação de infração de trânsito vinculada a um veículo sob sua responsabilidade. O Termo de Responsabilidade e Ciência segue em anexo a esta mensagem.
+
+*Detalhes da Infração:*
+🚗 *Veículo:* ${fine.placa || 'N/A'} (${fine.registroInterno || ''})
+📅 *Data:* ${new Date(fine.dataInfração).toLocaleDateString('pt-BR', { timeZone: 'UTC' })}
+📍 *Local:* ${fine.localInfracao || 'Não informado'}
+📝 *Motivo:* ${fine.descricao}
+💰 *Valor:* R$ ${parseFloat(fine.valor || 0).toFixed(2).replace('.', ',')}
+
+*Atenção:*
+Esta multa será processada pelo RH conforme as políticas da empresa.
+Caso tenha dúvidas, divergências sobre a autoria ou não concorde com o desconto, favor entrar em contato com o setor de Frotas/RH *imediatamente*.
+
+${!fine.alreadyInEmployeeName ? '⚠️ *IMPORTANTE:* O Formulário de Indicação de Condutor infrator deve ser assinado e sua CNH entregue ao departamento responsável dentro do prazo legal, caso contrário a empresa poderá sofrer a penalidade de NIC (multa com valor dobrado repassado a você).' : ''}
+
+_Mensagem automática enviada pelo Sistema Frotas MAK_`;
+
+        // Dispara para o WhatsApp via nossa Evolution API
+        await whatsappService.enviarMensagem(
+            rawPhone, 
+            fine.employeeName, 
+            'Notificação Multa de Trânsito', 
+            msg, 
+            pdfUrl // O PDF (agora hospedado) vai como anexo!
+        );
+        
+        res.json({ message: 'Notificação enviada com sucesso!' });
+
+    } catch (error) {
+        console.error('Erro no notifyEmployee:', error);
+        res.status(500).json({ error: 'Falha ao processar o envio da notificação via WhatsApp.' });
+    }
+};
+
 module.exports = {
     getAllFines,
     getFineById,
     createFine,
     updateFine,
     deleteFine,
+    notifyEmployee
 };
