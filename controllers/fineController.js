@@ -2,6 +2,45 @@
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
 const whatsappService = require('../services/whatsappService');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// ====================================================================
+// CONFIGURAÇÃO MULTER (UPLOAD DE PDF DA MULTA)
+// ====================================================================
+const uploadDir = path.join(__dirname, '../public/uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const cleanOriginalName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
+        cb(null, 'termo-multa-' + uniqueSuffix + '-' + cleanOriginalName);
+    }
+});
+const upload = multer({ storage: storage });
+
+const uploadFinePdf = [
+    upload.single('file'),
+    (req, res) => {
+        try {
+            if (!req.file) {
+                return res.status(400).json({ error: 'Nenhum arquivo recebido.' });
+            }
+            const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+            res.status(200).json({ url: fileUrl });
+        } catch (error) {
+            console.error('Erro no upload PDF Multa:', error);
+            res.status(500).json({ error: 'Falha no upload' });
+        }
+    }
+];
 
 // --- Função Auxiliar para Conversão de JSON ---
 const parseJsonSafe = (field, key) => {
@@ -28,8 +67,8 @@ const formatFineForFrontend = (fine) => {
         paymentStatus,
         localInfracao,
         codigoInfracao,
-        descontarFuncionario, // Mapeamento legado se houver
-        multaNomeFuncionario, // Mapeamento legado se houver
+        descontarFuncionario, 
+        multaNomeFuncionario, 
         ...rest
     } = fine;
 
@@ -38,7 +77,6 @@ const formatFineForFrontend = (fine) => {
         status: paymentStatus,
         local: localInfracao,
         codigoInfração: codigoInfracao,
-        // Garante que os booleanos sejam retornados corretamente
         discountFromEmployee: !!fine.discountFromEmployee,
         alreadyInEmployeeName: !!fine.alreadyInEmployeeName
     };
@@ -152,7 +190,6 @@ const createFine = async (req, res) => {
             valor: dataFromFrontend.valor,
             dataVencimento: dataFromFrontend.dataVencimento,
             paymentStatus: dataFromFrontend.status,
-            // NOVOS CAMPOS
             discountFromEmployee: dataFromFrontend.discountFromEmployee ? 1 : 0,
             alreadyInEmployeeName: dataFromFrontend.alreadyInEmployeeName ? 1 : 0,
             
@@ -204,7 +241,6 @@ const updateFine = async (req, res) => {
             valor: dataFromFrontend.valor,
             dataVencimento: dataFromFrontend.dataVencimento,
             paymentStatus: dataFromFrontend.status,
-            // NOVOS CAMPOS
             discountFromEmployee: dataFromFrontend.discountFromEmployee ? 1 : 0,
             alreadyInEmployeeName: dataFromFrontend.alreadyInEmployeeName ? 1 : 0,
 
@@ -244,21 +280,20 @@ const deleteFine = async (req, res) => {
     }
 };
 
-// --- NOTIFY (NOVO: Envio de Mensagem WhatsApp via API) ---
+// --- NOTIFY (Envio de Mensagem WhatsApp via API) ---
 const notifyEmployee = async (req, res) => {
     const { id } = req.params;
     const { pdfUrl } = req.body;
     
     try {
-        // Busca os dados da multa e do funcionário
+        // Query corrigida: apenas 'e.contato' (conforme estrutura do DB)
         const query = `
             SELECT 
                 f.*, 
                 v.placa, 
                 v.registroInterno, 
                 e.nome as employeeName, 
-                e.contato, 
-                e.telefone 
+                e.contato 
             FROM fines f
             LEFT JOIN vehicles v ON f.vehicleId = v.id
             LEFT JOIN employees e ON f.employeeId = e.id
@@ -271,7 +306,7 @@ const notifyEmployee = async (req, res) => {
         }
         
         const fine = rows[0];
-        const rawPhone = fine.contato || fine.telefone; // Em alguns BDs pode existir whatsapp
+        const rawPhone = fine.contato; 
         
         if (!rawPhone) {
             return res.status(400).json({ error: 'Funcionário selecionado não possui número de contato cadastrado.' });
@@ -301,13 +336,13 @@ ${!fine.alreadyInEmployeeName ? '⚠️ *IMPORTANTE:* O Formulário de Indicaç�
 
 _Mensagem automática enviada pelo Sistema Frotas MAK_`;
 
-        // Dispara para o WhatsApp via nossa Evolution API
+        // Dispara para o WhatsApp via Evolution API
         await whatsappService.enviarMensagem(
             rawPhone, 
             fine.employeeName, 
             'Notificação Multa de Trânsito', 
             msg, 
-            pdfUrl // O PDF (agora hospedado) vai como anexo!
+            pdfUrl
         );
         
         res.json({ message: 'Notificação enviada com sucesso!' });
@@ -324,5 +359,6 @@ module.exports = {
     createFine,
     updateFine,
     deleteFine,
-    notifyEmployee
+    notifyEmployee,
+    uploadFinePdf
 };
