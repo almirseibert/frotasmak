@@ -7,14 +7,14 @@ const WPP_API_KEY = process.env.WPP_API_KEY;
 
 // Lista de contatos internos padronizada
 const CONTATOS_INTERNOS = {
-    ALMIR: '555199111090',  // Responsável por oficina da frota leve, rastreamento, tecnologia, inovação, suporte técnico e sistema de gestão de frotas
-    LEANDRO: '555192481722',  // Responsável por compras, fornecedores e contratos
-    PLINIO: '555180348479',  // Responsável por logística e transporte
-    AMANDA: '555198196762',  // Responsável por abastecimento
-    MARLISE: '555196588016', // Responsável por refeições e hospedagem
-    RH: '555181598177', // Responsável por recursos humanos e questões administrativas
-    SAULO: '555197120502', // Responsável por oficina de caminhões e máquinas, manutenção preventiva e corretiva
-    ALEXANDRO: '555181708680' // Responsável por contratos, licitações, cobranças e questões jurídicas relacionadas às obras
+    ALMIR: '555199111090',
+    LEANDRO: '555192481722',
+    PLINIO: '555180348479',
+    AMANDA: '555198196762',
+    MARLISE: '555196588016',
+    RH: '555181598177',
+    SAULO: '555197120502',
+    ALEXANDRO: '555181708680'
 };
 
 function formatarNumero(numero) {
@@ -30,7 +30,6 @@ function formatarNumero(numero) {
 }
 
 const whatsappService = {
-  // Agora exigimos mais informações para ter um log perfeito
   async enviarMensagem(numeroDestino, nomeDestinatario, motivo, mensagem, anexoUrl = null) {
     const numeroFormatado = formatarNumero(numeroDestino);
 
@@ -40,22 +39,44 @@ const whatsappService = {
     }
 
     try {
-      const data = {
+      // 1. DISPARA A MENSAGEM DE TEXTO (Evolution API)
+      const dataText = {
         number: numeroFormatado,
         text: mensagem,
         delay: 1200
       };
 
-      // Dispara para a Evolution API
       const response = await axios.post(
         `${WPP_API_URL}/message/sendText/${WPP_INSTANCE_NAME}`,
-        data,
+        dataText,
         { headers: { 'apikey': WPP_API_KEY } }
       );
       
       const messageId = response.data?.key?.id || null;
 
-      // Grava o histórico no Banco de Dados
+      // 2. SE TIVER ANEXO (PDF), DISPARA O DOCUMENTO EM SEGUIDA
+      if (anexoUrl) {
+          // Garante que links HTTP passem para HTTPS se for o caso do Easypanel
+          const secureUrl = anexoUrl.replace('http://', 'https://');
+          
+          const dataMedia = {
+              number: numeroFormatado,
+              mediatype: 'document',
+              mimetype: 'application/pdf',
+              fileName: 'Termo_Notificacao_FrotasMAK.pdf',
+              media: secureUrl,
+              delay: 1500
+          };
+
+          await axios.post(
+            `${WPP_API_URL}/message/sendMedia/${WPP_INSTANCE_NAME}`,
+            dataMedia,
+            { headers: { 'apikey': WPP_API_KEY } }
+          );
+          console.log(`📎 Anexo enviado com sucesso para ${nomeDestinatario}`);
+      }
+
+      // 3. Grava o histórico no Banco de Dados
       const query = `
         INSERT INTO whatsapp_logs 
         (destinatario_nome, destinatario_numero, motivo_envio, mensagem, anexo_url, message_id_api, status) 
@@ -65,7 +86,7 @@ const whatsappService = {
       
       await db.query(query, values);
 
-      console.log(`✅ Mensagem enviada e salva no log para ${nomeDestinatario} (${numeroFormatado})`);
+      console.log(`✅ Mensagem e log salvos para ${nomeDestinatario} (${numeroFormatado})`);
       return response.data;
 
     } catch (error) {
@@ -88,7 +109,6 @@ const whatsappService = {
     }
   },
   
-  // Exportamos os contatos para usar nos Controllers
   CONTATOS_INTERNOS 
 };
 
