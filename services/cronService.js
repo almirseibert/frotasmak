@@ -115,7 +115,7 @@ cron.schedule('* * * * *', async () => {
                     try {
                         // Busca v.tipo para cruzar com nossa inteligência local
                         const [manutencoes] = await db.query(`
-                            SELECT v.id, v.placa, v.registroInterno, v.tipo, v.hodometro, v.horimetro, 
+                            SELECT v.id, v.placa, v.registroInterno, v.tipo, v.odometro, v.horimetro, 
                                    r.proximaRevisaoOdometro, r.proximaRevisaoHorimetro, r.proximaRevisaoData 
                             FROM vehicles v
                             INNER JOIN revisions r ON v.id = r.vehicleId
@@ -153,10 +153,10 @@ cron.schedule('* * * * *', async () => {
                             }
 
                             // 1. Verificação Odômetro (-1000km)
-                            if (usaOdometro && v.proximaRevisaoOdometro && v.hodometro !== null) {
-                                if (Number(v.hodometro) >= (Number(v.proximaRevisaoOdometro) - 1000)) {
+                            if (usaOdometro && v.proximaRevisaoOdometro && v.odometro !== null) {
+                                if (Number(v.odometro) >= (Number(v.proximaRevisaoOdometro) - 1000)) {
                                     needsMaintenance = true;
-                                    reasonStr = `O veículo ${v.placa} (Frota ${v.registroInterno || 'N/A'}) está com ${v.hodometro}km. A revisão está prevista para ${v.proximaRevisaoOdometro}km.`;
+                                    reasonStr = `O veículo ${v.placa} (Frota ${v.registroInterno || 'N/A'}) está com ${v.odometro}km. A revisão está prevista para ${v.proximaRevisaoOdometro}km.`;
                                 }
                             } 
                             // 2. Verificação Horímetro (-50h)
