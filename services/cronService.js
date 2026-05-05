@@ -5,7 +5,7 @@ const whatsappService = require('./whatsappService'); // Importação do serviç
 // ====================================================================
 // 1. ROTINA DIÁRIA (08:00) - Verifica Agenda, Manutenções e RH (WhatsApp)
 // ====================================================================
-cron.schedule('10 8 * * *', async () => {
+cron.schedule('45 8 * * *', async () => {
     console.log('⏳ [CRON] Rodando rotina automática diária (Agenda e RH)...');
     
     try {
