@@ -537,10 +537,14 @@ const updateLeaveStatus = async (req, res) => {
     const { id } = req.params;
     const { tipo, dataTermino } = req.body;
 
+    // Usando transação para garantir que a mudança de status e a desocupação de veículos ocorram juntas
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
     try {
         if (!tipo) {
             // Cancelar ou remover afastamento
-            await db.execute(
+            await connection.execute(
                 `UPDATE employees SET statusAfastamentoTipo = NULL, statusAfastamentoTermino = NULL, dataRetornoAfastamento = CURDATE() WHERE id = ?`,
                 [id]
             );
@@ -549,17 +553,41 @@ const updateLeaveStatus = async (req, res) => {
             if (!['ferias', 'atestado'].includes(tipo) || !dataTermino) {
                 return res.status(400).json({ error: "Tipo inválido ou data de término não informada." });
             }
-            await db.execute(
+            await connection.execute(
                 `UPDATE employees SET statusAfastamentoTipo = ?, statusAfastamentoTermino = ? WHERE id = ?`,
                 [tipo, dataTermino, id]
             );
+
+            // DESALOCAÇÃO AUTOMÁTICA
+            // Registra a data/hora exata atual para fechar a alocação do funcionário
+            const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+            // 1. Remove o funcionário de qualquer veículo alocado em Obra
+            await connection.execute(`
+                UPDATE obras_historico_veiculos 
+                SET dataSaida = ? 
+                WHERE employeeId = ? AND dataSaida IS NULL
+            `, [now, id]);
+
+            // 2. Remove o funcionário de qualquer veículo em uso Operacional
+            await connection.execute(`
+                UPDATE vehicle_operational_assignment 
+                SET endDate = ? 
+                WHERE employeeId = ? AND endDate IS NULL
+            `, [now, id]);
         }
 
-        if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
-        res.json({ message: 'Status de afastamento atualizado.' });
+        await connection.commit();
+        
+        // Dispara o socket para atualizar também os veículos (que agora ficarão livres) e obras
+        if (req.io) req.io.emit('server:sync', { targets: ['employees', 'vehicles', 'obras'] });
+        res.json({ message: 'Status atualizado e funcionário desalocado de veículos/obras.' });
     } catch (error) {
+        await connection.rollback();
         console.error("Erro updateLeaveStatus:", error);
         res.status(500).json({ error: 'Erro ao atualizar afastamento.' });
+    } finally {
+        connection.release();
     }
 };
 

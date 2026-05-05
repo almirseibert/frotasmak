@@ -144,7 +144,7 @@ cron.schedule('0 8 * * *', async () => {
         // ====================================================================
         try {
             const [afastados] = await db.query(`
-                SELECT id, IFNULL(nome, name) as nome, statusAfastamentoTipo 
+                SELECT id, IFNULL(nome, name) as nome, contato, statusAfastamentoTipo 
                 FROM employees 
                 WHERE statusAfastamentoTipo IS NOT NULL 
                   AND statusAfastamentoTermino < CURDATE()
@@ -170,6 +170,27 @@ cron.schedule('0 8 * * *', async () => {
                         `O colaborador ${emp.nome} finalizou seu período de ${emp.statusAfastamentoTipo} e retornou às atividades hoje.`,
                         emp.id
                     ]);
+                }
+
+                // Disparo via WhatsApp: Avisa o RH e o próprio Funcionário
+                if (typeof whatsappService !== 'undefined') {
+                    // 1. Mensagem para o RH
+                    await whatsappService.enviarMensagem(
+                        whatsappService.CONTATOS_INTERNOS.RH, 
+                        'RH', 
+                        'Retorno de Afastamento', 
+                        `✅ *Aviso de Retorno*\n\nO colaborador *${emp.nome}* finalizou seu período de ${emp.statusAfastamentoTipo} e retornou às atividades na data de hoje. Ele já se encontra com status "Disponível" no sistema.`
+                    ).catch(() => {});
+
+                    // 2. Mensagem de Boas-vindas para o Funcionário
+                    if (emp.contato) {
+                        await whatsappService.enviarMensagem(
+                            emp.contato, 
+                            emp.nome, 
+                            'Fim de Afastamento', 
+                            `Olá, ${emp.nome}! Esperamos que esteja bem.\n\nSeu período de ${emp.statusAfastamentoTipo} chegou ao fim e seu status no sistema Frotas MAK foi atualizado para *Disponível*.\nBom retorno às atividades!`
+                        ).catch(() => {});
+                    }
                 }
             }
         } catch (e) {
