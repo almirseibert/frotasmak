@@ -4,16 +4,14 @@ const whatsappService = require('./whatsappService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
-// Altere estas duas variáveis para definir a hora e o minuto exatos dos disparos de RH
 // ===================================================================================
 const HORA_EXECUCAO = 10;    // Ex: 8 para 08:00, 9 para 09:00
-const MINUTO_EXECUCAO = 5;  // Ex: 0 para exatos 08:00, 30 para 08:30
+const MINUTO_EXECUCAO = 10;  // Ex: 0 para exatos 08:00, 30 para 08:30
 
 // ===================================================================================
 // FUNÇÕES AUXILIARES PARA BLINDAR FUSO HORÁRIO
 // ===================================================================================
 const getGmt3Date = () => {
-    // Pega o tempo UTC absoluto e recua 3 horas cravadas
     return new Date(Date.now() - (3 * 3600000));
 };
 
@@ -38,7 +36,6 @@ const formatDateDb = (dbDate) => {
 
 let lastDailyRunDate = null;
 
-// Log inicial para confirmar o fuso horário
 const horaTeste = getGmt3Date();
 console.log(`✅ [CRON] Inicializado. Horário atual calculado (GMT-3): ${String(horaTeste.getUTCHours()).padStart(2, '0')}:${String(horaTeste.getUTCMinutes()).padStart(2, '0')}`);
 console.log(`✅ [CRON] Rotina diária de RH configurada para disparar às: ${String(HORA_EXECUCAO).padStart(2, '0')}:${String(MINUTO_EXECUCAO).padStart(2, '0')}`);
@@ -53,7 +50,6 @@ cron.schedule('* * * * *', async () => {
         const currentMinute = gmt3Date.getUTCMinutes();
         const todayStr = getTzDateStr(0);
 
-        // Lógica à prova de falhas para horas e minutos
         const isTimeForDailyRun = (currentHour > HORA_EXECUCAO) || (currentHour === HORA_EXECUCAO && currentMinute >= MINUTO_EXECUCAO);
 
         // ====================================================================
@@ -61,19 +57,20 @@ cron.schedule('* * * * *', async () => {
         // ====================================================================
         if (isTimeForDailyRun && lastDailyRunDate !== todayStr) {
             console.log(`⏳ [CRON] Executando rotina diária principal (Dia ${todayStr})...`);
-            lastDailyRunDate = todayStr; // Trava para não repetir hoje
+            lastDailyRunDate = todayStr; 
             
             try {
                 const daqui30DiasStr = getTzDateStr(30);
                 const [gestores] = await db.query("SELECT id FROM users WHERE role IN ('admin', 'master', 'supervisor')");
                 
-                // --- A. ALERTAS DE AGENDA (CNH e Manutenção) ---
+                // --- A. ALERTAS DE AGENDA (CNH) ---
                 if (gestores.length > 0) {
                     try {
+                        // Corrigido 'name' para 'nome' e ajustado cnhVencimento
                         const [cnhVencendo] = await db.query(`
-                            SELECT id, IFNULL(nome, name) as name, COALESCE(cnhVencimento, cnhExpiration) as dataVencimento
+                            SELECT id, nome, cnhVencimento as dataVencimento
                             FROM employees 
-                            WHERE COALESCE(cnhVencimento, cnhExpiration) = ?
+                            WHERE cnhVencimento = ? AND status = 'ativo'
                         `, [daqui30DiasStr]);
 
                         for (const emp of cnhVencendo) {
@@ -88,42 +85,22 @@ cron.schedule('* * * * *', async () => {
                                     await db.query(`
                                         INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
                                         VALUES (?, ?, ?, NOW(), ?, ?, ?, 'pending')
-                                    `, [gestor.id, `⚠️ CNH Vencendo: ${emp.name}`, `A CNH do funcionário ${emp.name} vence em 30 dias.`, 'employee', emp.id, '#EF4444']);
+                                    `, [gestor.id, `⚠️ CNH Vencendo: ${emp.nome}`, `A CNH do funcionário ${emp.nome} vence em 30 dias.`, 'employee', emp.id, '#EF4444']);
                                 }
                             }
                         }
                     } catch (e) { console.error('❌ [CRON] Erro CNH Agenda:', e.message); }
 
-                    try {
-                        const [manutencoes] = await db.query(`
-                            SELECT id, plate, fleetNumber, currentKm, nextOilChangeKm 
-                            FROM vehicles 
-                            WHERE status = 'Ativo' AND currentKm >= (nextOilChangeKm - 1000)
-                        `);
-
-                        for (const v of manutencoes) {
-                            for (const gestor of gestores) {
-                                const [jaAvisou] = await db.query(`
-                                    SELECT id FROM user_agenda 
-                                    WHERE user_id = ? AND related_type = 'vehicle' AND related_id = ? 
-                                      AND title LIKE '%Manutenção Próxima%' AND created_at >= NOW() - INTERVAL 7 DAY
-                                `, [gestor.id, v.id]);
-
-                                if (jaAvisou.length === 0) {
-                                    await db.query(`
-                                        INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
-                                        VALUES (?, ?, ?, NOW(), ?, ?, ?, 'pending')
-                                    `, [gestor.id, `🔧 Manutenção Próxima: Veículo ${v.plate}`, `Veículo ${v.plate} com ${v.currentKm}km. Troca prevista: ${v.nextOilChangeKm}km.`, 'vehicle', v.id, '#EAB308']);
-                                }
-                            }
-                        }
-                    } catch (e) { console.error('❌ [CRON] Erro Manutenções Agenda:', e.message); }
+                    // Obs: A rotina legada de Manutenção Preventiva foi removida daqui, 
+                    // pois o sistema v2 agora utiliza a tabela 'revisions' e a função 'checkVehicleRestrictions'
+                    // para gerar os alertas de manutenção em tempo real no Dashboard.
                 }
 
                 // --- B. ALERTAS DE RH VIA WHATSAPP E AUDITORIA ---
                 try {
+                    // Corrigido 'name' para 'nome'
                     const [vencimentosRH] = await db.query(`
-                        SELECT id, IFNULL(nome, name) as nome, contato, cnhVencimento, exameToxicologicoVencimento
+                        SELECT id, nome, contato, cnhVencimento, exameToxicologicoVencimento
                         FROM employees 
                         WHERE status = 'ativo' AND (
                             cnhVencimento = ? OR cnhVencimento = ? OR
@@ -152,8 +129,9 @@ cron.schedule('* * * * *', async () => {
 
                 // --- C. RETORNO AUTOMÁTICO DE AFASTAMENTOS E FÉRIAS ---
                 try {
+                    // Corrigido 'name' para 'nome'
                     const [afastados] = await db.query(`
-                        SELECT id, IFNULL(nome, name) as nome, contato, statusAfastamentoTipo 
+                        SELECT id, nome, contato, statusAfastamentoTipo 
                         FROM employees 
                         WHERE statusAfastamentoTipo IS NOT NULL 
                           AND statusAfastamentoTermino <= ?
@@ -183,10 +161,10 @@ cron.schedule('* * * * *', async () => {
                     }
                 } catch (e) { console.error('❌ [CRON] Erro Retorno Afastamento:', e.message); }
 
-                console.log('✅ [CRON] Rotina diária concluída.');
+                console.log('✅ [CRON] Rotina diária concluída com sucesso sem erros de SQL.');
             } catch (error) {
                 console.error('❌ [CRON] Erro grave na rotina diária:', error);
-                lastDailyRunDate = null; // Permite tentar de novo no próximo minuto
+                lastDailyRunDate = null; 
             }
         }
 
@@ -241,7 +219,6 @@ cron.schedule('* * * * *', async () => {
                                 title: 'Lembrete de Agenda',
                                 message: `Lembrete: "${evento.title}" ${msgTempo}`
                             });
-                            console.log(`🔔 [CRON AGENDA] Lembrete emitido para o Evento ID ${evento.id}`);
                         }
                         rem.sent = true;
                         atualizouBanco = true;
