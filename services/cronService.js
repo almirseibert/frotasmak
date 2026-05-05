@@ -5,8 +5,8 @@ const whatsappService = require('./whatsappService');
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
 // ===================================================================================
-const HORA_EXECUCAO = 10;    // Ex: 8 para 08:00, 9 para 09:00
-const MINUTO_EXECUCAO = 10;  // Ex: 0 para exatos 08:00, 30 para 08:30
+const HORA_EXECUCAO = 8;    // Ex: 8 para 08:00, 9 para 09:00
+const MINUTO_EXECUCAO = 0;  // Ex: 0 para exatos 08:00, 30 para 08:30
 
 // ===================================================================================
 // FUNÇÕES AUXILIARES PARA BLINDAR FUSO HORÁRIO
@@ -63,10 +63,9 @@ cron.schedule('* * * * *', async () => {
                 const daqui30DiasStr = getTzDateStr(30);
                 const [gestores] = await db.query("SELECT id FROM users WHERE role IN ('admin', 'master', 'supervisor')");
                 
-                // --- A. ALERTAS DE AGENDA (CNH) ---
+                // --- A. ALERTAS DE AGENDA (CNH e Manutenção) ---
                 if (gestores.length > 0) {
                     try {
-                        // Corrigido 'name' para 'nome' e ajustado cnhVencimento
                         const [cnhVencendo] = await db.query(`
                             SELECT id, nome, cnhVencimento as dataVencimento
                             FROM employees 
@@ -91,14 +90,42 @@ cron.schedule('* * * * *', async () => {
                         }
                     } catch (e) { console.error('❌ [CRON] Erro CNH Agenda:', e.message); }
 
-                    // Obs: A rotina legada de Manutenção Preventiva foi removida daqui, 
-                    // pois o sistema v2 agora utiliza a tabela 'revisions' e a função 'checkVehicleRestrictions'
-                    // para gerar os alertas de manutenção em tempo real no Dashboard.
+                    // ---> FUNÇÃO DE MANUTENÇÃO RESTAURADA <---
+                    try {
+                        const [manutencoes] = await db.query(`
+                            SELECT id, placa, registroInterno, currentKm, nextOilChangeKm 
+                            FROM vehicles 
+                            WHERE status = 'Ativo' AND currentKm >= (nextOilChangeKm - 1000)
+                        `);
+
+                        for (const v of manutencoes) {
+                            for (const gestor of gestores) {
+                                const [jaAvisou] = await db.query(`
+                                    SELECT id FROM user_agenda 
+                                    WHERE user_id = ? AND related_type = 'vehicle' AND related_id = ? 
+                                      AND title LIKE '%Manutenção Próxima%' AND created_at >= NOW() - INTERVAL 7 DAY
+                                `, [gestor.id, v.id]);
+
+                                if (jaAvisou.length === 0) {
+                                    await db.query(`
+                                        INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
+                                        VALUES (?, ?, ?, NOW(), ?, ?, ?, 'pending')
+                                    `, [
+                                        gestor.id, 
+                                        `🔧 Manutenção Próxima: Veículo ${v.placa}`, 
+                                        `O veículo ${v.placa} (Frota ${v.registroInterno || 'N/A'}) está com ${v.currentKm}km. A troca de óleo está prevista para ${v.nextOilChangeKm}km.`, 
+                                        'vehicle', 
+                                        v.id, 
+                                        '#EAB308'
+                                    ]);
+                                }
+                            }
+                        }
+                    } catch (e) { console.error('❌ [CRON] Erro Manutenções Agenda:', e.message); }
                 }
 
                 // --- B. ALERTAS DE RH VIA WHATSAPP E AUDITORIA ---
                 try {
-                    // Corrigido 'name' para 'nome'
                     const [vencimentosRH] = await db.query(`
                         SELECT id, nome, contato, cnhVencimento, exameToxicologicoVencimento
                         FROM employees 
@@ -113,15 +140,15 @@ cron.schedule('* * * * *', async () => {
                         const toxVenc = formatDateDb(emp.exameToxicologicoVencimento);
 
                         if (emp.contato && typeof whatsappService !== 'undefined') {
-                            if (cnhVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta CNH 30 Dias', `Olá ${emp.nome}, sua CNH vencerá em 30 dias. Por favor, programe a renovação.`).catch(()=>{});
-                            if (toxVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta Toxicológico 30 Dias', `Olá ${emp.nome}, seu Exame Toxicológico vencerá em 30 dias. Por favor, programe a renovação.`).catch(()=>{});
+                            if (cnhVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta CNH 30 Dias', `*Sistema de Frotas MAK*\n\nOlá ${emp.nome}, sua CNH vencerá em 30 dias. Por favor, programe a renovação.\n\n _Esta é uma mensagem automática, em caso de dúvida entre em contato com o setor responsável da Mak Serviços._`).catch(()=>{});
+                            if (toxVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta Toxicológico 30 Dias', `*Sistema de Frotas MAK*\n\nOlá ${emp.nome}, seu Exame Toxicológico vencerá em 30 dias. Por favor, programe a renovação.\n\n _Esta é uma mensagem automática, em caso de dúvida entre em contato com o setor responsável da Mak Serviços._`).catch(()=>{});
                             if (cnhVenc === todayStr) {
-                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'CNH Vencida Hoje', `⚠️ Atenção ${emp.nome}, sua CNH vence HOJE. Entre em contato com o RH.`).catch(()=>{});
-                                await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Aviso CNH Vencida', `A CNH do funcionário *${emp.nome}* venceu hoje.`).catch(()=>{});
+                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'CNH Vencida Hoje', `⚠️ Atenção ${emp.nome}, sua CNH vence HOJE. Entre em contato com o RH.\n\n _Esta é uma mensagem automática, em caso de dúvida entre em contato com o setor responsável da Mak Serviços._`).catch(()=>{});
+                                await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Aviso CNH Vencida', `*Sistema de Frotas MAK*\n\nA CNH do funcionário *${emp.nome}* venceu hoje.`).catch(()=>{});
                             }
                             if (toxVenc === todayStr) {
-                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Toxicológico Vencido Hoje', `⚠️ Atenção ${emp.nome}, seu Exame Toxicológico vence HOJE. Entre em contato com o RH.`).catch(()=>{});
-                                await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Aviso Toxicológico Vencido', `O Exame Toxicológico do funcionário *${emp.nome}* venceu hoje.`).catch(()=>{});
+                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Toxicológico Vencido Hoje', `⚠️ Atenção ${emp.nome}, seu Exame Toxicológico vence HOJE. Entre em contato com o RH.\n\n _Esta é uma mensagem automática, em caso de dúvida entre em contato com o setor responsável da Mak Serviços._`).catch(()=>{});
+                                await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Aviso Toxicológico Vencido', `*Sistema de Frotas MAK*\n\nO Exame Toxicológico do funcionário *${emp.nome}* venceu hoje.`).catch(()=>{});
                             }
                         }
                     }
@@ -129,7 +156,6 @@ cron.schedule('* * * * *', async () => {
 
                 // --- C. RETORNO AUTOMÁTICO DE AFASTAMENTOS E FÉRIAS ---
                 try {
-                    // Corrigido 'name' para 'nome'
                     const [afastados] = await db.query(`
                         SELECT id, nome, contato, statusAfastamentoTipo 
                         FROM employees 
@@ -155,7 +181,7 @@ cron.schedule('* * * * *', async () => {
                         if (typeof whatsappService !== 'undefined') {
                             await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Retorno Afastamento', `✅ *Aviso de Retorno*\n\nO colaborador *${emp.nome}* finalizou seu afastamento e já se encontra "Disponível".`).catch(()=>{});
                             if (emp.contato) {
-                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Fim de Afastamento', `Olá, ${emp.nome}! Seu afastamento chegou ao fim e seu status no Frotas MAK está *Disponível*.\nBom retorno!`).catch(()=>{});
+                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Fim de Afastamento', `Olá, ${emp.nome}! Seu afastamento chegou ao fim e seu status no Frotas MAK está *Disponível*.\nBom retorno!\n\n _Esta é uma mensagem automática, em caso de dúvida entre em contato com o setor responsável da Mak Serviços._`).catch(()=>{});
                             }
                         }
                     }
