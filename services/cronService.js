@@ -44,9 +44,9 @@ cron.schedule('0 * * * *', async () => {
     const gmt3Date = new Date(gmt3Ms);
     
     // Só prossegue se for exatamente 08h da manhã em Brasília
-    if (gmt3Date.getUTCHours() !== 8) {
-        return; 
-    }
+    if (gmt3Date.getUTCHours() !== 9 || gmt3Date.getUTCMinutes() !== 25) {
+    return; 
+}
 
     console.log('⏳ [CRON] Rodando rotina automática diária (Agenda e RH) às 08:00 GMT-3...');
     
