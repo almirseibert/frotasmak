@@ -2,30 +2,56 @@ const cron = require('node-cron');
 const db = require('../database');
 const whatsappService = require('./whatsappService'); // Importação do serviço de WhatsApp
 
+// ===================================================================================
+// FUNÇÕES AUXILIARES PARA BLINDAR FUSO HORÁRIO (Força GMT-3 America/Sao_Paulo)
+// ===================================================================================
+const getTzDateStr = (daysToAdd = 0) => {
+    const d = new Date();
+    d.setDate(d.getDate() + daysToAdd);
+    // Usa a API Intl nativa para forçar o timezone de SP, independentemente da VPS
+    const formatter = new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const parts = formatter.formatToParts(d);
+    const day = parts.find(p => p.type === 'day').value;
+    const month = parts.find(p => p.type === 'month').value;
+    const year = parts.find(p => p.type === 'year').value;
+    return `${year}-${month}-${day}`; // Formato ISO exigido pelo MySQL
+};
+
+const formatDateDb = (dbDate) => {
+    if (!dbDate) return null;
+    try {
+        const d = new Date(dbDate);
+        if(isNaN(d.getTime())) return null;
+        return d.toISOString().split('T')[0];
+    } catch(e) { return null; }
+};
+
 // ====================================================================
 // 1. ROTINA DIÁRIA (08:00) - Verifica Agenda, Manutenções e RH (WhatsApp)
 // ====================================================================
-cron.schedule('45 8 * * *', async () => {
+cron.schedule('0 9 * * *', async () => {
     console.log('⏳ [CRON] Rodando rotina automática diária (Agenda e RH)...');
     
     try {
+        // Gera as datas já convertidas para o nosso fuso horário
+        const hojeStr = getTzDateStr(0);
+        const daqui30DiasStr = getTzDateStr(30);
+
         const [gestores] = await db.query("SELECT id FROM users WHERE role IN ('admin', 'master', 'supervisor')");
         if (gestores.length === 0) {
             console.log('⏳ [CRON] Nenhum usuário gestor encontrado para receber alertas.');
-            // Não damos return aqui para garantir que os alertas de WhatsApp para os funcionários ainda rodem
         }
 
         // ====================================================================
         // A. ALERTAS DE AGENDA (ORIGINAL MANTIDO) - CNH e Manutenção
         // ====================================================================
         if (gestores.length > 0) {
-            // Verificação de CNH para Agenda (Mantive suporte a cnhExpiration/cnhVencimento)
             try {
                 const [cnhVencendo] = await db.query(`
                     SELECT id, IFNULL(nome, name) as name, COALESCE(cnhVencimento, cnhExpiration) as dataVencimento
                     FROM employees 
-                    WHERE COALESCE(cnhVencimento, cnhExpiration) = CURDATE() + INTERVAL 30 DAY
-                `);
+                    WHERE COALESCE(cnhVencimento, cnhExpiration) = ?
+                `, [daqui30DiasStr]);
 
                 for (const emp of cnhVencendo) {
                     for (const gestor of gestores) {
@@ -56,7 +82,6 @@ cron.schedule('45 8 * * *', async () => {
                  console.error('❌ [CRON] Erro ao verificar CNHs para Agenda:', e.message);
             }
 
-            // Verificação de Manutenção para Agenda
             try {
                 const [manutencoes] = await db.query(`
                     SELECT id, plate, fleetNumber, currentKm, nextOilChangeKm 
@@ -95,36 +120,36 @@ cron.schedule('45 8 * * *', async () => {
         }
 
         // ====================================================================
-        // B. ALERTAS DE RH VIA WHATSAPP E AUDITORIA (NOVO)
+        // B. ALERTAS DE RH VIA WHATSAPP E AUDITORIA (MANTIDO)
         // ====================================================================
         try {
             const [vencimentosRH] = await db.query(`
                 SELECT id, IFNULL(nome, name) as nome, contato, cnhVencimento, exameToxicologicoVencimento
                 FROM employees 
                 WHERE status = 'ativo' AND (
-                    cnhVencimento = CURDATE() + INTERVAL 30 DAY OR
-                    cnhVencimento = CURDATE() OR
-                    exameToxicologicoVencimento = CURDATE() + INTERVAL 30 DAY OR
-                    exameToxicologicoVencimento = CURDATE()
+                    cnhVencimento = ? OR
+                    cnhVencimento = ? OR
+                    exameToxicologicoVencimento = ? OR
+                    exameToxicologicoVencimento = ?
                 )
-            `);
+            `, [daqui30DiasStr, hojeStr, daqui30DiasStr, hojeStr]);
 
             for (const emp of vencimentosRH) {
-                const isCnh30Dias = emp.cnhVencimento && new Date(emp.cnhVencimento).toISOString().split('T')[0] === new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
-                const isCnhHoje = emp.cnhVencimento && new Date(emp.cnhVencimento).toISOString().split('T')[0] === new Date().toISOString().split('T')[0];
-                const isTox30Dias = emp.exameToxicologicoVencimento && new Date(emp.exameToxicologicoVencimento).toISOString().split('T')[0] === new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
-                const isToxHoje = emp.exameToxicologicoVencimento && new Date(emp.exameToxicologicoVencimento).toISOString().split('T')[0] === new Date().toISOString().split('T')[0];
+                const cnhVenc = formatDateDb(emp.cnhVencimento);
+                const toxVenc = formatDateDb(emp.exameToxicologicoVencimento);
+
+                const isCnh30Dias = cnhVenc === daqui30DiasStr;
+                const isCnhHoje = cnhVenc === hojeStr;
+                const isTox30Dias = toxVenc === daqui30DiasStr;
+                const isToxHoje = toxVenc === hojeStr;
 
                 if (emp.contato && whatsappService) {
-                    // Envio para o Funcionário (30 dias)
                     if (isCnh30Dias) {
                         await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta CNH 30 Dias', `Olá ${emp.nome}, sua CNH vencerá em 30 dias. Por favor, programe a renovação.`).catch(() => {});
                     }
                     if (isTox30Dias) {
                         await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta Toxicológico 30 Dias', `Olá ${emp.nome}, seu Exame Toxicológico vencerá em 30 dias. Por favor, programe a renovação.`).catch(() => {});
                     }
-
-                    // Envio para o Funcionário e RH (Hoje)
                     if (isCnhHoje) {
                         await whatsappService.enviarMensagem(emp.contato, emp.nome, 'CNH Vencida Hoje', `⚠️ Atenção ${emp.nome}, sua CNH vence HOJE. Entre em contato com o RH.`).catch(() => {});
                         await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Aviso CNH Vencida', `A CNH do funcionário *${emp.nome}* venceu hoje.`).catch(() => {});
@@ -140,26 +165,25 @@ cron.schedule('45 8 * * *', async () => {
         }
 
         // ====================================================================
-        // C. RETORNO AUTOMÁTICO DE AFASTAMENTOS E FÉRIAS (NOVO)
+        // C. RETORNO AUTOMÁTICO DE AFASTAMENTOS E FÉRIAS (CORRIGIDO)
         // ====================================================================
         try {
+            // Agora a query usa '<=' e as strings geradas pelo GMT-3 para garantir precisão diária
             const [afastados] = await db.query(`
                 SELECT id, IFNULL(nome, name) as nome, contato, statusAfastamentoTipo 
                 FROM employees 
                 WHERE statusAfastamentoTipo IS NOT NULL 
-                  AND statusAfastamentoTermino < CURDATE()
+                  AND statusAfastamentoTermino <= ?
                   AND status = 'ativo'
-            `);
+            `, [hojeStr]);
 
             for (const emp of afastados) {
-                // Remove o status de afastamento e define a data de retorno para HOJE
                 await db.query(`
                     UPDATE employees 
-                    SET statusAfastamentoTipo = NULL, statusAfastamentoTermino = NULL, dataRetornoAfastamento = CURDATE()
+                    SET statusAfastamentoTipo = NULL, statusAfastamentoTermino = NULL, dataRetornoAfastamento = ?
                     WHERE id = ?
-                `, [emp.id]);
+                `, [hojeStr, emp.id]);
 
-                // Dispara o alerta para os gestores na Agenda informando o retorno
                 for (const gestor of gestores) {
                     await db.query(`
                         INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
@@ -172,9 +196,7 @@ cron.schedule('45 8 * * *', async () => {
                     ]);
                 }
 
-                // Disparo via WhatsApp: Avisa o RH e o próprio Funcionário
                 if (typeof whatsappService !== 'undefined') {
-                    // 1. Mensagem para o RH
                     await whatsappService.enviarMensagem(
                         whatsappService.CONTATOS_INTERNOS.RH, 
                         'RH', 
@@ -182,7 +204,6 @@ cron.schedule('45 8 * * *', async () => {
                         `✅ *Aviso de Retorno*\n\nO colaborador *${emp.nome}* finalizou seu período de ${emp.statusAfastamentoTipo} e retornou às atividades na data de hoje. Ele já se encontra com status "Disponível" no sistema.`
                     ).catch(() => {});
 
-                    // 2. Mensagem de Boas-vindas para o Funcionário
                     if (emp.contato) {
                         await whatsappService.enviarMensagem(
                             emp.contato, 
@@ -201,6 +222,9 @@ cron.schedule('45 8 * * *', async () => {
     } catch (error) {
         console.error('❌ [CRON] Erro geral na rotina automática:', error);
     }
+}, {
+    scheduled: true,
+    timezone: "America/Sao_Paulo" // Força o Cron a despertar às 08:00 no horário de Brasília!
 });
 
 
@@ -289,6 +313,9 @@ cron.schedule('* * * * *', async () => {
     } catch (error) {
         console.error('❌ [CRON AGENDA] Erro na rotina de lembretes da agenda:', error);
     }
+}, {
+    scheduled: true,
+    timezone: "America/Sao_Paulo"
 });
 
 module.exports = cron;
