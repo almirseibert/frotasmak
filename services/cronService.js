@@ -111,15 +111,16 @@ cron.schedule('* * * * *', async () => {
                         }
                     } catch (e) { console.error('❌ [CRON] Erro CNH Agenda:', e.message); }
 
-                    // ---> B. FUNÇÃO DE MANUTENÇÃO (REGRAS POR TIPO DO VEÍCULO) <---
+                    // ---> B. FUNÇÃO DE MANUTENÇÃO (HODÔMETRO, HORÍMETRO E DATA) <---
                     try {
                         // Busca v.tipo para cruzar com nossa inteligência local
+                        // Removida a verificação r.status, pois a tabela revisions não possui essa coluna
                         const [manutencoes] = await db.query(`
-                            SELECT v.id, v.placa, v.registroInterno, v.tipo, v.odometro, v.horimetro, 
+                            SELECT v.*, 
                                    r.proximaRevisaoOdometro, r.proximaRevisaoHorimetro, r.proximaRevisaoData 
                             FROM vehicles v
                             INNER JOIN revisions r ON v.id = r.vehicleId
-                            WHERE v.status = 'Ativo' AND r.status = 'Pendente'
+                            WHERE v.status = 'Ativo'
                         `);
 
                         for (const v of manutencoes) {
@@ -153,10 +154,10 @@ cron.schedule('* * * * *', async () => {
                             }
 
                             // 1. Verificação Odômetro (-1000km)
-                            if (usaOdometro && v.proximaRevisaoOdometro && v.odometro !== null) {
-                                if (Number(v.odometro) >= (Number(v.proximaRevisaoOdometro) - 1000)) {
+                            if (usaOdometro && v.proximaRevisaoOdometro && v.hodometro !== null) {
+                                if (Number(v.hodometro) >= (Number(v.proximaRevisaoOdometro) - 1000)) {
                                     needsMaintenance = true;
-                                    reasonStr = `O veículo ${v.placa} (Frota ${v.registroInterno || 'N/A'}) está com ${v.odometro}km. A revisão está prevista para ${v.proximaRevisaoOdometro}km.`;
+                                    reasonStr = `O veículo ${v.placa} (Frota ${v.registroInterno || 'N/A'}) está com ${v.hodometro}km. A revisão está prevista para ${v.proximaRevisaoOdometro}km.`;
                                 }
                             } 
                             // 2. Verificação Horímetro (-50h)
