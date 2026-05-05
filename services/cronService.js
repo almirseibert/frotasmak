@@ -9,6 +9,24 @@ const HORA_EXECUCAO = 8;    // Ex: 8 para 08:00, 9 para 09:00
 const MINUTO_EXECUCAO = 0;  // Ex: 0 para exatos 08:00, 30 para 08:30
 
 // ===================================================================================
+// REGRAS DE NEGÓCIO DE VEÍCULOS (Replicado do Frontend)
+// ===================================================================================
+const vehicleGroups = {
+    'Veículos Leves': ['Automóvel', 'Camionete', 'Utilitários', 'Moto'],
+    'Caminhões': ['Bitruck', 'Caminhão Pipa', 'Caminhão Tanque', 'Caminhão Carroceria', 'Cavalo', 'Caçamba Bitruck', 'Caçamba Toco', 'Caçamba Traçado', 'Caçamba Truckado', 'Caminhão', 'Caçamba'],
+    'Caminhões de Trecho': ['Caminhão Prancha', 'Semirreboques'], 
+    'Máquinas Pesadas': ['Motoniveladora', 'Pá Carregadeira', 'Retroescavadeira', 'Rolo', 'Trator', 'Escavadeira', 'Escavadeira + Rompedor', 'Fresadora', 'Trator Esteira']
+};
+
+const getVehicleGroup = (tipoStr) => {
+    if (!tipoStr) return 'Outros';
+    for (const [groupName, types] of Object.entries(vehicleGroups)) {
+        if (types.includes(tipoStr)) return groupName;
+    }
+    return 'Outros'; 
+};
+
+// ===================================================================================
 // FUNÇÕES AUXILIARES PARA BLINDAR FUSO HORÁRIO E MENSAGENS
 // ===================================================================================
 const getGmt3Date = () => {
@@ -72,7 +90,7 @@ cron.schedule('* * * * *', async () => {
                 const daqui30DiasStr = getTzDateStr(30);
                 const [gestores] = await db.query("SELECT id FROM users WHERE role IN ('admin', 'master', 'supervisor')");
                 
-                // --- A. ALERTAS DE AGENDA (CNH e Manutenção) ---
+                // --- A. ALERTAS DE AGENDA (CNH) ---
                 if (gestores.length > 0) {
                     try {
                         const [cnhVencendo] = await db.query(`
@@ -84,7 +102,6 @@ cron.schedule('* * * * *', async () => {
                         for (const emp of cnhVencendo) {
                             for (const gestor of gestores) {
                                 try {
-                                    // Utilizado NULL no lugar do related_id para evitar o erro de Incorrect Integer Value (UUID)
                                     await db.query(`
                                         INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
                                         VALUES (?, ?, ?, NOW(), ?, NULL, ?, 'pending')
@@ -94,10 +111,11 @@ cron.schedule('* * * * *', async () => {
                         }
                     } catch (e) { console.error('❌ [CRON] Erro CNH Agenda:', e.message); }
 
-                    // ---> FUNÇÃO DE MANUTENÇÃO (ODÔMETRO, HORÍMETRO E DATA) <---
+                    // ---> B. FUNÇÃO DE MANUTENÇÃO (REGRAS POR TIPO DO VEÍCULO) <---
                     try {
+                        // Busca v.tipo para cruzar com nossa inteligência local
                         const [manutencoes] = await db.query(`
-                            SELECT v.id, v.placa, v.registroInterno, v.grupo, v.hodometro, v.horimetro, 
+                            SELECT v.id, v.placa, v.registroInterno, v.tipo, v.hodometro, v.horimetro, 
                                    r.proximaRevisaoOdometro, r.proximaRevisaoHorimetro, r.proximaRevisaoData 
                             FROM vehicles v
                             INNER JOIN revisions r ON v.id = r.vehicleId
@@ -108,13 +126,15 @@ cron.schedule('* * * * *', async () => {
                             let needsMaintenance = false;
                             let reasonStr = '';
 
-                            const grupo = (v.grupo || '').trim().toLowerCase();
-                            const isLeves = grupo.includes('leves');
-                            const isTrecho = grupo.includes('trecho');
-                            const isPesados = (grupo.includes('caminh') && !isTrecho) || grupo.includes('máquina') || grupo.includes('maquina') || grupo.includes('pesado');
+                            // Descobre o grupo com base na coluna "tipo"
+                            const grupo = getVehicleGroup(v.tipo);
+                            
+                            const isLeves = grupo === 'Veículos Leves';
+                            const isTrecho = grupo === 'Caminhões de Trecho';
+                            const isPesados = grupo === 'Caminhões' || grupo === 'Máquinas Pesadas';
 
                             const usaOdometro = isLeves || isTrecho;
-                            const usaHorimetro = isPesados;
+                            const usaHorimetro = isPesados || (!usaOdometro); // Fallback seguro
 
                             // Definição de Rotas de WhatsApp por Grupo
                             let contatoInternoNumero = null;
@@ -126,27 +146,28 @@ cron.schedule('* * * * *', async () => {
                             } else if (isTrecho) {
                                 contatoInternoNumero = whatsappService.CONTATOS_INTERNOS.PLINIO;
                                 contatoInternoNome = 'Plinio';
-                            } else if (isPesados) {
+                            } else {
+                                // Default para Máquinas e Caminhões pesados
                                 contatoInternoNumero = whatsappService.CONTATOS_INTERNOS.SAULO;
                                 contatoInternoNome = 'Saulo';
                             }
 
                             // 1. Verificação Odômetro (-1000km)
-                            if (usaOdometro && v.proximaRevisaoOdometro) {
+                            if (usaOdometro && v.proximaRevisaoOdometro && v.hodometro !== null) {
                                 if (Number(v.hodometro) >= (Number(v.proximaRevisaoOdometro) - 1000)) {
                                     needsMaintenance = true;
                                     reasonStr = `O veículo ${v.placa} (Frota ${v.registroInterno || 'N/A'}) está com ${v.hodometro}km. A revisão está prevista para ${v.proximaRevisaoOdometro}km.`;
                                 }
                             } 
                             // 2. Verificação Horímetro (-50h)
-                            else if (usaHorimetro && v.proximaRevisaoHorimetro) {
+                            if (usaHorimetro && v.proximaRevisaoHorimetro && v.horimetro !== null && !needsMaintenance) {
                                 if (Number(v.horimetro) >= (Number(v.proximaRevisaoHorimetro) - 50)) {
                                     needsMaintenance = true;
                                     reasonStr = `O equipamento ${v.placa} (Frota ${v.registroInterno || 'N/A'}) está com ${v.horimetro}h. A revisão está prevista para ${v.proximaRevisaoHorimetro}h.`;
                                 }
                             }
 
-                            // 3. Verificação Data Limite (Aviso 15 dias antes) - Válido para todos os equipamentos
+                            // 3. Verificação Data Limite (Aviso 15 dias antes) - Válido para todos
                             if (!needsMaintenance && v.proximaRevisaoData) {
                                 const revDate = new Date(v.proximaRevisaoData);
                                 const limitDate = getGmt3Date();
@@ -154,11 +175,11 @@ cron.schedule('* * * * *', async () => {
                                 
                                 if (revDate <= limitDate) {
                                     needsMaintenance = true;
-                                    reasonStr = `O veículo ${v.placa} (Frota ${v.registroInterno || 'N/A'}) atinge a data máxima de revisão em ${formatDateDb(v.proximaRevisaoData)}.`;
+                                    reasonStr = `O equipamento ${v.placa} (Frota ${v.registroInterno || 'N/A'}) atinge a data máxima de revisão em ${formatDateDb(v.proximaRevisaoData)}.`;
                                 }
                             }
 
-                            // Grava no calendário do Gestor caso atinja algum dos gatilhos
+                            // Se atingiu o limite, grava na Agenda e envia WhatsApp
                             if (needsMaintenance) {
                                 let enviouAgendaRecentemente = false;
                                 
@@ -181,7 +202,7 @@ cron.schedule('* * * * *', async () => {
                                     } catch(e) { console.error('❌ Erro Insert Agenda Manutenção:', e.message); }
                                 }
 
-                                // Se não enviou na última semana, faz o disparo de WhatsApp para o gestor responsável pelo grupo
+                                // Disparo de WhatsApp para o gestor responsável pelo grupo
                                 if (enviouAgendaRecentemente && contatoInternoNumero && typeof whatsappService !== 'undefined') {
                                     try {
                                         await whatsappService.enviarMensagem(
@@ -194,10 +215,10 @@ cron.schedule('* * * * *', async () => {
                                 }
                             }
                         }
-                    } catch (e) { console.error('❌ [CRON] Erro Manutenções Agenda (Verifique tabelas vehicles e revisions):', e.message); }
+                    } catch (e) { console.error('❌ [CRON] Erro Manutenções:', e.message); }
                 }
 
-                // --- B. ALERTAS DE RH VIA WHATSAPP E AUDITORIA ---
+                // --- C. ALERTAS DE RH VIA WHATSAPP E AUDITORIA ---
                 try {
                     const [vencimentosRH] = await db.query(`
                         SELECT id, nome, contato, cnhVencimento, exameToxicologicoVencimento
@@ -227,7 +248,7 @@ cron.schedule('* * * * *', async () => {
                     }
                 } catch (e) { console.error('❌ [CRON] Erro Whats RH:', e.message); }
 
-                // --- C. RETORNO AUTOMÁTICO DE AFASTAMENTOS E FÉRIAS ---
+                // --- D. RETORNO AUTOMÁTICO DE AFASTAMENTOS E FÉRIAS ---
                 try {
                     const [afastados] = await db.query(`
                         SELECT id, nome, contato, statusAfastamentoTipo 
@@ -238,8 +259,6 @@ cron.schedule('* * * * *', async () => {
                     `, [todayStr]);
 
                     for (const emp of afastados) {
-                        
-                        // 1. Atualiza o status no Banco de Dados
                         try {
                             await db.query(`
                                 UPDATE employees 
@@ -248,7 +267,6 @@ cron.schedule('* * * * *', async () => {
                             `, [todayStr, emp.id]);
                         } catch(e) { console.error(`Erro ao atualizar BD para retorno de ${emp.nome}`, e); }
 
-                        // 2. Grava na Agenda (com Try/Catch Isolado)
                         for (const gestor of gestores) {
                             try {
                                 await db.query(`
@@ -258,7 +276,6 @@ cron.schedule('* * * * *', async () => {
                             } catch(e) { console.error(`Erro na Agenda Retorno Férias:`, e.message); }
                         }
 
-                        // 3. Dispara o WhatsApp (com Try/Catch Isolado para garantir que nada aborte o envio)
                         if (typeof whatsappService !== 'undefined') {
                             try {
                                 await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Retorno Afastamento', formatMsgInterno(`✅ *Aviso de Retorno*\n\nO colaborador *${emp.nome}* finalizou seu afastamento e já se encontra "Disponível".`));
