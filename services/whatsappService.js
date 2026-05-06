@@ -7,14 +7,14 @@ const WPP_API_KEY = process.env.WPP_API_KEY;
 
 // Lista de contatos internos padronizada
 const CONTATOS_INTERNOS = {
-    ALMIR: '555199111090',
-    LEANDRO: '555192481722',
-    PLINIO: '555180348479',
-    AMANDA: '555198196762',
-    MARLISE: '555196588016',
-    RH: '555199111090',
-    SAULO: '555197120502',
-    ALEXANDRO: '555181708680'
+    ALMIR: '555199111090',  // Responsável por oficina da frota leve, rastreamento, tecnologia, inovação, suporte técnico e sistema de gestão de frotas, Notificado `Veículos Leves`
+    LEANDRO: '555192481722',  // Responsável por compras, fornecedores e contratos
+    PLINIO: '555180348479',  // Responsável por logística e transporte, Notificado `Caminhões de Trecho`
+    AMANDA: '555198196762',  // Responsável por abastecimento
+    MARLISE: '555196588016', // Responsável por refeições e hospedagem
+    RH: '555181598177', // Responsável por recursos humanos e questões administrativas
+    SAULO: '555197120502', // Responsável por oficina de caminhões e máquinas, manutenção preventiva e corretiva, Notificado `Máquinas` e `Caminhões Pesados`
+    ALEXANDRO: '555181708680' // Responsável por contratos, licitações, cobranças e questões jurídicas relacionadas às obras
 };
 
 function formatarNumero(numero) {
