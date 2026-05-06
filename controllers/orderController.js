@@ -1,6 +1,7 @@
 // controllers/orderController.js
 const db = require('../database');
 
+// --- Função Auxiliar Segura de JSON ---
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
     if (typeof field === 'object') return field; 
@@ -21,7 +22,7 @@ const parseOrderJsonFields = (order) => {
     newOrder.payment = parseJsonSafe(newOrder.payment, 'payment');
     newOrder.createdBy = parseJsonSafe(newOrder.createdBy, 'createdBy');
     newOrder.editedBy = parseJsonSafe(newOrder.editedBy, 'editedBy');
-    newOrder.anexos = parseJsonSafe(newOrder.anexos, 'anexos') || []; // Array de links (PDFs, Orçamentos)
+    newOrder.anexos = parseJsonSafe(newOrder.anexos, 'anexos') || []; 
     return newOrder;
 };
 
@@ -58,14 +59,15 @@ const createOrder = async (req, res) => {
         const orderData = {
             orderNumber: newOrderNumber,
             date: new Date(data.date),
-            supplierId: data.supplierId, // FK do Fornecedor
-            supplier: data.supplier,     // Mantido como cache do Nome
-            employeeId: data.employeeId,
-            obraId: data.obraId,
-            vehicleId: data.vehicleId,
-            revisionId: data.revisionId || null, // Vínculo com a manutenção
+            supplierId: data.supplierId || null, 
+            supplier: data.supplier || null,     
+            employeeId: data.employeeId || null,
+            operatorId: data.operatorId || null, // Novo campo de Operador
+            obraId: data.obraId || null,
+            vehicleId: data.vehicleId || null,
+            revisionId: data.revisionId || null,
             totalValue: data.totalValue || 0,
-            status: data.status || 'Aberta', // Aberta, A Cotar, Concluída, Cancelada
+            status: data.status || 'Aberta',
             invoiceNumber: data.invoiceNumber || null,
             items: JSON.stringify(data.items),
             payment: JSON.stringify(data.payment),
@@ -74,23 +76,25 @@ const createOrder = async (req, res) => {
             anexos: JSON.stringify(data.anexos || [])
         };
         
-        const [result] = await connection.execute('INSERT INTO orders SET ?', [orderData]);
+        // CORREÇÃO: Utilizar .query() no lugar de .execute() para suportar o formato objeto "SET ?"
+        const [result] = await connection.query('INSERT INTO orders SET ?', [orderData]);
         const orderId = result.insertId;
 
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "purchaseOrderCounter"', [newOrderNumber]);
 
-        // A DESPESA SÓ É GERADA QUANDO A ORDEM ESTÁ "CONCLUÍDA" (Com NF e Valor Final)
-        if (orderData.status === 'Concluída') {
+        // A DESPESA É GERADA COM BASE NO STATUS FINAL DA ORDEM
+        if (orderData.status === 'Concluída' || (orderData.status === 'Ativa' && orderData.totalValue > 0)) {
             const expenseData = {
                 orderId: orderId,
-                description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier}`,
+                description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
                 amount: orderData.totalValue,
                 obraId: data.obraId,
                 category: 'Manutenção / Compras',
                 createdAt: new Date(),
                 createdBy: orderData.createdBy,
             };
-            await connection.execute('INSERT INTO expenses SET ?', [expenseData]);
+            // Mesma regra do .query() aqui
+            await connection.query('INSERT INTO expenses SET ?', [expenseData]);
         }
         
         await connection.commit();
@@ -118,11 +122,12 @@ const updateOrder = async (req, res) => {
         const newStatus = data.status;
 
         const orderUpdateData = {
-            supplierId: data.supplierId,
-            supplier: data.supplier,
-            employeeId: data.employeeId,
-            obraId: data.obraId,
-            vehicleId: data.vehicleId,
+            supplierId: data.supplierId || null,
+            supplier: data.supplier || null,
+            employeeId: data.employeeId || null,
+            operatorId: data.operatorId || null, // Novo campo de Operador
+            obraId: data.obraId || null,
+            vehicleId: data.vehicleId || null,
             revisionId: data.revisionId || null,
             invoiceNumber: data.invoiceNumber || null,
             status: newStatus,
@@ -134,10 +139,13 @@ const updateOrder = async (req, res) => {
             anexos: JSON.stringify(data.anexos || [])
         };
         
-        await connection.execute('UPDATE orders SET ? WHERE id = ?', [orderUpdateData, id]);
+        // CORREÇÃO: .query() no lugar de .execute()
+        await connection.query('UPDATE orders SET ? WHERE id = ?', [orderUpdateData, id]);
 
-        // Lógica de Geração/Estorno de Despesas baseada no Fechamento (Concluída)
-        if (originalOrder.status !== 'Concluída' && newStatus === 'Concluída') {
+        const originalIsClosed = originalOrder.status === 'Concluída' || originalOrder.status === 'Ativa';
+        const newIsClosed = newStatus === 'Concluída' || newStatus === 'Ativa';
+
+        if (!originalIsClosed && newIsClosed) {
             // GERAR DESPESA
             const expenseData = {
                 orderId: id,
@@ -148,13 +156,13 @@ const updateOrder = async (req, res) => {
                 createdAt: new Date(),
                 createdBy: orderUpdateData.editedBy || orderUpdateData.createdBy,
             };
-            await connection.execute('INSERT INTO expenses SET ?', [expenseData]);
+            await connection.query('INSERT INTO expenses SET ?', [expenseData]);
             
-        } else if (originalOrder.status === 'Concluída' && newStatus !== 'Concluída') {
-            // ESTORNAR/DELETAR DESPESA (Reabertura da Ordem)
+        } else if (originalIsClosed && !newIsClosed) {
+            // ESTORNAR/DELETAR DESPESA
             await connection.execute('DELETE FROM expenses WHERE orderId = ?', [id]);
             
-        } else if (originalOrder.status === 'Concluída' && newStatus === 'Concluída') {
+        } else if (originalIsClosed && newIsClosed) {
             // ATUALIZAR DESPESA EXISTENTE
             await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ? WHERE orderId = ?', [
                 orderUpdateData.totalValue,
@@ -188,7 +196,7 @@ const cancelOrder = async (req, res) => {
         
         await connection.execute('UPDATE orders SET status = "Cancelada" WHERE id = ?', [id]);
 
-        if (originalOrder.status === 'Concluída') {
+        if (originalOrder.status === 'Concluída' || originalOrder.status === 'Ativa') {
             await connection.execute('DELETE FROM expenses WHERE orderId = ?', [id]);
         }
 
