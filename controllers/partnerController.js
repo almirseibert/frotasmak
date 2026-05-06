@@ -72,7 +72,7 @@ const createPartner = async (req, res) => {
         'contatoResponsavel',
         'cidade',
         'status_operacional',
-        'tipo_parceiro' // ADICIONADO: Diferencia Posto de Fornecedor
+        'tipo_parceiro'
     ];
 
     const data = req.body;
@@ -85,7 +85,7 @@ const createPartner = async (req, res) => {
         }
     });
 
-    // Se não enviar tipo, assume que é posto (retrocompatibilidade)
+    // Se não enviar tipo, assume que é posto
     if (!partnerData.tipo_parceiro) {
         partnerData.tipo_parceiro = 'posto';
     }
@@ -144,7 +144,7 @@ const updatePartner = async (req, res) => {
         'contatoResponsavel',
         'cidade',
         'status_operacional',
-        'tipo_parceiro' // ADICIONADO
+        'tipo_parceiro'
     ];
 
     const data = req.body;
