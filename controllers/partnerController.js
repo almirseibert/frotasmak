@@ -71,7 +71,8 @@ const createPartner = async (req, res) => {
         'email',
         'contatoResponsavel',
         'cidade',
-        'status_operacional'
+        'status_operacional',
+        'tipo_parceiro' // ADICIONADO: Diferencia Posto de Fornecedor
     ];
 
     const data = req.body;
@@ -83,6 +84,11 @@ const createPartner = async (req, res) => {
             partnerData[key] = data[key];
         }
     });
+
+    // Se não enviar tipo, assume que é posto (retrocompatibilidade)
+    if (!partnerData.tipo_parceiro) {
+        partnerData.tipo_parceiro = 'posto';
+    }
 
     const fields = Object.keys(partnerData);
     const values = Object.values(partnerData);
@@ -101,7 +107,7 @@ const createPartner = async (req, res) => {
         await connection.execute(query, values);
         const newPartnerId = partnerData.id; 
 
-        if (fuelPrices && typeof fuelPrices === 'object') {
+        if (fuelPrices && typeof fuelPrices === 'object' && partnerData.tipo_parceiro === 'posto') {
             const pricePromises = Object.entries(fuelPrices).map(([fuelType, price]) => {
                 return connection.execute(
                     'INSERT INTO partner_fuel_prices (partnerId, fuelType, price) VALUES (?, ?, ?)',
@@ -137,7 +143,8 @@ const updatePartner = async (req, res) => {
         'email',
         'contatoResponsavel',
         'cidade',
-        'status_operacional'
+        'status_operacional',
+        'tipo_parceiro' // ADICIONADO
     ];
 
     const data = req.body;
@@ -204,10 +211,9 @@ const updateFuelPrices = async (req, res) => {
     }
 };
 
-// --- NOVO: UPDATE STATUS (Bloquear/Desbloquear) ---
+// --- UPDATE STATUS (Bloquear/Desbloquear) ---
 const updatePartnerStatus = async (req, res) => {
     const { id } = req.params;
-    // CORREÇÃO: Aceita 'status' (enviado pelo novo apiClient) ou 'status_operacional' (fallback)
     const status = req.body.status || req.body.status_operacional; 
 
     if (!status) {
@@ -217,13 +223,12 @@ const updatePartnerStatus = async (req, res) => {
     try {
         await db.execute('UPDATE partners SET status_operacional = ? WHERE id = ?', [status, id]);
         req.io.emit('server:sync', { targets: ['partners'] });
-        res.json({ message: `Status do posto atualizado para ${status}.` });
+        res.json({ message: `Status do parceiro atualizado para ${status}.` });
     } catch (error) {
         console.error('Erro ao atualizar status:', error);
         res.status(500).json({ error: 'Erro ao atualizar status do parceiro.' });
     }
 };
-
 
 // --- DELETE: Deletar um parceiro ---
 const deletePartner = async (req, res) => {
@@ -243,6 +248,6 @@ module.exports = {
     createPartner,
     updatePartner,
     updateFuelPrices,
-    updatePartnerStatus, // Exportando a nova função
+    updatePartnerStatus,
     deletePartner,
 };
