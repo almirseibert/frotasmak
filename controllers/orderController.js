@@ -1,5 +1,6 @@
 // controllers/orderController.js
 const db = require('../database');
+const crypto = require('crypto'); // Importado para gerar UUIDs compatíveis com sua migração do Firebase
 
 // --- Função Auxiliar Segura de JSON ---
 const parseJsonSafe = (field, key) => {
@@ -56,13 +57,17 @@ const createOrder = async (req, res) => {
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "purchaseOrderCounter" FOR UPDATE');
         const newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
 
+        // Gera o UUID nativamente para contornar a falta do auto-increment do banco
+        const newOrderId = crypto.randomUUID();
+
         const orderData = {
+            id: newOrderId,
             orderNumber: newOrderNumber,
             date: new Date(data.date),
             supplierId: data.supplierId || null, 
             supplier: data.supplier || null,     
             employeeId: data.employeeId || null,
-            operatorId: data.operatorId || null, // Novo campo de Operador
+            operatorId: data.operatorId || null, 
             obraId: data.obraId || null,
             vehicleId: data.vehicleId || null,
             revisionId: data.revisionId || null,
@@ -76,16 +81,15 @@ const createOrder = async (req, res) => {
             anexos: JSON.stringify(data.anexos || [])
         };
         
-        // CORREÇÃO: Utilizar .query() no lugar de .execute() para suportar o formato objeto "SET ?"
-        const [result] = await connection.query('INSERT INTO orders SET ?', [orderData]);
-        const orderId = result.insertId;
+        await connection.query('INSERT INTO orders SET ?', [orderData]);
 
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "purchaseOrderCounter"', [newOrderNumber]);
 
         // A DESPESA É GERADA COM BASE NO STATUS FINAL DA ORDEM
         if (orderData.status === 'Concluída' || (orderData.status === 'Ativa' && orderData.totalValue > 0)) {
             const expenseData = {
-                orderId: orderId,
+                id: crypto.randomUUID(), // Despesas também precisam de UUID devido a migração
+                orderId: newOrderId,
                 description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
                 amount: orderData.totalValue,
                 obraId: data.obraId,
@@ -93,13 +97,12 @@ const createOrder = async (req, res) => {
                 createdAt: new Date(),
                 createdBy: orderData.createdBy,
             };
-            // Mesma regra do .query() aqui
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
         }
         
         await connection.commit();
         req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
-        res.status(201).json({ id: orderId, orderNumber: newOrderNumber });
+        res.status(201).json({ id: newOrderId, orderNumber: newOrderNumber });
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao criar ordem:', error);
@@ -125,7 +128,7 @@ const updateOrder = async (req, res) => {
             supplierId: data.supplierId || null,
             supplier: data.supplier || null,
             employeeId: data.employeeId || null,
-            operatorId: data.operatorId || null, // Novo campo de Operador
+            operatorId: data.operatorId || null,
             obraId: data.obraId || null,
             vehicleId: data.vehicleId || null,
             revisionId: data.revisionId || null,
@@ -139,7 +142,6 @@ const updateOrder = async (req, res) => {
             anexos: JSON.stringify(data.anexos || [])
         };
         
-        // CORREÇÃO: .query() no lugar de .execute()
         await connection.query('UPDATE orders SET ? WHERE id = ?', [orderUpdateData, id]);
 
         const originalIsClosed = originalOrder.status === 'Concluída' || originalOrder.status === 'Ativa';
@@ -148,6 +150,7 @@ const updateOrder = async (req, res) => {
         if (!originalIsClosed && newIsClosed) {
             // GERAR DESPESA
             const expenseData = {
+                id: crypto.randomUUID(), // Despesas também precisam de UUID
                 orderId: id,
                 description: `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
                 amount: orderUpdateData.totalValue,
