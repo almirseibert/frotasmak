@@ -18,7 +18,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
         'https://frotamak.com', 
         'https://www.frotamak.com'
       ]; // Domínios de produção adicionados como segurança
-      
+
 const corsOptions = {
     origin: function (origin, callback) {
         if (!origin || allowedOrigins.includes(origin)) {
@@ -101,6 +101,7 @@ const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
 
 const app = express();
+app.use(cors(corsOptions))
 const port = process.env.PORT || 3001;
 
 const server = http.createServer(app);
