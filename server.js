@@ -101,7 +101,7 @@ const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
 
 const app = express();
-app.use(cors(corsOptions))
+app.use(cors(corsOptions));
 const port = process.env.PORT || 3001;
 
 const server = http.createServer(app);
