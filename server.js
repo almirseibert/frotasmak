@@ -1,39 +1,129 @@
-// server.js (Backend)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const fs = require('fs'); // <--- Adicionado para manipulação de pastas
+const fs = require('fs');
 const db = require('./database');
-const http = require('http'); // Importar módulo HTTP nativo
-const { Server } = require("socket.io"); // Importar Socket.io
-
-// ====================================================================
-// CONFIGURAÇÃO DO MULTER (UPLOAD DE ARQUIVOS DIRETO NO SERVER.JS)
-// Isso previne erros 404 por falha de leitura de arquivos externos de rota
-// ====================================================================
+const http = require('http'); 
+const { Server } = require("socket.io"); 
 const multer = require('multer');
 
+// ====================================================================
+// 🔧 CONFIGURAÇÃO DE CORS SEGURO (CORRIGIDO)
+// ====================================================================
+
+// Função auxiliar para limpar e validar URLs
+const sanitizeUrl = (url) => {
+  if (!url) return null;
+  return url.trim().toLowerCase().replace(/\/$/, '');
+};
+
+// Leitura das origens permitidas do .env
+const envOrigins = process.env.ALLOWED_ORIGINS || '';
+const customOrigins = envOrigins
+  .split(',')
+  .map(sanitizeUrl)
+  .filter(Boolean); // Remove strings vazias
+
+// Fallback com origens padrão (sempre incluir localhost para desenvolvimento)
+const allowedOrigins = customOrigins.length > 0 
+  ? customOrigins 
+  : [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:3001',
+      'https://frotamak.com',
+      'https://www.frotamak.com',
+      'https://frotasmak-frotas-backend.oehpg2.easypanel.host'
+    ];
+
+console.log('✅ Origens CORS permitidas:', allowedOrigins);
+
+// Configuração do CORS para Express
+const corsOptions = {
+  origin: function (origin, callback) {
+    // ⚠️ IMPORTANTE: Requisições sem 'origin' header (como preflight OPTIONS) são permitidas
+    // Isso é necessário para requests do mesmo servidor (localhost:3000 chamando localhost:3001)
+    if (!origin) {
+      console.log('ℹ️ Requisição sem header Origin (provavelmente preflight ou mesma origem) - PERMITIDA');
+      return callback(null, true);
+    }
+
+    const cleanOrigin = sanitizeUrl(origin);
+    
+    if (allowedOrigins.includes(cleanOrigin)) {
+      console.log(`✅ Origem permitida: ${cleanOrigin}`);
+      callback(null, true);
+    } else {
+      console.error(`❌ CORS BLOQUEADO: Origem '${origin}' (limpa: '${cleanOrigin}') não está na whitelist`);
+      callback(new Error('CORS: Origem não permitida. Entre em contato com o administrador.'));
+    }
+  },
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  credentials: true, // Permite cookies e credenciais
+  optionsSuccessStatus: 200 // Para navegadores antigos
+};
+
+// ====================================================================
+// INICIALIZAÇÃO DO APP E MIDDLEWARES GLOBAIS
+// ====================================================================
+const app = express();
+
+// ⚠️ IMPORTANTE: Aplicar CORS ANTES de qualquer outra rota!
+app.use(cors(corsOptions));
+app.use(express.json());
+
+// Middleware para logar todas as requisições (debug)
+app.use((req, res, next) => {
+  console.log(`📨 ${req.method} ${req.path} | Origin: ${req.get('origin') || 'sem origin'}`);
+  next();
+});
+
+// ====================================================================
+// CONFIGURAÇÃO DE UPLOAD (MULTER)
+// ====================================================================
 const uploadDir = path.join(__dirname, 'public/uploads');
 if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
+  fs.mkdirSync(uploadDir, { recursive: true });
+  console.log(`📁 Diretório de uploads criado: ${uploadDir}`);
 }
 
 const storage = multer.diskStorage({
-    destination: function (req, file, cb) {
-        cb(null, uploadDir);
-    },
-    filename: function (req, file, cb) {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const cleanOriginalName = file.originalname.replace(/[^a-zA-Z0-9.]/g, '_');
-        cb(null, uniqueSuffix + '-' + cleanOriginalName);
-    }
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const cleanOriginalName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+    cb(null, uniqueSuffix + '-' + cleanOriginalName);
+  }
 });
-const upload = multer({ storage: storage });
 
+const fileFilterGlobal = (req, file, cb) => {
+  const allowedMimeTypes = [
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+    'application/pdf'
+  ];
+  
+  if (allowedMimeTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error(`❌ Tipo de arquivo não permitido: ${file.mimetype}. Apenas imagens (JPEG/PNG/WEBP) e PDFs.`), false);
+  }
+};
+
+const upload = multer({
+  storage: storage,
+  fileFilter: fileFilterGlobal,
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+});
 
 // ====================================================================
-// IMPORTAÇÃO DE MIDDLEWARES E ROTAS EXISTENTES
+// IMPORTAÇÃO DE MIDDLEWARES E ROTAS
 // ====================================================================
 const authMiddleware = require('./middlewares/authMiddleware');
 
@@ -59,76 +149,95 @@ const userRoutes = require('./routes/userRoutes');
 const updateRoutes = require('./routes/updateRoutes');
 const tireRoutes = require('./routes/tireRoutes');
 const obraSupervisorRoutes = require('./routes/obraSupervisorRoutes');
-
-// --- NOVAS ROTAS ---
 const solicitacaoRoutes = require('./routes/solicitacaoRoutes');
 const billingRoutes = require('./routes/billingRoutes');
 const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
 
-const app = express();
+// ====================================================================
+// CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
+// ====================================================================
 const port = process.env.PORT || 3001;
-
 const server = http.createServer(app);
 
 const io = new Server(server, {
-    cors: {
-        origin: "*", 
-        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
-    }
+  cors: {
+    origin: allowedOrigins, // Usa a mesma whitelist do Express
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'] // Fallback para polling se websocket falhar
 });
+
 global.io = io;
 
-app.use(cors());
-app.use(express.json()); 
+// ====================================================================
+// ROTAS ESTÁTICAS E MIDDLEWARE
+// ====================================================================
 
-// Configuração para permitir acesso público aos uploads de imagens e PDFs
-app.use('/uploads', express.static(uploadDir));
+// Servir arquivos estáticos (uploads)
+app.use('/uploads', express.static(uploadDir, {
+  maxAge: '1d', // Cache de 1 dia
+  etag: false
+}));
 
-// Middleware para disponibilizar o 'io' em todas as requisições (req.io)
+// Disponibilizar 'io' em todas as requisições
 app.use((req, res, next) => {
-    req.io = io;
-    next();
+  req.io = io;
+  next();
 });
 
-// --- ROTAS DA API ---
+// ====================================================================
+// DEFINIÇÃO DAS ROTAS API
+// ====================================================================
 const apiRouter = express.Router();
 
+// Health check
 apiRouter.get('/', (req, res) => {
-    res.send('API Frotas MAK está no ar!');
+  res.json({
+    status: 'OK',
+    message: '🚀 API Frotas MAK está funcionando!',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Rotas Públicas
+// ⚠️ Rotas Públicas (SEM autenticação)
 apiRouter.use('/auth', authRoutes);
 apiRouter.use('/registrationRequests', registrationRequestRoutes);
 
 // ====================================================================
-// MIDDLEWARE DE AUTENTICAÇÃO (Tudo abaixo disso requer token)
+// MIDDLEWARE DE AUTENTICAÇÃO (Aplicado a partir daqui)
 // ====================================================================
 apiRouter.use(authMiddleware);
 
-// --- ROTA DE UPLOAD GENÉRICA (GARANTIDA E EMBUTIDA NO SERVER.JS) ---
-// Responde ao 'POST /api/upload'
+// ✅ Rota de Upload Genérica (Protegida)
 apiRouter.post('/upload', upload.single('file'), (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'Nenhum arquivo recebido.' });
-        }
-        
-        const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-        
-        res.status(200).json({
-            message: 'Upload realizado com sucesso.',
-            url: fileUrl,
-            filename: req.file.filename
-        });
-    } catch (error) {
-        console.error('Erro no upload genérico:', error);
-        res.status(500).json({ error: 'Falha interna ao processar o upload do arquivo.' });
+  try {
+    if (!req.file) {
+      return res.status(400).json({ 
+        error: 'Nenhum arquivo foi recebido.',
+        hint: 'Verifique se o arquivo está sendo enviado no campo "file" do formulário.'
+      });
     }
+
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+
+    res.status(200).json({
+      message: '✅ Upload realizado com sucesso.',
+      url: fileUrl,
+      filename: req.file.filename,
+      size: req.file.size
+    });
+  } catch (error) {
+    console.error('❌ Erro no upload genérico:', error);
+    res.status(500).json({ 
+      error: 'Falha interna ao processar o upload do arquivo.',
+      details: error.message
+    });
+  }
 });
 
-// --- ROTAS PROTEGIDAS DO SISTEMA ---
+// ✅ Rotas Protegidas
 apiRouter.use('/vehicles', vehicleRoutes);
 apiRouter.use('/obras', obraRoutes);
 apiRouter.use('/employees', employeeRoutes);
@@ -150,44 +259,116 @@ apiRouter.use('/tires', tireRoutes);
 apiRouter.use('/supervisor', obraSupervisorRoutes);
 apiRouter.use('/billing', billingRoutes);
 apiRouter.use('/solicitacoes', solicitacaoRoutes);
-
-// Integração das Novas Funcionalidades
 apiRouter.use('/maintenances', maintenanceRoutes);
 apiRouter.use('/washings', washingRoutes);
 apiRouter.use('/agenda', agendaRoutes);
 
+// Registrar todas as rotas sob /api
 app.use('/api', apiRouter);
 
-// (Opcional) Log de conexões Socket para Debug
+// ====================================================================
+// TRATAMENTO DE ERROS CORS (Middleware de tratamento no final)
+// ====================================================================
+app.use((err, req, res, next) => {
+  if (err.message && err.message.includes('CORS')) {
+    console.error(`🚨 ERRO CORS: ${err.message}`);
+    return res.status(403).json({
+      error: 'CORS: Acesso bloqueado',
+      message: err.message,
+      origin: req.get('origin'),
+      allowedOrigins: allowedOrigins
+    });
+  }
+  
+  if (err.message && err.message.includes('arquivo')) {
+    console.error(`🚨 ERRO DE UPLOAD: ${err.message}`);
+    return res.status(400).json({
+      error: 'Erro ao processar arquivo',
+      message: err.message
+    });
+  }
+
+  // Erro genérico
+  console.error('🚨 ERRO SERVIDOR:', err);
+  res.status(500).json({
+    error: 'Erro interno do servidor',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Entre em contato com o suporte'
+  });
+});
+
+// ====================================================================
+// SOCKET.IO - EVENTOS E CONEXÕES
+// ====================================================================
 io.on('connection', (socket) => {
-    console.log('🔌 Cliente conectado via Socket:', socket.id);
-    
-    socket.on('disconnect', () => {
-        console.log('❌ Cliente desconectado:', socket.id);
-    });
+  console.log(`🔌 Cliente Socket.io conectado: ${socket.id} | IP: ${socket.handshake.address}`);
+
+  socket.on('disconnect', () => {
+    console.log(`❌ Cliente Socket.io desconectado: ${socket.id}`);
+  });
+
+  // Evento de teste (opcional, para debug)
+  socket.on('ping', (callback) => {
+    console.log(`📡 Ping recebido de ${socket.id}`);
+    callback({ status: 'pong', timestamp: new Date().toISOString() });
+  });
 });
 
-// Inicialização do Banco de Dados (Verificação de Conexão Apenas)
+// ====================================================================
+// INICIALIZAÇÃO DO BANCO DE DADOS
+// ====================================================================
 db.getConnection()
-    .then(connection => {
-        console.log('Conexão com o banco de dados estabelecida com sucesso!');
-        connection.release();
-    })
-    .catch(err => {
-        console.error('Erro ao conectar ao banco de dados:', err.stack);
-    });
+  .then(connection => {
+    console.log('✅ Conexão com o banco de dados estabelecida com sucesso!');
+    connection.release();
+  })
+  .catch(err => {
+    console.error('❌ Erro ao conectar ao banco de dados:', err.message);
+    console.error('   Stack:', err.stack);
+    // NÃO interrompe o servidor, apenas loga o erro
+  });
 
-// ==========================================
+// ====================================================================
 // IMPORTAR E INICIAR SERVIÇOS EM SEGUNDO PLANO
-// ==========================================
-require('./services/cronService'); 
+// ====================================================================
+try {
+  require('./services/cronService');
+  console.log('✅ Serviço CRON iniciado com sucesso.');
+} catch (error) {
+  console.error('⚠️ Erro ao iniciar serviço CRON:', error.message);
+}
 
-// IMPORTANTE: server.listen (inicia a API)
-server.listen(port, () => {
-    console.log(`🚀 Servidor rodando (HTTP + Socket.io) na porta ${port}`);
-    console.log(`- Rotas de Upload Genérico registradas em /api/upload`);
-    console.log(`- Rotas de Billing registradas em /api/billing`);
-    console.log(`- Rotas de Solicitações registradas em /api/solicitacoes`);
-    console.log(`- Rotas de Manutenções registradas em /api/maintenances`);
-    console.log(`- Rotas de Lavagens registradas em /api/washings`);
+// ====================================================================
+// INICIAR O SERVIDOR
+// ====================================================================
+server.listen(port, '0.0.0.0', () => {
+  console.log('');
+  console.log('╔════════════════════════════════════════════════════════╗');
+  console.log(`║  🚀 SERVIDOR FROTAS MAK INICIADO COM SUCESSO!           ║`);
+  console.log(`║  🌐 Porta: ${port}                                         ║`);
+  console.log(`║  📡 HTTP + WebSocket (Socket.io) ATIVO                  ║`);
+  console.log('╠════════════════════════════════════════════════════════╣');
+  console.log(`║  ✅ Upload Genérico:     POST /api/upload               ║`);
+  console.log(`║  ✅ Autenticação:        POST /api/auth/login           ║`);
+  console.log(`║  ✅ Veículos:            GET  /api/vehicles             ║`);
+  console.log(`║  ✅ Funcionários:        GET  /api/employees            ║`);
+  console.log(`║  ✅ Agenda:              GET  /api/agenda               ║`);
+  console.log('╠════════════════════════════════════════════════════════╣');
+  console.log(`║  🔐 Origens CORS Permitidas:                           ║`);
+  allowedOrigins.forEach(origin => {
+    console.log(`║     • ${origin.padEnd(50)} ║`);
+  });
+  console.log('╚════════════════════════════════════════════════════════╝');
+  console.log('');
 });
+
+// Tratamento de erros não capturados
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🚨 Rejeição não tratada em Promise:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('🚨 Exceção não capturada:', error);
+  process.exit(1);
+});
+
+module.exports = { app, server, io };
