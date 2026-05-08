@@ -1,5 +1,5 @@
 const db = require('../database');
-const bcrypt = require('bcryptjs');
+const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 
 // --- Função Auxiliar para Conversar com o Banco de Dados ---

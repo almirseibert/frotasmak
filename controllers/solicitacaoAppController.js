@@ -3,7 +3,6 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 
-// --- CONFIGURAÇÃO MULTER (Uploads Otimizados) ---
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
         const dir = path.join(__dirname, '../public/uploads/solicitacoes');
@@ -17,9 +16,20 @@ const storage = multer.diskStorage({
     }
 });
 
+// --- CORREÇÃO DE SEGURANÇA: FILE FILTER SOLICITAÇÕES ---
+const fileFilterApp = (req, file, cb) => {
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+        cb(null, true);
+    } else {
+        cb(new Error('Arquivo inválido. Apenas Imagens e PDF são aceitos.'), false);
+    }
+};
+
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 } // Limite 5MB
+    fileFilter: fileFilterApp,
+    limits: { fileSize: 5 * 1024 * 1024 } 
 });
 
 // --- HELPERS LOCAIS ---
@@ -105,15 +115,15 @@ const criarSolicitacao = async (req, res) => {
         const novoOdometro = safeNum(odometro);
         const novoHorimetro = safeNum(horimetro);
         const antOdometro = safeNum(veiculo.odometro);
-        const antHorimetro = safeNum(veiculo.horimetro || veiculo.horimetroDigital);
+        const antHorimetro = safeNum(veiculo.horimetro);
 
         if (novoOdometro > 0) {
             if (novoOdometro < antOdometro) erroValidacao = `Odômetro menor que o anterior (${antOdometro} Km).`;
-            else if ((novoOdometro - antOdometro) > 2000) erroValidacao = `Salto de Odômetro excessivo.`;
+            else if ((novoOdometro - antOdometro) > 1000) erroValidacao = `Salto de Odômetro excessivo.`;
         }
         if (novoHorimetro > 0) {
             if (novoHorimetro < antHorimetro) erroValidacao = `Horímetro menor que o anterior (${antHorimetro} h).`;
-            else if ((novoHorimetro - antHorimetro) > 100) erroValidacao = `Salto de Horímetro excessivo.`;
+            else if ((novoHorimetro - antHorimetro) > 50) erroValidacao = `Salto de Horímetro excessivo.`;
         }
 
         if (erroValidacao) {

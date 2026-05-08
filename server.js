@@ -1,19 +1,34 @@
-// server.js (Backend)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const fs = require('fs'); // <--- Adicionado para manipulação de pastas
+const fs = require('fs');
 const db = require('./database');
-const http = require('http'); // Importar módulo HTTP nativo
-const { Server } = require("socket.io"); // Importar Socket.io
-
-// ====================================================================
-// CONFIGURAÇÃO DO MULTER (UPLOAD DE ARQUIVOS DIRETO NO SERVER.JS)
-// Isso previne erros 404 por falha de leitura de arquivos externos de rota
-// ====================================================================
+const http = require('http'); 
+const { Server } = require("socket.io"); 
 const multer = require('multer');
 
+// --- CORREÇÃO DE SEGURANÇA: CORS RESTRITO ---
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',') 
+    : ['http://localhost:3000', 'http://localhost:3001']; // Configuração local
+
+const corsOptions = {
+    origin: function (origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error('Acesso bloqueado pelo CORS. Origem não permitida.'));
+        }
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true
+};
+
+const app = express();
+app.use(cors(corsOptions)); 
+
+// --- CORREÇÃO DE SEGURANÇA: FILE FILTER GLOBAL ---
 const uploadDir = path.join(__dirname, 'public/uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
@@ -29,8 +44,21 @@ const storage = multer.diskStorage({
         cb(null, uniqueSuffix + '-' + cleanOriginalName);
     }
 });
-const upload = multer({ storage: storage });
 
+const fileFilterGlobal = (req, file, cb) => {
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+        cb(null, true);
+    } else {
+        cb(new Error('Tipo de arquivo não permitido! Apenas imagens (JPEG/PNG/WEBP) e PDFs são aceitos.'), false);
+    }
+};
+
+const upload = multer({ 
+    storage: storage,
+    fileFilter: fileFilterGlobal,
+    limits: { fileSize: 10 * 1024 * 1024 } 
+});
 
 // ====================================================================
 // IMPORTAÇÃO DE MIDDLEWARES E ROTAS EXISTENTES
@@ -73,8 +101,9 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: "*", 
-        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+        origin: allowedOrigins, 
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+        credentials: true
     }
 });
 global.io = io;

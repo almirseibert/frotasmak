@@ -6,9 +6,6 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// ====================================================================
-// CONFIGURAÇÃO MULTER (UPLOAD DE PDF DA MULTA)
-// ====================================================================
 const uploadDir = path.join(__dirname, '../public/uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
@@ -24,7 +21,23 @@ const storage = multer.diskStorage({
         cb(null, 'termo-multa-' + uniqueSuffix + '-' + cleanOriginalName);
     }
 });
-const upload = multer({ storage: storage });
+
+// --- CORREÇÃO DE SEGURANÇA: FILE FILTER MULTAS ---
+const fileFilterFines = (req, file, cb) => {
+    const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+        cb(null, true);
+    } else {
+        cb(new Error('Arquivo inválido. Apenas PDF ou Imagens (JPEG/PNG/WEBP) são aceitos.'), false);
+    }
+};
+
+const upload = multer({ 
+    storage: storage, 
+    fileFilter: fileFilterFines,
+    limits: { fileSize: 5 * 1024 * 1024 } 
+});
+
 
 const uploadFinePdf = [
     upload.single('file'),

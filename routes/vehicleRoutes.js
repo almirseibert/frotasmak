@@ -7,45 +7,40 @@ const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 
-// --- Configuração do Multer para Upload de Imagens ---
-
 const uploadDir = 'public/uploads';
-
-// --- CORREÇÃO DE PATH ---
-// Usar process.cwd() garante que o caminho é absoluto a partir da raiz do projeto,
-// o que é mais seguro em ambientes de contêiner (Easypanel/Docker).
 const absoluteUploadDir = path.resolve(process.cwd(), uploadDir);
-// --- FIM DA CORREÇÃO ---
 
 if (!fs.existsSync(absoluteUploadDir)) {
     fs.mkdirSync(absoluteUploadDir, { recursive: true });
     console.log(`[Multer] Diretório de upload criado em: ${absoluteUploadDir}`);
 }
 
-// Define onde salvar os arquivos e como nomeá-los
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        // Agora o diretório garantidamente existe
-        cb(null, absoluteUploadDir); // Usa o caminho absoluto
+        cb(null, absoluteUploadDir); 
     },
     filename: function (req, file, cb) {
-        // Cria um nome de arquivo único (ex: vehicle-1731592800000.jpg)
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const extension = file.mimetype.split('/')[1] || 'jpg';
-        cb(null, `vehicle-${uniqueSuffix}.${extension}`);
+        const ext = path.extname(file.originalname);
+        cb(null, 'vehicle-' + uniqueSuffix + ext);
     }
 });
 
-// Filtro para aceitar apenas imagens
+// --- CORREÇÃO DE SEGURANÇA: FILE FILTER RIGOROSO PARA IMAGENS ---
 const fileFilter = (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    if (allowedMimeTypes.includes(file.mimetype)) {
         cb(null, true);
     } else {
-        cb(new Error('Tipo de arquivo não suportado! Apenas imagens são permitidas.'), false);
+        cb(new Error('Tipo de arquivo não suportado! Apenas imagens (JPEG/PNG/WEBP) são permitidas.'), false);
     }
 };
 
-const upload = multer({ storage: storage, fileFilter: fileFilter, limits: { fileSize: 5 * 1024 * 1024 } }); // Limite de 5MB
+const upload = multer({ 
+    storage: storage, 
+    fileFilter: fileFilter, 
+    limits: { fileSize: 5 * 1024 * 1024 } 
+});
 
 // --- Rotas ---
 router.use(authMiddleware);
