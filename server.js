@@ -1,19 +1,48 @@
-// server.js (Backend)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const fs = require('fs'); // <--- Adicionado para manipulação de pastas
+const fs = require('fs');
 const db = require('./database');
-const http = require('http'); // Importar módulo HTTP nativo
-const { Server } = require("socket.io"); // Importar Socket.io
-
-// ====================================================================
-// CONFIGURAÇÃO DO MULTER (UPLOAD DE ARQUIVOS DIRETO NO SERVER.JS)
-// Isso previne erros 404 por falha de leitura de arquivos externos de rota
-// ====================================================================
+const http = require('http'); 
+const { Server } = require("socket.io"); 
 const multer = require('multer');
 
+// --- CONFIGURAÇÃO DE CORS SEGURO ---
+// Defina as origens permitidas no ficheiro .env. Ex: ALLOWED_ORIGINS=https://frotamak.com,http://localhost:3000
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim().replace(/\/$/, '')) 
+    : [
+        'http://localhost:3000', 
+        'http://localhost:3001', 
+        'https://frotamak.com', 
+        'https://www.frotamak.com',
+        'https://frotasmak-frotas-backend.oehpg2.easypanel.host'
+      ]; // Domínios de produção adicionados como segurança
+
+const corsOptions = {
+    origin: function (origin, callback) {
+        // Limpa espaços extras e barras no final da string de origem, se houver
+        const cleanOrigin = origin ? origin.trim().replace(/\/$/, '') : null;
+
+        if (!cleanOrigin || allowedOrigins.includes(cleanOrigin)) {
+            callback(null, true);
+        } else {
+            console.error(`[CORS AVISO] Acesso bloqueado. Origem não permitida: '${origin}'`);
+            callback(new Error('Acesso bloqueado pelo CORS. Origem não permitida.'));
+        }
+    },
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    credentials: true
+};
+
+// INICIALIZAÇÃO DO APP E MIDDLEWARES GLOBAIS (Declarado apenas uma vez)
+const app = express();
+app.use(cors(corsOptions)); 
+app.use(express.json()); 
+
+// --- CORREÇÃO DE SEGURANÇA: FILE FILTER GLOBAL ---
 const uploadDir = path.join(__dirname, 'public/uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
@@ -29,8 +58,21 @@ const storage = multer.diskStorage({
         cb(null, uniqueSuffix + '-' + cleanOriginalName);
     }
 });
-const upload = multer({ storage: storage });
 
+const fileFilterGlobal = (req, file, cb) => {
+    const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (allowedMimeTypes.includes(file.mimetype)) {
+        cb(null, true);
+    } else {
+        cb(new Error('Tipo de arquivo não permitido! Apenas imagens (JPEG/PNG/WEBP) e PDFs são aceitos.'), false);
+    }
+};
+
+const upload = multer({ 
+    storage: storage,
+    fileFilter: fileFilterGlobal,
+    limits: { fileSize: 10 * 1024 * 1024 } 
+});
 
 // ====================================================================
 // IMPORTAÇÃO DE MIDDLEWARES E ROTAS EXISTENTES
@@ -66,21 +108,17 @@ const billingRoutes = require('./routes/billingRoutes');
 const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
 
-const app = express();
 const port = process.env.PORT || 3001;
-
 const server = http.createServer(app);
 
 const io = new Server(server, {
     cors: {
-        origin: "*", 
-        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"]
+        origin: allowedOrigins, 
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+        credentials: true
     }
 });
 global.io = io;
-
-app.use(cors());
-app.use(express.json()); 
 
 // Configuração para permitir acesso público aos uploads de imagens e PDFs
 app.use('/uploads', express.static(uploadDir));
