@@ -8,11 +8,17 @@ const http = require('http');
 const { Server } = require("socket.io"); 
 const multer = require('multer');
 
-// --- CORREÇÃO DE SEGURANÇA: CORS RESTRITO ---
+// --- CONFIGURAÇÃO DE CORS SEGURO ---
+// Defina as origens permitidas no ficheiro .env. Ex: ALLOWED_ORIGINS=https://frotamak.com,http://localhost:3000
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
     ? process.env.ALLOWED_ORIGINS.split(',') 
-    : ['http://localhost:3000', 'http://localhost:3001']; // Configuração local
-
+    : [
+        'http://localhost:3000', 
+        'http://localhost:3001', 
+        'https://frotamak.com', 
+        'https://www.frotamak.com'
+      ]; // Domínios de produção adicionados como segurança
+      
 const corsOptions = {
     origin: function (origin, callback) {
         if (!origin || allowedOrigins.includes(origin)) {
