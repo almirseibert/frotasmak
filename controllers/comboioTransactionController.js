@@ -279,6 +279,7 @@ const createEntradaTransaction = async (req, res) => {
 
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
+            authNumber: newAuthNumber,
             type: 'entrada',
             date: new Date(date),
             comboioVehicleId: sanitize(comboioVehicleId),
@@ -393,6 +394,7 @@ const createSaidaTransaction = async (req, res) => {
 
         const transactionData = {
             id: req.body.id || crypto.randomUUID(),
+            authNumber: newAuthNumber,
             type: 'saida',
             date: new Date(date),
             comboioVehicleId: sanitize(comboioVehicleId),

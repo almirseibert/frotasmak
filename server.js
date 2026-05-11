@@ -153,6 +153,7 @@ const solicitacaoRoutes = require('./routes/solicitacaoRoutes');
 const billingRoutes = require('./routes/billingRoutes');
 const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
+const inventoryRoutes = require('./routes/inventoryRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -262,6 +263,7 @@ apiRouter.use('/solicitacoes', solicitacaoRoutes);
 apiRouter.use('/maintenances', maintenanceRoutes);
 apiRouter.use('/washings', washingRoutes);
 apiRouter.use('/agenda', agendaRoutes);
+apiRouter.use('/inventory', inventoryRoutes);
 
 // Registrar todas as rotas sob /api
 app.use('/api', apiRouter);
