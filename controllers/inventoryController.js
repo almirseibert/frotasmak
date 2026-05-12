@@ -48,6 +48,7 @@ const createCategory = async (req, res) => {
             `INSERT INTO inventory_categories (id, name, description, icon, color) VALUES (?, ?, ?, ?, ?)`,
             [id, name, description, icon, color]
         );
+        if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.status(201).json({ id, name });
     } catch (error) {
         if (error.code === 'ER_DUP_ENTRY') {
@@ -66,6 +67,7 @@ const updateCategory = async (req, res) => {
             `UPDATE inventory_categories SET name=?, description=?, icon=?, color=?, updatedAt=NOW() WHERE id=?`,
             [name, description, icon, color, id]
         );
+        if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.json({ message: 'Categoria atualizada com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar categoria:', error);
@@ -85,6 +87,7 @@ const deleteCategory = async (req, res) => {
             return res.status(400).json({ error: 'Não é possível deletar categoria com itens ativos' });
         }
         await db.execute(`UPDATE inventory_categories SET isActive = FALSE WHERE id = ?`, [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.json({ message: 'Categoria desativada com sucesso' });
     } catch (error) {
         console.error('Erro ao deletar categoria:', error);
@@ -198,6 +201,7 @@ const createItem = async (req, res) => {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [id, sku, eaN, internalCode, name, description, categoryId, quantity, minQuantity, maxQuantity, unitPrice, unit, userEmail]);
 
+        if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.status(201).json({ id, sku, name });
     } catch (error) {
         console.error('Erro ao criar item:', error);
@@ -218,6 +222,7 @@ const updateItem = async (req, res) => {
             WHERE id=?
         `, [name, description, categoryId, minQuantity, maxQuantity, unitPrice, unit, userEmail, id]);
 
+        if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.json({ message: 'Item atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar item:', error);
@@ -229,6 +234,7 @@ const deactivateItem = async (req, res) => {
     const { id } = req.params;
     try {
         await db.execute(`UPDATE inventory_items SET isActive = FALSE WHERE id = ?`, [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.json({ message: 'Item desativado com sucesso' });
     } catch (error) {
         console.error('Erro ao desativar item:', error);
@@ -274,18 +280,54 @@ const removeItemReference = async (req, res) => {
 const recordMovement = async (req, res) => {
     const { itemId, type, quantity, reason, reference, unitPrice } = req.body;
     const userEmail = req.body.userEmail || 'sistema';
+    const conn = await db.getConnection();
 
     try {
-        const id = crypto.randomUUID();
-        await db.execute(`
-            INSERT INTO inventory_movements (id, itemId, type, quantity, reason, reference, unitPrice, createdBy)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `, [id, itemId, type, quantity, reason, reference, unitPrice, userEmail]);
+        await conn.beginTransaction();
 
-        res.status(201).json({ id, message: 'Movimento registrado com sucesso' });
+        // Verificar item e travar a linha para atualização atômica
+        const [[item]] = await conn.execute(
+            `SELECT id, quantity FROM inventory_items WHERE id = ? AND isActive = TRUE FOR UPDATE`,
+            [itemId]
+        );
+        if (!item) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Item não encontrado' });
+        }
+
+        const delta = parseInt(quantity);
+        const newQuantity = Math.max(0, item.quantity + delta);
+
+        // Registrar movimento
+        const id = crypto.randomUUID();
+        await conn.execute(
+            `INSERT INTO inventory_movements (id, itemId, type, quantity, reason, reference, unitPrice, createdBy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, itemId, type, delta, reason, reference, unitPrice || null, userEmail]
+        );
+
+        // Atualizar quantidade e último preço de custo (se entrada com preço)
+        if (unitPrice && (type === 'entrada' || type === 'devolucao')) {
+            await conn.execute(
+                `UPDATE inventory_items SET quantity = ?, lastCostPrice = ?, updatedBy = ?, updatedAt = NOW() WHERE id = ?`,
+                [newQuantity, parseFloat(unitPrice), userEmail, itemId]
+            );
+        } else {
+            await conn.execute(
+                `UPDATE inventory_items SET quantity = ?, updatedBy = ?, updatedAt = NOW() WHERE id = ?`,
+                [newQuantity, userEmail, itemId]
+            );
+        }
+
+        await conn.commit();
+        if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
+        res.status(201).json({ id, message: 'Movimento registrado com sucesso', newQuantity });
     } catch (error) {
+        await conn.rollback();
         console.error('Erro ao registrar movimento:', error);
         res.status(500).json({ error: 'Erro ao registrar movimento' });
+    } finally {
+        conn.release();
     }
 };
 
@@ -426,12 +468,12 @@ const acknowledgeAlert = async (req, res) => {
     const userEmail = req.body.userEmail || 'sistema';
 
     try {
-        await db.execute(`
-            UPDATE inventory_alerts
-            SET acknowledgedAt = NOW(), acknowledgedBy = ?
-            WHERE id = ?
-        `, [userEmail, id]);
-
+        await db.execute(
+            `UPDATE inventory_alerts
+             SET isActive = FALSE, acknowledgedAt = NOW(), acknowledgedBy = ?
+             WHERE id = ?`,
+            [userEmail, id]
+        );
         res.json({ message: 'Alerta reconhecido com sucesso' });
     } catch (error) {
         console.error('Erro ao reconhecer alerta:', error);
