@@ -381,13 +381,14 @@ const getInventorySummary = async (req, res) => {
             `SELECT COUNT(*) as lowStock FROM inventory_items 
              WHERE quantity > 0 AND quantity <= minQuantity AND isActive = TRUE`
         );
-
+        
+        // Conversões forçadas de Strings advindas do MySQL (SUM e COUNT)
         res.json({
-            totalItems,
-            totalValue: totalValue || 0,
-            outOfStock,
-            lowStock,
-            criticalItems: outOfStock + lowStock
+            totalItems: Number(totalItems) || 0,
+            totalValue: Number(totalValue) || 0,
+            outOfStock: Number(outOfStock) || 0,
+            lowStock: Number(lowStock) || 0,
+            criticalItems: (Number(outOfStock) || 0) + (Number(lowStock) || 0)
         });
     } catch (error) {
         console.error('Erro ao buscar resumo:', error);
@@ -428,7 +429,16 @@ const getValueByCategory = async (req, res) => {
             GROUP BY c.id, c.name, c.color
             ORDER BY totalValue DESC
         `);
-        res.json(rows);
+        
+        // Conversão de SUM e COUNT para os dados mapeados
+        const formattedRows = rows.map(r => ({
+            ...r,
+            totalItems: Number(r.totalItems) || 0,
+            totalQuantity: Number(r.totalQuantity) || 0,
+            totalValue: Number(r.totalValue) || 0
+        }));
+        
+        res.json(formattedRows);
     } catch (error) {
         console.error('Erro ao buscar valor por categoria:', error);
         res.status(500).json({ error: 'Erro ao buscar valor por categoria' });
