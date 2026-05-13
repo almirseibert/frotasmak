@@ -46,7 +46,7 @@ const createCategory = async (req, res) => {
         const id = crypto.randomUUID();
         await db.execute(
             `INSERT INTO inventory_categories (id, name, description, icon, color) VALUES (?, ?, ?, ?, ?)`,
-            [id, name, description, icon, color]
+            [id, name, description || null, icon || null, color || 'blue-500']
         );
         if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.status(201).json({ id, name });
@@ -65,7 +65,7 @@ const updateCategory = async (req, res) => {
     try {
         await db.execute(
             `UPDATE inventory_categories SET name=?, description=?, icon=?, color=?, updatedAt=NOW() WHERE id=?`,
-            [name, description, icon, color, id]
+            [name, description || null, icon || null, color || 'blue-500', id]
         );
         if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.json({ message: 'Categoria atualizada com sucesso' });
@@ -199,7 +199,7 @@ const createItem = async (req, res) => {
                 id, sku, eaN, internalCode, name, description, categoryId,
                 quantity, minQuantity, maxQuantity, unitPrice, unit, createdBy
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [id, sku, eaN, internalCode, name, description, categoryId, quantity, minQuantity, maxQuantity, unitPrice, unit, userEmail]);
+        `, [id, sku, eaN || null, internalCode || null, name, description || null, categoryId, quantity, minQuantity, maxQuantity ?? null, unitPrice, unit, userEmail]);
 
         if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.status(201).json({ id, sku, name });
@@ -220,7 +220,7 @@ const updateItem = async (req, res) => {
             SET name=?, description=?, categoryId=?, minQuantity=?, maxQuantity=?,
                 unitPrice=?, unit=?, updatedBy=?, updatedAt=NOW()
             WHERE id=?
-        `, [name, description, categoryId, minQuantity, maxQuantity, unitPrice, unit, userEmail, id]);
+        `, [name, description || null, categoryId, minQuantity, maxQuantity ?? null, unitPrice, unit, userEmail, id]);
 
         if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.json({ message: 'Item atualizado com sucesso' });
@@ -253,7 +253,7 @@ const addItemReference = async (req, res) => {
         await db.execute(`
             INSERT INTO inventory_item_references (id, itemId, referenceItemId, type, notes, priority)
             VALUES (?, ?, ?, ?, ?, ?)
-        `, [id, itemId, referenceItemId, type, notes, priority]);
+        `, [id, itemId, referenceItemId, type, notes || null, priority]);
 
         res.status(201).json({ id, message: 'Referência adicionada com sucesso' });
     } catch (error) {
@@ -303,7 +303,7 @@ const recordMovement = async (req, res) => {
         await conn.execute(
             `INSERT INTO inventory_movements (id, itemId, type, quantity, reason, reference, unitPrice, createdBy)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            [id, itemId, type, delta, reason, reference, unitPrice || null, userEmail]
+            [id, itemId, type, delta, reason || null, reference || null, unitPrice || null, userEmail]
         );
 
         // Atualizar quantidade e último preço de custo (se entrada com preço)
