@@ -154,6 +154,7 @@ const billingRoutes = require('./routes/billingRoutes');
 const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
 const inventoryRoutes = require('./routes/inventoryRoutes');
+const whatsappRoutes = require('./routes/whatsappRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -264,6 +265,7 @@ apiRouter.use('/maintenances', maintenanceRoutes);
 apiRouter.use('/washings', washingRoutes);
 apiRouter.use('/agenda', agendaRoutes);
 apiRouter.use('/inventory', inventoryRoutes);
+apiRouter.use('/whatsapp', whatsappRoutes);
 
 // Registrar todas as rotas sob /api
 app.use('/api', apiRouter);
@@ -338,6 +340,7 @@ try {
 } catch (error) {
   console.error('⚠️ Erro ao iniciar serviço CRON:', error.message);
 }
+
 
 // ====================================================================
 // INICIAR O SERVIDOR
