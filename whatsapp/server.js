@@ -1,5 +1,7 @@
 require('dotenv').config();
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 
 const app = express();
@@ -25,9 +27,15 @@ const PUPPETEER_ARGS = [
     '--no-zygote',
 ];
 
+// ─── ROTA PÚBLICA (Para o navegador não mostrar erro 401) ─────────────────────
+app.get('/', (req, res) => {
+    res.send('🟢 Microsserviço WhatsApp FrotasMAK operando de forma segura. (Acesso à API requer API Key)');
+});
+
+app.get('/health', (req, res) => res.send('OK'));
+
 // ─── MIDDLEWARE DE AUTENTICAÇÃO API ───────────────────────────────────────────
 app.use((req, res, next) => {
-    if (req.path === '/health') return next();
     const key = req.headers['apikey'] || req.headers['x-api-key'];
     if (!API_KEY || key !== API_KEY) {
         return res.status(401).json({ error: 'API Key inválida ou ausente.' });
@@ -37,7 +45,6 @@ app.use((req, res, next) => {
 
 // ─── INICIALIZAÇÃO E CONTROLE DO CLIENTE WHATSAPP ─────────────────────────────
 function initClient() {
-    // Se já existe um cliente rodando, tenta destruir antes de recriar
     if (client) {
         console.log('🧹 Limpando instância anterior do cliente...');
         try { client.destroy(); } catch (e) { console.log('Aviso ao destruir:', e.message); }
@@ -101,11 +108,9 @@ function agendarReconexao() {
     }, 10000); // Tenta novamente em 10 segundos
 }
 
-// ─── ROTAS DA API ─────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => res.send('OK'));
+// ─── ROTAS DA API PROTEGIDAS ──────────────────────────────────────────────────
 
 app.get('/status', (req, res) => {
-    // Retorna exatamente o formato que o WhatsAppStatusPanel.js espera
     res.json({ status: clientStatus, qr: qrRaw });
 });
 
@@ -114,21 +119,20 @@ app.post('/send', async (req, res) => {
         return res.status(503).json({ error: `WhatsApp não está pronto. Status atual: ${clientStatus}` });
     }
 
-    // Adaptado para suportar envios em texto e mídia (sua lógica original de PDF)
     const { number, message, documentUrl } = req.body;
     
     try {
         const chatId = `${number}@c.us`;
         
-        // 1. Envia a mensagem de texto primeiro
+        // 1. Envia a mensagem de texto
         const resp = await client.sendMessage(chatId, message);
         const messageId = resp?.id?._serialized || null;
 
-        // 2. Se houver um documento, converte via MessageMedia e envia logo em seguida
+        // 2. Envia documento se houver
         if (documentUrl) {
             console.log(`📎 Baixando e anexando documento de: ${documentUrl}`);
             const media = await MessageMedia.fromUrl(
-                documentUrl.replace('http://', 'https://'), // Garante HTTPS na URL do anexo
+                documentUrl.replace('http://', 'https://'), 
                 { unsafeMime: true }
             );
             media.filename = 'Termo_Notificacao_FrotasMAK.pdf';
@@ -136,7 +140,7 @@ app.post('/send', async (req, res) => {
         }
 
         console.log(`✅ Mensagem ${documentUrl ? '(com anexo)' : ''} enviada → ${number}`);
-        res.json({ success: true, messageId }); // "success: true" mantido para padrão com o backend Principal
+        res.json({ success: true, messageId });
 
     } catch (err) {
         console.error('❌ Erro ao enviar mensagem:', err.message);
@@ -144,11 +148,30 @@ app.post('/send', async (req, res) => {
     }
 });
 
-app.post('/restart', (req, res) => {
-    console.log('🔄 Reinício manual solicitado via Painel Admin.');
+// Rota de Restart turbinada para limpar sessões travadas
+app.post('/restart', async (req, res) => {
+    console.log('🔄 Reinício manual solicitado. Executando limpeza severa...');
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    setImmediate(initClient);
-    res.json({ success: true, message: 'Reiniciando o Puppeteer...' });
+    
+    // Tenta destruir a instância atual do Puppeteer
+    if (client) {
+        try { await client.destroy(); } catch (e) { console.log('Aviso ao destruir Chromium:', e.message); }
+    }
+
+    // A MÁGICA AQUI: Deleta fisicamente a pasta de sessão corrompida
+    const authPath = path.join(__dirname, '.wwebjs_auth');
+    if (fs.existsSync(authPath)) {
+        console.log('🗑️ Removendo pasta de autenticação corrompida para forçar novo QR Code...');
+        try {
+            fs.rmSync(authPath, { recursive: true, force: true });
+        } catch (err) {
+            console.error('Erro ao deletar pasta de auth:', err);
+        }
+    }
+
+    // Aguarda 2 segundos e inicia uma sessão 100% limpa
+    setTimeout(initClient, 2000);
+    res.json({ success: true, message: 'Sessão destruída e reiniciando o Puppeteer...' });
 });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
