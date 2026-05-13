@@ -2,18 +2,15 @@ require('dotenv').config();
 
 const express = require('express');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode');
 const path = require('path');
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3002;
+const PORT    = process.env.PORT            || 3002;
 const API_KEY = process.env.WHATSAPP_API_KEY;
 
-// =====================================================================
-// Autenticação por API Key
-// =====================================================================
+// ─── Auth ────────────────────────────────────────────────────────────────────
 app.use((req, res, next) => {
     if (req.path === '/health') return next();
     const key = req.headers['apikey'] || req.headers['x-api-key'];
@@ -23,18 +20,28 @@ app.use((req, res, next) => {
     next();
 });
 
-// =====================================================================
-// Estado do cliente WhatsApp
-// =====================================================================
-let clientStatus = 'DESCONECTADO'; // DESCONECTADO | QR_PRONTO | AUTENTICADO | PRONTO
-let qrCodeBase64 = null;
-let client = null;
+// ─── Estado ──────────────────────────────────────────────────────────────────
+let clientStatus = 'DESCONECTADO';
+let qrRaw        = null;   // string bruta emitida pelo whatsapp-web.js
+let client       = null;
 let reconnectTimer = null;
 
+// ─── Puppeteer args testados para containers Linux ───────────────────────────
+const PUPPETEER_ARGS = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas',
+    '--disable-gpu',
+    '--no-first-run',
+    '--no-zygote',
+];
+
+// ─── Cliente WhatsApp ─────────────────────────────────────────────────────────
 function agendarReconexao(ms = 30000) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
-        console.log('🔄 Tentando reconectar WhatsApp...');
+        console.log('🔄 Reconectando WhatsApp...');
         initClient();
     }, ms);
 }
@@ -45,49 +52,44 @@ function initClient() {
         client = null;
     }
 
-    const authPath = path.join(__dirname, '.wwebjs_auth');
+    qrRaw        = null;
+    clientStatus = 'DESCONECTADO';
+
+    const chromiumPath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+    console.log(`🔧 Chromium: ${chromiumPath || 'padrão do puppeteer'}`);
 
     client = new Client({
-        authStrategy: new LocalAuth({ dataPath: authPath }),
+        authStrategy: new LocalAuth({ dataPath: path.join(__dirname, '.wwebjs_auth') }),
         puppeteer: {
             headless: true,
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--single-process'
-            ]
-        }
+            executablePath: chromiumPath,
+            args: PUPPETEER_ARGS,
+        },
     });
 
-    client.on('qr', async (qr) => {
-        console.log('📱 QR Code recebido — gerando imagem SVG...');
+    // ── Eventos ────────────────────────────────────────────────────────────
+    client.on('qr', (qr) => {
+        // qr é a string bruta — o frontend a renderiza via qrcode.react
+        qrRaw = qr;
         clientStatus = 'QR_PRONTO';
-        try {
-            // toString com type:'svg' é puro JS — não precisa de node-canvas
-            const svg = await qrcode.toString(qr, { type: 'svg', width: 256, margin: 2 });
-            qrCodeBase64 = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
-            console.log('✅ QR Code SVG gerado com sucesso.');
-        } catch (err) {
-            console.error('❌ Erro ao gerar QR Code SVG:', err.message);
-            // Fallback: envia a string crua para o frontend renderizar
-            qrCodeBase64 = qr;
-        }
+        console.log(`📱 QR Code disponível (${qr.length} chars). Acesse /status para obter.`);
+    });
+
+    client.on('loading_screen', (pct) => {
+        console.log(`⏳ WhatsApp carregando: ${pct}%`);
     });
 
     client.on('authenticated', () => {
-        console.log('🔐 WhatsApp autenticado com sucesso.');
+        console.log('🔐 Autenticado com sucesso.');
         clientStatus = 'AUTENTICADO';
-        qrCodeBase64 = null;
+        qrRaw = null;
     });
 
-    client.on('ready', () => {
-        console.log('✅ WhatsApp pronto para enviar mensagens!');
+    client.on('ready', async () => {
         clientStatus = 'PRONTO';
-        qrCodeBase64 = null;
+        qrRaw = null;
+        const ver = await client.getWWebVersion().catch(() => '?');
+        console.log(`✅ WhatsApp pronto! Versão WWeb: ${ver}`);
     });
 
     client.on('auth_failure', (msg) => {
@@ -97,89 +99,77 @@ function initClient() {
     });
 
     client.on('disconnected', (reason) => {
-        console.log('❌ WhatsApp desconectado:', reason);
+        console.log('❌ Desconectado:', reason);
         clientStatus = 'DESCONECTADO';
         client = null;
         agendarReconexao();
     });
 
     client.initialize().catch((err) => {
-        console.error('❌ Erro ao inicializar WhatsApp:', err.message);
+        console.error('❌ Erro ao inicializar Puppeteer:', err.message);
         clientStatus = 'DESCONECTADO';
         agendarReconexao(60000);
     });
 }
 
-// =====================================================================
-// Endpoints
-// =====================================================================
-
-// Health check (sem autenticação — para Easypanel monitorar)
+// ─── Rotas ────────────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => {
     res.json({ ok: true, status: clientStatus });
 });
 
-// Status atual + QR Code (se disponível)
+// Retorna status + string bruta do QR (o frontend renderiza)
 app.get('/status', (req, res) => {
-    res.json({ status: clientStatus, qr: qrCodeBase64 });
+    res.json({ status: clientStatus, qr: qrRaw });
 });
 
-// Enviar mensagem de texto (+ documento opcional)
+// Enviar mensagem
 app.post('/send', async (req, res) => {
     const { number, message, documentUrl } = req.body;
 
-    if (!number || !message) {
+    if (!number || !message)
         return res.status(400).json({ error: 'Campos obrigatórios: number, message' });
-    }
 
-    if (clientStatus !== 'PRONTO') {
+    if (clientStatus !== 'PRONTO')
         return res.status(503).json({ error: `WhatsApp não está pronto. Status: ${clientStatus}` });
-    }
-
-    const chatId = `${number}@c.us`;
 
     try {
-        const response = await client.sendMessage(chatId, message);
-        const messageId = response?.id?._serialized || null;
+        const resp = await client.sendMessage(`${number}@c.us`, message);
+        const messageId = resp?.id?._serialized || null;
 
         if (documentUrl) {
-            const secureUrl = documentUrl.replace('http://', 'https://');
-            const media = await MessageMedia.fromUrl(secureUrl, { unsafeMime: true });
+            const media = await MessageMedia.fromUrl(
+                documentUrl.replace('http://', 'https://'),
+                { unsafeMime: true }
+            );
             media.filename = 'Termo_Notificacao_FrotasMAK.pdf';
-            await client.sendMessage(chatId, media, { sendMediaAsDocument: true });
-            console.log(`📎 Documento enviado para ${number}`);
+            await client.sendMessage(`${number}@c.us`, media, { sendMediaAsDocument: true });
         }
 
-        console.log(`✅ Mensagem enviada para ${number}`);
+        console.log(`✅ Mensagem enviada → ${number}`);
         res.json({ ok: true, messageId });
 
-    } catch (error) {
-        console.error('❌ Erro ao enviar mensagem:', error.message);
-        res.status(500).json({ error: error.message });
+    } catch (err) {
+        console.error('❌ Erro ao enviar:', err.message);
+        res.status(500).json({ error: err.message });
     }
 });
 
-// Reiniciar cliente WhatsApp manualmente
+// Reiniciar cliente
 app.post('/restart', (req, res) => {
     console.log('🔄 Reinício solicitado via API.');
     if (reconnectTimer) clearTimeout(reconnectTimer);
-    setImmediate(() => initClient());
-    res.json({ ok: true, message: 'Reinicialização iniciada.' });
+    setImmediate(initClient);
+    res.json({ ok: true });
 });
 
-// =====================================================================
-// Start
-// =====================================================================
+// ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
     console.log('');
-    console.log('╔══════════════════════════════════════════╗');
-    console.log(`║  🟢 FrotaMAK WhatsApp Service             ║`);
-    console.log(`║  📡 Porta: ${PORT}                            ║`);
-    console.log('╚══════════════════════════════════════════╝');
-    console.log('');
+    console.log('╔════════════════════════════════════════╗');
+    console.log(`║  🟢 FrotaMAK WhatsApp Service          ║`);
+    console.log(`║  📡 Porta: ${PORT}                          ║`);
+    console.log('╚════════════════════════════════════════╝');
     initClient();
 });
 
-process.on('unhandledRejection', (reason) => {
-    console.error('🚨 Promise rejeitada:', reason);
-});
+process.on('unhandledRejection', (r) => console.error('🚨 UnhandledRejection:', r));
