@@ -64,12 +64,17 @@ function initClient() {
     });
 
     client.on('qr', async (qr) => {
-        console.log('📱 QR Code recebido — escaneie no WhatsApp para conectar.');
+        console.log('📱 QR Code recebido — gerando imagem SVG...');
         clientStatus = 'QR_PRONTO';
         try {
-            qrCodeBase64 = await qrcode.toDataURL(qr);
-        } catch (_) {
-            qrCodeBase64 = null;
+            // toString com type:'svg' é puro JS — não precisa de node-canvas
+            const svg = await qrcode.toString(qr, { type: 'svg', width: 256, margin: 2 });
+            qrCodeBase64 = `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+            console.log('✅ QR Code SVG gerado com sucesso.');
+        } catch (err) {
+            console.error('❌ Erro ao gerar QR Code SVG:', err.message);
+            // Fallback: envia a string crua para o frontend renderizar
+            qrCodeBase64 = qr;
         }
     });
 
