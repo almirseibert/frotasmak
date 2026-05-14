@@ -12,24 +12,40 @@ const API_KEY = process.env.WHATSAPP_API_KEY;
 
 // ─── ESTADO GLOBAL ────────────────────────────────────────────────────────────
 let clientStatus = 'DESCONECTADO';
-let qrRaw        = null;   // string bruta para o qrcode.react no frontend
+let qrRaw        = null;   
 let client       = null;
 let reconnectTimer = null;
 
-// ─── PUPPETEER ARGS (Otimizados para Linux/Docker) ────────────────────────────
+// ─── PUPPETEER ARGS (Ultra Otimizados para Docker/Linux) ──────────────────────
 const PUPPETEER_ARGS = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
+    '--disable-dev-shm-usage', // Crítico para Docker (evita crash de memória RAM)
     '--disable-accelerated-2d-canvas',
     '--disable-gpu',
     '--no-first-run',
     '--no-zygote',
+    '--single-process', // Ajuda na estabilidade em VPS menores
+    '--disable-extensions'
 ];
 
-// ─── ROTA PÚBLICA (Para o navegador não mostrar erro 401) ─────────────────────
+// ─── FUNÇÃO DE LIMPEZA PROFUNDA ───────────────────────────────────────────────
+function limparPastaSessao() {
+    const authPath = path.join(__dirname, '.wwebjs_auth');
+    if (fs.existsSync(authPath)) {
+        console.log('🧹 [SISTEMA] Deletando pasta de sessão corrompida...');
+        try {
+            fs.rmSync(authPath, { recursive: true, force: true });
+            console.log('✅ [SISTEMA] Pasta de sessão removida com sucesso.');
+        } catch (err) {
+            console.error('❌ [SISTEMA] Erro ao deletar pasta de auth:', err);
+        }
+    }
+}
+
+// ─── ROTA PÚBLICA ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-    res.send('🟢 Microsserviço WhatsApp FrotasMAK operando de forma segura. (Acesso à API requer API Key)');
+    res.send('🟢 Microsserviço WhatsApp FrotasMAK operando de forma segura.');
 });
 
 app.get('/health', (req, res) => res.send('OK'));
@@ -44,68 +60,88 @@ app.use((req, res, next) => {
 });
 
 // ─── INICIALIZAÇÃO E CONTROLE DO CLIENTE WHATSAPP ─────────────────────────────
-function initClient() {
+async function initClient() {
+    // 1. Garante que o cliente anterior foi totalmente destruído (await é crucial)
     if (client) {
-        console.log('🧹 Limpando instância anterior do cliente...');
-        try { client.destroy(); } catch (e) { console.log('Aviso ao destruir:', e.message); }
+        console.log('🔄 [SISTEMA] Destruindo instância anterior do Chromium...');
+        try { 
+            await client.destroy(); 
+        } catch (e) { 
+            console.log('⚠️ [SISTEMA] Aviso ao destruir Chromium:', e.message); 
+        }
     }
 
     clientStatus = 'DESCONECTADO';
     qrRaw = null;
 
+    console.log('⏳ [WHATSAPP] Inicializando nova instância...');
+    
     client = new Client({
         authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
         puppeteer: {
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-            args: PUPPETEER_ARGS
+            args: PUPPETEER_ARGS,
+            timeout: 60000 // Dá mais tempo para o navegador abrir no Docker
         }
     });
 
-    // Eventos principais de Estado (Sincronizados com o Frontend React)
+    // Eventos principais de Estado
     client.on('qr', (qr) => {
-        console.log('💡 QR Code gerado pelo WhatsApp Web!');
+        console.log('💡 [WHATSAPP] Novo QR Code gerado. Aguardando escaneamento...');
         qrRaw = qr;
         clientStatus = 'QR_PRONTO';
     });
 
+    client.on('loading_screen', (percent, message) => {
+        console.log(`⏳ [WHATSAPP] Carregando: ${percent}% - ${message}`);
+        clientStatus = 'AUTENTICANDO';
+    });
+
     client.on('ready', () => {
-        console.log('✅ Cliente WhatsApp pronto e conectado!');
+        console.log('✅ [WHATSAPP] Cliente pronto e conectado!');
         clientStatus = 'PRONTO';
         qrRaw = null;
     });
 
     client.on('authenticated', () => {
-        console.log('🔐 Autenticado com sucesso!');
-        clientStatus = 'AUTENTICADO';
+        console.log('🔐 [WHATSAPP] Autenticado com sucesso! Baixando contatos e mensagens...');
+        clientStatus = 'AUTENTICANDO'; // Mantém como autenticando até o 'ready' disparar
         qrRaw = null;
     });
 
     client.on('auth_failure', (msg) => {
-        console.error('❌ Falha na autenticação', msg);
-        clientStatus = 'FALHA_AUTH';
+        console.error('❌ [WHATSAPP] Falha na autenticação:', msg);
+        clientStatus = 'DESCONECTADO';
         qrRaw = null;
+        limparPastaSessao(); // Remove a sessão estragada para forçar novo QR
+        agendarReconexao(5000);
     });
 
     client.on('disconnected', (reason) => {
-        console.log('❌ WhatsApp desconectado!', reason);
+        console.log('❌ [WHATSAPP] WhatsApp desconectado pelo celular ou queda de rede!', reason);
         clientStatus = 'DESCONECTADO';
         qrRaw = null;
-        agendarReconexao();
+        if (reason === 'NAVIGATION' || reason === 'CONFLICT') {
+             limparPastaSessao();
+        }
+        agendarReconexao(5000);
     });
 
-    console.log('⏳ Inicializando o Puppeteer/Chromium...');
-    client.initialize().catch(err => {
-        console.error('🚨 Erro crítico ao iniciar o Puppeteer:', err);
-        agendarReconexao();
-    });
+    try {
+        await client.initialize();
+    } catch (err) {
+        console.error('🚨 [CRÍTICO] Erro fatal ao iniciar o Puppeteer:', err);
+        clientStatus = 'DESCONECTADO';
+        agendarReconexao(10000);
+    }
 }
 
-function agendarReconexao() {
+function agendarReconexao(tempo = 10000) {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectTimer = setTimeout(() => {
-        console.log('🔄 Tentando reconectar automaticamente...');
+        console.log('🔄 [SISTEMA] Tentando reconectar automaticamente...');
         initClient();
-    }, 10000); // Tenta novamente em 10 segundos
+    }, tempo);
 }
 
 // ─── ROTAS DA API PROTEGIDAS ──────────────────────────────────────────────────
@@ -124,22 +160,20 @@ app.post('/send', async (req, res) => {
     try {
         const chatId = `${number}@c.us`;
         
-        // 1. Envia a mensagem de texto
         const resp = await client.sendMessage(chatId, message);
         const messageId = resp?.id?._serialized || null;
 
-        // 2. Envia documento se houver
         if (documentUrl) {
-            console.log(`📎 Baixando e anexando documento de: ${documentUrl}`);
+            console.log(`📎 Baixando anexo de: ${documentUrl}`);
             const media = await MessageMedia.fromUrl(
                 documentUrl.replace('http://', 'https://'), 
                 { unsafeMime: true }
             );
-            media.filename = 'Termo_Notificacao_FrotasMAK.pdf';
+            media.filename = 'Documento_FrotasMAK.pdf';
             await client.sendMessage(chatId, media, { sendMediaAsDocument: true });
         }
 
-        console.log(`✅ Mensagem ${documentUrl ? '(com anexo)' : ''} enviada → ${number}`);
+        console.log(`✅ Mensagem enviada para -> ${number}`);
         res.json({ success: true, messageId });
 
     } catch (err) {
@@ -148,30 +182,16 @@ app.post('/send', async (req, res) => {
     }
 });
 
-// Rota de Restart turbinada para limpar sessões travadas
 app.post('/restart', async (req, res) => {
-    console.log('🔄 Reinício manual solicitado. Executando limpeza severa...');
+    console.log('🔄 Reinício manual solicitado.');
     if (reconnectTimer) clearTimeout(reconnectTimer);
     
-    // Tenta destruir a instância atual do Puppeteer
-    if (client) {
-        try { await client.destroy(); } catch (e) { console.log('Aviso ao destruir Chromium:', e.message); }
-    }
-
-    // A MÁGICA AQUI: Deleta fisicamente a pasta de sessão corrompida
-    const authPath = path.join(__dirname, '.wwebjs_auth');
-    if (fs.existsSync(authPath)) {
-        console.log('🗑️ Removendo pasta de autenticação corrompida para forçar novo QR Code...');
-        try {
-            fs.rmSync(authPath, { recursive: true, force: true });
-        } catch (err) {
-            console.error('Erro ao deletar pasta de auth:', err);
-        }
-    }
-
-    // Aguarda 2 segundos e inicia uma sessão 100% limpa
-    setTimeout(initClient, 2000);
-    res.json({ success: true, message: 'Sessão destruída e reiniciando o Puppeteer...' });
+    limparPastaSessao(); // Sempre limpa no restart manual para garantir aba limpa
+    
+    // Inicia processo assíncrono para não travar a resposta da requisição HTTP
+    setTimeout(() => { initClient(); }, 1000);
+    
+    res.json({ success: true, message: 'Sessões limpas. Reiniciando microsserviço...' });
 });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
