@@ -42,9 +42,9 @@ router.get('/logs', async (req, res) => {
     try {
         const [rows] = await db.query(
             `SELECT id, destinatario_nome, destinatario_numero, motivo_envio,
-                    mensagem, status, criado_em
+                    mensagem, status, data_envio
              FROM whatsapp_logs
-             ORDER BY criado_em DESC
+             ORDER BY data_envio DESC
              LIMIT 50`
         );
         res.json(rows);
