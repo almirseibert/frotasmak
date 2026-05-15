@@ -1,6 +1,6 @@
 // controllers/orderController.js
 const db = require('../database');
-const crypto = require('crypto');
+const crypto = require('crypto'); // Importado para gerar UUIDs compatíveis com sua migração do Firebase
 
 // --- Funções Auxiliares Seguras de Conversão ---
 const parseJsonSafe = (field, key) => {
@@ -16,7 +16,7 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-// Evita a dupla formatação do JSON que gera quebras na consulta
+// Evita a dupla formatação do JSON que gera quebras na inserção do banco
 const safeStringify = (val) => typeof val === 'string' ? val : JSON.stringify(val || null);
 const safeStringifyArray = (val) => typeof val === 'string' ? val : JSON.stringify(val || []);
 
@@ -66,7 +66,7 @@ const createOrder = async (req, res) => {
         const orderData = {
             id: newOrderId,
             orderNumber: newOrderNumber,
-            date: new Date(data.date),
+            date: data.date ? new Date(data.date) : new Date(),
             supplierId: data.supplierId || null, 
             supplier: data.supplier || null,     
             employeeId: data.employeeId || null,
@@ -104,7 +104,7 @@ const createOrder = async (req, res) => {
         }
         
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
+        if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(201).json({ id: newOrderId, orderNumber: newOrderNumber });
     } catch (error) {
         await connection.rollback();
@@ -138,7 +138,7 @@ const updateOrder = async (req, res) => {
             invoiceNumber: data.invoiceNumber || null,
             status: newStatus,
             totalValue: data.totalValue || 0,
-            date: new Date(data.date),
+            date: data.date ? new Date(data.date) : new Date(),
             items: safeStringify(data.items),
             payment: safeStringify(data.payment),
             editedBy: safeStringify(data.editedBy),
@@ -179,7 +179,7 @@ const updateOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
+        if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
     } catch (error) {
         await connection.rollback();
@@ -207,7 +207,7 @@ const cancelOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
+        if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem cancelada com sucesso.' });
     } catch (error) {
         await connection.rollback();
@@ -221,7 +221,7 @@ const cancelOrder = async (req, res) => {
 const deleteOrder = async (req, res) => {
     try {
         await db.execute('DELETE FROM orders WHERE id = ?', [req.params.id]);
-        req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
+        if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(204).end();
     } catch (error) {
         console.error('Erro ao deletar ordem:', error);
