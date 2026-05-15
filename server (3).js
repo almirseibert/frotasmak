@@ -267,6 +267,10 @@ apiRouter.use('/agenda', agendaRoutes);
 apiRouter.use('/inventory', inventoryRoutes);
 apiRouter.use('/whatsapp', whatsappRoutes);
 
+// ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
+// Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware
+app.post('/api/whatsapp/webhook', require('./controllers/chatbotController').receberMensagem);
+
 // Registrar todas as rotas sob /api
 app.use('/api', apiRouter);
 
