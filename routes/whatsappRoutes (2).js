@@ -53,21 +53,4 @@ router.get('/logs', async (req, res) => {
     }
 });
 
-// Sessões ativas do chatbot
-router.get('/chatbot-sessions', async (req, res) => {
-    try {
-        const [rows] = await db.query(
-            `SELECT id, phone_number, employee_name, step, last_activity, created_at
-             FROM whatsapp_chatbot_sessions
-             WHERE step NOT IN ('concluido', 'cancelado')
-               AND last_activity >= DATE_SUB(NOW(), INTERVAL 30 MINUTE)
-             ORDER BY last_activity DESC
-             LIMIT 50`
-        );
-        res.json(rows);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 module.exports = router;

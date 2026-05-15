@@ -291,15 +291,6 @@ cron.schedule('* * * * *', async () => {
                     }
                 } catch (e) { console.error('❌ [CRON] Erro Retorno Afastamento:', e.message); }
 
-                // Limpar sessões expiradas do chatbot WhatsApp
-                try {
-                    await db.query(
-                        `UPDATE whatsapp_chatbot_sessions SET step = 'cancelado'
-                         WHERE step NOT IN ('concluido', 'cancelado')
-                           AND last_activity < DATE_SUB(NOW(), INTERVAL 30 MINUTE)`
-                    );
-                } catch (e) { console.error('❌ [CRON] Erro ao limpar sessões chatbot:', e.message); }
-
                 console.log('✅ [CRON] Rotina diária concluída com sucesso sem erros.');
             } catch (error) {
                 console.error('❌ [CRON] Erro grave na rotina diária:', error);

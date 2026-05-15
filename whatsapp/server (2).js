@@ -2,7 +2,6 @@ require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const fetch = require('node-fetch');
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 
 const app = express();
@@ -126,49 +125,6 @@ async function initClient() {
              limparPastaSessao();
         }
         agendarReconexao(5000);
-    });
-
-    // ─── HANDLER DE MENSAGENS RECEBIDAS ─────────────────────────────────────────
-    client.on('message', async (msg) => {
-        // Ignorar mensagens de grupos e do próprio bot
-        if (msg.from.endsWith('@g.us') || msg.fromMe) return;
-
-        const BACKEND_URL    = process.env.BACKEND_WEBHOOK_URL;
-        const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
-        if (!BACKEND_URL) return;
-
-        try {
-            const from = msg.from.replace('@c.us', '');
-            let mediaBase64 = null, mediaMimetype = null;
-
-            if (msg.hasMedia) {
-                try {
-                    const media = await msg.downloadMedia();
-                    if (media) { mediaBase64 = media.data; mediaMimetype = media.mimetype; }
-                } catch (_) {}
-            }
-
-            await fetch(`${BACKEND_URL}/api/whatsapp/webhook`, {
-                method:  'POST',
-                headers: {
-                    'Content-Type':     'application/json',
-                    'x-webhook-secret': WEBHOOK_SECRET || '',
-                },
-                body: JSON.stringify({
-                    from,
-                    body:          msg.body || '',
-                    hasMedia:      msg.hasMedia,
-                    mediaBase64,
-                    mediaMimetype,
-                    timestamp:     msg.timestamp,
-                }),
-                timeout: 30000,
-            });
-
-            console.log(`📩 [CHATBOT] Mensagem de ${from} encaminhada ao backend.`);
-        } catch (err) {
-            console.error('[CHATBOT] Erro ao encaminhar mensagem:', err.message);
-        }
     });
 
     try {
