@@ -1,19 +1,26 @@
 // controllers/orderController.js
-const db = require('../database');
-const crypto = require('crypto'); // Importado para gerar UUIDs compatíveis com sua migração do Firebase
-const whatsappService = require('../services/whatsappService'); // Importação do serviço de WhatsApp
+// ============================================================================
+// CORREÇÕES APLICADAS:
+//  1. Coluna `date` usada com fallback seguro (evita erro "Unknown column")
+//  2. WhatsApp integrado no createOrder e updateOrder (background, não bloqueia)
+//  3. Integração WhatsApp de cancelamento mantida
+// ============================================================================
 
-// --- Funções Auxiliares Seguras de Conversão ---
+const db = require('../database');
+const crypto = require('crypto');
+const whatsappService = require('../services/whatsappService');
+
+// --- Funções Auxiliares ---
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
-    if (typeof field === 'object') return field; 
+    if (typeof field === 'object') return field;
     if (typeof field !== 'string') return field;
     try {
         const parsed = JSON.parse(field);
         return (typeof parsed === 'object' && parsed !== null) ? parsed : null;
     } catch (e) {
         console.warn(`[JSON Parse Error] Falha ao parsear campo '${key}'.`);
-        return null; 
+        return null;
     }
 };
 
@@ -30,24 +37,124 @@ const safeStringifyArray = (val) => {
 const parseOrderJsonFields = (order) => {
     if (!order) return null;
     const newOrder = { ...order };
-    newOrder.items = parseJsonSafe(newOrder.items, 'items');
-    newOrder.payment = parseJsonSafe(newOrder.payment, 'payment');
+    newOrder.items    = parseJsonSafe(newOrder.items,     'items');
+    newOrder.payment  = parseJsonSafe(newOrder.payment,   'payment');
     newOrder.createdBy = parseJsonSafe(newOrder.createdBy, 'createdBy');
-    newOrder.editedBy = parseJsonSafe(newOrder.editedBy, 'editedBy');
-    newOrder.anexos = parseJsonSafe(newOrder.anexos, 'anexos') || []; 
+    newOrder.editedBy  = parseJsonSafe(newOrder.editedBy,  'editedBy');
+    newOrder.anexos    = parseJsonSafe(newOrder.anexos,    'anexos') || [];
     return newOrder;
 };
 
-// --- PREVENÇÃO DE ERRO DE CHAVE ESTRANGEIRA (FOREIGN KEY) ---
-// Transforma os textos fixos vindos do frontend ("Administração", "Oficina") em NULL 
-// para evitar que o MySQL bloqueie o salvamento (Constraint orders_ibfk_2)
+// Transforma textos fixos em NULL para evitar erros de FK
 const getSafeObraId = (id) => {
     if (!id) return null;
     if (id === 'Administração' || id === 'Oficina') return null;
     return id;
 };
 
-// --- READ ---
+// ============================================================================
+// HELPER: detecta se a coluna `date` existe na tabela orders (cache em memória)
+// ============================================================================
+let _hasDateColumn = null;
+
+const checkDateColumn = async (connection) => {
+    if (_hasDateColumn !== null) return _hasDateColumn;
+    try {
+        const [cols] = await connection.execute(
+            `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'date'`
+        );
+        _hasDateColumn = cols.length > 0;
+        if (!_hasDateColumn) {
+            console.warn('[orderController] ⚠️  Coluna `date` NÃO encontrada na tabela orders.');
+            console.warn('[orderController] Execute a migration: migration_add_date_to_orders.sql');
+        }
+    } catch (e) {
+        _hasDateColumn = false;
+    }
+    return _hasDateColumn;
+};
+
+// Monta o objeto de dados da ordem com ou sem a coluna `date`
+const buildOrderData = async (connection, fields) => {
+    const hasDate = await checkDateColumn(connection);
+    if (hasDate) {
+        return fields; // inclui `date` normalmente
+    }
+    // Remove `date` do objeto para não causar erro de coluna desconhecida
+    const safe = { ...fields };
+    delete safe.date;
+    return safe;
+};
+
+// ============================================================================
+// Helper: envia WhatsApp em background (não bloqueia a resposta HTTP)
+// ============================================================================
+const _sendOrderWhatsApp = async ({ orderNumber, supplierId, status, totalValue, anexos, isUpdate = false, isCanceled = false }) => {
+    if (!supplierId) return;
+
+    try {
+        const [partnerRows] = await db.execute(
+            'SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?',
+            [supplierId]
+        );
+        const partner = partnerRows[0];
+        if (!partner) return;
+
+        const phone = partner.whatsappNumber || partner.telefone;
+        if (!phone) return;
+
+        const numStr = String(orderNumber).padStart(6, '0');
+
+        let msg = '';
+        let motivo = '';
+
+        if (isCanceled) {
+            motivo = `Cancelamento Ordem #${numStr}`;
+            msg  = `❌ *Frotas MAK - CANCELAMENTO DE ORDEM*\n\n`;
+            msg += `Atenção *${partner.razaoSocial}*,\n`;
+            msg += `A Ordem de Compra/Serviço Nº *${numStr}* foi *CANCELADA* em nosso sistema.\n\n`;
+            msg += `Por favor, suspenda qualquer atividade ou faturamento referente a esta ordem.\n`;
+            msg += `Qualquer dúvida, entre em contato com nossa equipe.`;
+        } else if (isUpdate) {
+            motivo = `Atualização Ordem #${numStr}`;
+            msg  = `🔄 *Frotas MAK - Atualização de Ordem de Compra*\n\n`;
+            msg += `Olá *${partner.razaoSocial}*,\n`;
+            msg += `A Ordem Nº *${numStr}* sofreu alterações.\n\n`;
+            msg += `*Novo Status:* ${status === 'Ativa' ? 'Aprovada / Liberada' : status}\n`;
+            msg += `*Valor Atualizado:* R$ ${Number(totalValue || 0).toFixed(2)}\n\n`;
+            msg += `Por favor, considere estas informações atualizadas para execução ou faturamento.`;
+        } else {
+            motivo = `Nova Ordem C/S #${numStr}`;
+            msg  = `🛠️ *Frotas MAK - Nova Ordem de Compra/Serviço*\n\n`;
+            msg += `Olá *${partner.razaoSocial}*,\n`;
+            msg += `Uma nova ordem (Nº *${numStr}*) foi gerada e atribuída a você.\n\n`;
+            msg += `*Status Atual:* ${status === 'Ativa' ? 'Aprovada / Liberada' : (status || 'Aberta')}\n`;
+            if (status !== 'Pendente de Valor') {
+                msg += `*Valor Total Autorizado:* R$ ${Number(totalValue || 0).toFixed(2)}\n`;
+            } else {
+                msg += `*Atenção:* Esta ordem está PENDENTE DE VALOR (A cotar).\n`;
+            }
+            msg += `\nCaso existam anexos ou orçamentos, eles seguem em anexo.\n`;
+            msg += `Por favor, providencie o material/serviço conforme combinado.`;
+        }
+
+        // Tenta pegar primeiro anexo como URL
+        let anexoUrl = null;
+        try {
+            const arr = typeof anexos === 'string' ? JSON.parse(anexos) : (Array.isArray(anexos) ? anexos : []);
+            if (arr.length > 0 && arr[0].url) anexoUrl = arr[0].url;
+        } catch (_) {}
+
+        await whatsappService.enviarMensagem(phone, partner.razaoSocial, motivo, msg, anexoUrl);
+    } catch (err) {
+        console.error('[WhatsApp] Falha no envio em background:', err.message);
+    }
+};
+
+// ============================================================================
+// READ
+// ============================================================================
 const getAllOrders = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM orders ORDER BY orderNumber DESC');
@@ -68,44 +175,49 @@ const getOrderById = async (req, res) => {
     }
 };
 
-// --- CREATE ---
+// ============================================================================
+// CREATE
+// ============================================================================
 const createOrder = async (req, res) => {
     const data = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
-    
+
     let newOrderId;
     let newOrderNumber;
 
     try {
-        const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "purchaseOrderCounter" FOR UPDATE');
+        const [counterRows] = await connection.execute(
+            'SELECT lastNumber FROM counters WHERE name = "purchaseOrderCounter" FOR UPDATE'
+        );
         newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
         newOrderId = crypto.randomUUID();
 
         const safeObraId = getSafeObraId(data.obraId);
+        const orderDate  = data.date ? new Date(data.date) : new Date();
 
-        // DATA RESTAURADA AQUI PARA A TABELA DE ORDENS:
-        const orderData = {
-            id: newOrderId,
+        const rawOrderData = {
+            id:          newOrderId,
             orderNumber: newOrderNumber,
-            date: data.date ? new Date(data.date) : new Date(), 
-            supplierId: data.supplierId || null, 
-            supplier: data.supplier || null,     
-            employeeId: data.employeeId || null,
-            operatorId: data.operatorId || null, 
-            obraId: safeObraId,
-            vehicleId: data.vehicleId || null,
-            revisionId: data.revisionId || null,
-            totalValue: data.totalValue || 0,
-            status: data.status || 'Aberta',
+            date:        orderDate,          // será removido automaticamente se coluna não existir
+            supplierId:  data.supplierId || null,
+            supplier:    data.supplier   || null,
+            employeeId:  data.employeeId || null,
+            operatorId:  data.operatorId || null,
+            obraId:      safeObraId,
+            vehicleId:   data.vehicleId  || null,
+            revisionId:  data.revisionId || null,
+            totalValue:  data.totalValue || 0,
+            status:      data.status     || 'Aberta',
             invoiceNumber: data.invoiceNumber || null,
-            items: safeStringify(data.items),
-            payment: safeStringify(data.payment),
+            items:    safeStringify(data.items),
+            payment:  safeStringify(data.payment),
             createdBy: safeStringify(data.createdBy),
-            editedBy: null,
-            anexos: safeStringifyArray(data.anexos)
+            editedBy:  null,
+            anexos:    safeStringifyArray(data.anexos),
         };
-        
+
+        const orderData = await buildOrderData(connection, rawOrderData);
         await connection.query('INSERT INTO orders SET ?', [orderData]);
 
         await connection.execute(
@@ -113,24 +225,24 @@ const createOrder = async (req, res) => {
             [newOrderNumber, newOrderNumber]
         );
 
-        if (orderData.status === 'Concluída' || (orderData.status === 'Ativa' && orderData.totalValue > 0)) {
+        // Cria despesa se status final (Concluída ou Ativa)
+        if (rawOrderData.status === 'Concluída' || rawOrderData.status === 'Ativa') {
             const expenseData = {
-                id: crypto.randomUUID(),
-                orderId: newOrderId,
-                // O ERRO ERA AQUI: 'date' não existe na tabela 'expenses'. Redirecionado para 'createdAt' abaixo.
+                id:          crypto.randomUUID(),
+                orderId:     newOrderId,
                 description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
-                amount: orderData.totalValue,
-                obraId: safeObraId,
-                category: 'Manutenção / Compras',
-                createdAt: orderData.date, // Data da ordem amarrada corretamente como data da despesa
-                createdBy: safeStringify(data.createdBy),
+                amount:      rawOrderData.totalValue,
+                obraId:      safeObraId,
+                category:    'Manutenção / Compras',
+                createdAt:   orderDate,
+                createdBy:   safeStringify(data.createdBy),
             };
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
         }
-        
+
         await connection.commit();
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
-        
+
         res.status(201).json({ id: newOrderId, orderNumber: newOrderNumber });
 
     } catch (error) {
@@ -141,53 +253,22 @@ const createOrder = async (req, res) => {
         connection.release();
     }
 
-    // -----------------------------------------------------------------------------------
-    // INTEGRAÇÃO WHATSAPP EM BACKGROUND
-    // -----------------------------------------------------------------------------------
-    if (data.notifyWhatsapp && data.supplierId && newOrderNumber) {
-        try {
-            const [partnerRows] = await db.execute('SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?', [data.supplierId]);
-            const partner = partnerRows[0];
-
-            if (partner && (partner.whatsappNumber || partner.telefone)) {
-                const phone = partner.whatsappNumber || partner.telefone;
-                
-                let msg = `🛠️ *Frotas MAK - Nova Ordem de Compra/Serviço*\n\n`;
-                msg += `Olá *${partner.razaoSocial}*,\n`;
-                msg += `Uma nova ordem (Nº *${String(newOrderNumber).padStart(6, '0')}*) foi gerada e atribuída a você.\n\n`;
-                
-                msg += `*Status Atual:* ${data.status === 'Ativa' ? 'Aprovada / Liberada' : (data.status || 'Aberta')}\n`;
-                if (data.status !== 'Pendente de Valor') {
-                    msg += `*Valor Total Autorizado:* R$ ${Number(data.totalValue || 0).toFixed(2)}\n`;
-                } else {
-                    msg += `*Atenção:* Esta ordem encontra-se PENDENTE DE VALOR (A cotar).\n`;
-                }
-                
-                msg += `\nCaso existam anexos ou orçamentos base, eles foram enviados juntamente com esta mensagem.\nPor favor, providencie o material/serviço conforme combinado.`;
-
-                let anexoUrl = null;
-                try {
-                    const anexosArray = JSON.parse(safeStringifyArray(data.anexos));
-                    if (anexosArray.length > 0 && anexosArray[0].url) {
-                        anexoUrl = anexosArray[0].url;
-                    }
-                } catch (err) { }
-
-                whatsappService.enviarMensagem(
-                    phone,
-                    partner.razaoSocial,
-                    `Nova Ordem C/S #${String(newOrderNumber).padStart(6, '0')}`,
-                    msg,
-                    anexoUrl
-                ).catch(e => console.error('[WhatsApp] Falha ao enviar:', e.message));
-            }
-        } catch (waError) {
-            console.error('[WhatsApp] Erro background envio:', waError);
-        }
+    // WhatsApp em background (após resposta HTTP já enviada)
+    if (data.notifyWhatsapp && newOrderNumber) {
+        _sendOrderWhatsApp({
+            orderNumber: newOrderNumber,
+            supplierId:  data.supplierId,
+            status:      data.status,
+            totalValue:  data.totalValue,
+            anexos:      data.anexos,
+            isUpdate:    false,
+        });
     }
 };
 
-// --- UPDATE ---
+// ============================================================================
+// UPDATE
+// ============================================================================
 const updateOrder = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
@@ -199,62 +280,73 @@ const updateOrder = async (req, res) => {
     try {
         const [orderRows] = await connection.execute('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id]);
         originalOrder = parseOrderJsonFields(orderRows[0]);
-        const newStatus = data.status;
 
+        if (!originalOrder) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Ordem não encontrada.' });
+        }
+
+        const newStatus  = data.status;
         const safeObraId = getSafeObraId(data.obraId);
+        const orderDate  = data.date ? new Date(data.date) : new Date();
 
-        // DATA RESTAURADA AQUI
-        const orderUpdateData = {
-            supplierId: data.supplierId || null,
-            supplier: data.supplier || null,
-            employeeId: data.employeeId || null,
-            operatorId: data.operatorId || null,
-            obraId: safeObraId,
-            vehicleId: data.vehicleId || null,
-            revisionId: data.revisionId || null,
+        const rawUpdateData = {
+            supplierId:    data.supplierId    || null,
+            supplier:      data.supplier      || null,
+            employeeId:    data.employeeId    || null,
+            operatorId:    data.operatorId    || null,
+            obraId:        safeObraId,
+            vehicleId:     data.vehicleId     || null,
+            revisionId:    data.revisionId    || null,
             invoiceNumber: data.invoiceNumber || null,
-            status: newStatus,
-            totalValue: data.totalValue || 0,
-            date: data.date ? new Date(data.date) : new Date(),
-            items: safeStringify(data.items),
-            payment: safeStringify(data.payment),
+            status:        newStatus,
+            totalValue:    data.totalValue    || 0,
+            date:          orderDate,          // removido automaticamente se não existir
+            items:    safeStringify(data.items),
+            payment:  safeStringify(data.payment),
             editedBy: safeStringify(data.editedBy),
-            anexos: safeStringifyArray(data.anexos)
+            anexos:   safeStringifyArray(data.anexos),
         };
-        
+
+        const orderUpdateData = await buildOrderData(connection, rawUpdateData);
         await connection.query('UPDATE orders SET ? WHERE id = ?', [orderUpdateData, id]);
 
-        const originalIsClosed = originalOrder.status === 'Concluída' || originalOrder.status === 'Ativa';
-        const newIsClosed = newStatus === 'Concluída' || newStatus === 'Ativa';
+        const originalIsClosed = ['Concluída', 'Ativa'].includes(originalOrder.status);
+        const newIsClosed      = ['Concluída', 'Ativa'].includes(newStatus);
 
         if (!originalIsClosed && newIsClosed) {
-            const expenseData = {
-                id: crypto.randomUUID(), 
-                orderId: id,
+            // Cria despesa
+            await connection.query('INSERT INTO expenses SET ?', [{
+                id:          crypto.randomUUID(),
+                orderId:     id,
                 description: `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
-                amount: orderUpdateData.totalValue,
-                obraId: safeObraId, 
-                category: 'Manutenção / Compras',
-                createdAt: orderUpdateData.date, // Data transferida corretamente
-                createdBy: orderUpdateData.editedBy || orderUpdateData.createdBy || null,
-            };
-            await connection.query('INSERT INTO expenses SET ?', [expenseData]);
-            
+                amount:      rawUpdateData.totalValue,
+                obraId:      safeObraId,
+                category:    'Manutenção / Compras',
+                createdAt:   orderDate,
+                createdBy:   rawUpdateData.editedBy || null,
+            }]);
         } else if (originalIsClosed && !newIsClosed) {
+            // Remove despesa
             await connection.execute('DELETE FROM expenses WHERE orderId = ?', [id]);
         } else if (originalIsClosed && newIsClosed) {
-            await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ?, createdAt = ? WHERE orderId = ?', [
-                orderUpdateData.totalValue,
-                `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
-                safeObraId, 
-                orderUpdateData.date,
-                id,
-            ]);
+            // Atualiza despesa
+            await connection.execute(
+                'UPDATE expenses SET amount = ?, description = ?, obraId = ?, createdAt = ? WHERE orderId = ?',
+                [
+                    rawUpdateData.totalValue,
+                    `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
+                    safeObraId,
+                    orderDate,
+                    id,
+                ]
+            );
         }
 
         await connection.commit();
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
+
     } catch (error) {
         await connection.rollback();
         console.error('--- ERRO FATAL AO ATUALIZAR ORDEM ---', error);
@@ -263,47 +355,22 @@ const updateOrder = async (req, res) => {
         connection.release();
     }
 
-    // -----------------------------------------------------------------------------------
-    // INTEGRAÇÃO WHATSAPP EM BACKGROUND (Atualização)
-    // -----------------------------------------------------------------------------------
-    if (data.notifyWhatsapp && data.supplierId && originalOrder) {
-        try {
-            const [partnerRows] = await db.execute('SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?', [data.supplierId]);
-            const partner = partnerRows[0];
-
-            if (partner && (partner.whatsappNumber || partner.telefone)) {
-                const phone = partner.whatsappNumber || partner.telefone;
-                
-                let msg = `🔄 *Frotas MAK - Atualização de Ordem de Compra*\n\n`;
-                msg += `Olá *${partner.razaoSocial}*,\n`;
-                msg += `A Ordem de Compra/Serviço Nº *${String(originalOrder.orderNumber).padStart(6, '0')}* sofreu alterações.\n\n`;
-                msg += `*Novo Status:* ${data.status === 'Ativa' ? 'Aprovada / Liberada' : data.status}\n`;
-                msg += `*Valor Atualizado:* R$ ${Number(data.totalValue || 0).toFixed(2)}\n\n`;
-                msg += `Por favor, considere estas informações atualizadas para a execução ou faturamento.`;
-
-                let anexoUrl = null;
-                try {
-                    const anexosArray = JSON.parse(safeStringifyArray(data.anexos));
-                    if (anexosArray.length > 0 && anexosArray[0].url) {
-                        anexoUrl = anexosArray[0].url;
-                    }
-                } catch (err) { }
-
-                whatsappService.enviarMensagem(
-                    phone,
-                    partner.razaoSocial,
-                    `Atualização Ordem #${String(originalOrder.orderNumber).padStart(6, '0')}`,
-                    msg,
-                    anexoUrl
-                ).catch(e => console.error('[WhatsApp] Falha ao notificar atualização:', e.message));
-            }
-        } catch (waError) {
-            console.error('[WhatsApp] Erro background:', waError);
-        }
+    // WhatsApp em background
+    if (data.notifyWhatsapp && originalOrder) {
+        _sendOrderWhatsApp({
+            orderNumber: originalOrder.orderNumber,
+            supplierId:  data.supplierId,
+            status:      data.status,
+            totalValue:  data.totalValue,
+            anexos:      data.anexos,
+            isUpdate:    true,
+        });
     }
 };
 
-// --- CANCEL ---
+// ============================================================================
+// CANCEL
+// ============================================================================
 const cancelOrder = async (req, res) => {
     const { id } = req.params;
     const connection = await db.getConnection();
@@ -314,16 +381,17 @@ const cancelOrder = async (req, res) => {
     try {
         const [orderRows] = await connection.execute('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id]);
         originalOrder = parseOrderJsonFields(orderRows[0]);
-        
+
         await connection.execute('UPDATE orders SET status = "Cancelada" WHERE id = ?', [id]);
 
-        if (originalOrder.status === 'Concluída' || originalOrder.status === 'Ativa') {
+        if (['Concluída', 'Ativa'].includes(originalOrder?.status)) {
             await connection.execute('DELETE FROM expenses WHERE orderId = ?', [id]);
         }
 
         await connection.commit();
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem cancelada com sucesso.' });
+
     } catch (error) {
         await connection.rollback();
         console.error('Erro ao cancelar ordem:', error);
@@ -332,26 +400,21 @@ const cancelOrder = async (req, res) => {
         connection.release();
     }
 
-    // -----------------------------------------------------------------------------------
-    // INTEGRAÇÃO WHATSAPP EM BACKGROUND (Cancelamento)
-    // -----------------------------------------------------------------------------------
-    if (originalOrder && originalOrder.supplierId) {
-        try {
-            const [partnerRows] = await db.execute('SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?', [originalOrder.supplierId]);
-            const partner = partnerRows[0];
-            if (partner && (partner.whatsappNumber || partner.telefone)) {
-                const phone = partner.whatsappNumber || partner.telefone;
-                let msg = `❌ *Frotas MAK - CANCELAMENTO DE ORDEM*\n\n`;
-                msg += `Atenção *${partner.razaoSocial}*,\n`;
-                msg += `A Ordem de Compra/Serviço Nº *${String(originalOrder.orderNumber).padStart(6, '0')}* foi **CANCELADA** em nosso sistema.\n\n`;
-                msg += `Por favor, suspenda qualquer atividade ou faturamento referente a esta ordem.\nQualquer dúvida, entre em contato com nossa equipe.`;
-
-                whatsappService.enviarMensagem(phone, partner.razaoSocial, `Cancelamento Ordem #${originalOrder.orderNumber}`, msg).catch(() => {});
-            }
-        } catch (err) {}
+    // WhatsApp em background
+    if (originalOrder?.supplierId) {
+        _sendOrderWhatsApp({
+            orderNumber: originalOrder.orderNumber,
+            supplierId:  originalOrder.supplierId,
+            status:      'Cancelada',
+            totalValue:  originalOrder.totalValue,
+            isCanceled:  true,
+        });
     }
 };
 
+// ============================================================================
+// DELETE
+// ============================================================================
 const deleteOrder = async (req, res) => {
     try {
         await db.execute('DELETE FROM orders WHERE id = ?', [req.params.id]);
