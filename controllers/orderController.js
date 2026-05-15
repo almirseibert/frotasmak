@@ -1,8 +1,8 @@
 // controllers/orderController.js
 const db = require('../database');
-const crypto = require('crypto'); // Importado para gerar UUIDs compatíveis com sua migração do Firebase
+const crypto = require('crypto');
 
-// --- Função Auxiliar Segura de JSON ---
+// --- Funções Auxiliares Seguras de Conversão ---
 const parseJsonSafe = (field, key) => {
     if (field === null || typeof field === 'undefined') return null;
     if (typeof field === 'object') return field; 
@@ -15,6 +15,10 @@ const parseJsonSafe = (field, key) => {
         return null; 
     }
 };
+
+// Evita a dupla formatação do JSON que gera quebras na consulta
+const safeStringify = (val) => typeof val === 'string' ? val : JSON.stringify(val || null);
+const safeStringifyArray = (val) => typeof val === 'string' ? val : JSON.stringify(val || []);
 
 const parseOrderJsonFields = (order) => {
     if (!order) return null;
@@ -57,7 +61,6 @@ const createOrder = async (req, res) => {
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "purchaseOrderCounter" FOR UPDATE');
         const newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
 
-        // Gera o UUID nativamente para contornar a falta do auto-increment do banco
         const newOrderId = crypto.randomUUID();
 
         const orderData = {
@@ -74,11 +77,11 @@ const createOrder = async (req, res) => {
             totalValue: data.totalValue || 0,
             status: data.status || 'Aberta',
             invoiceNumber: data.invoiceNumber || null,
-            items: JSON.stringify(data.items),
-            payment: JSON.stringify(data.payment),
-            createdBy: JSON.stringify(data.createdBy),
+            items: safeStringify(data.items),
+            payment: safeStringify(data.payment),
+            createdBy: safeStringify(data.createdBy),
             editedBy: null,
-            anexos: JSON.stringify(data.anexos || [])
+            anexos: safeStringifyArray(data.anexos)
         };
         
         await connection.query('INSERT INTO orders SET ?', [orderData]);
@@ -88,14 +91,14 @@ const createOrder = async (req, res) => {
         // A DESPESA É GERADA COM BASE NO STATUS FINAL DA ORDEM
         if (orderData.status === 'Concluída' || (orderData.status === 'Ativa' && orderData.totalValue > 0)) {
             const expenseData = {
-                id: crypto.randomUUID(), // Despesas também precisam de UUID devido a migração
+                id: crypto.randomUUID(),
                 orderId: newOrderId,
                 description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
                 amount: orderData.totalValue,
-                obraId: data.obraId,
+                obraId: data.obraId || null, // <--- TRAVA DE SEGURANÇA CHAVE ESTRANGEIRA
                 category: 'Manutenção / Compras',
                 createdAt: new Date(),
-                createdBy: orderData.createdBy,
+                createdBy: typeof data.createdBy === 'string' ? data.createdBy : JSON.stringify(data.createdBy || {}),
             };
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
         }
@@ -136,10 +139,10 @@ const updateOrder = async (req, res) => {
             status: newStatus,
             totalValue: data.totalValue || 0,
             date: new Date(data.date),
-            items: JSON.stringify(data.items),
-            payment: JSON.stringify(data.payment),
-            editedBy: JSON.stringify(data.editedBy),
-            anexos: JSON.stringify(data.anexos || [])
+            items: safeStringify(data.items),
+            payment: safeStringify(data.payment),
+            editedBy: safeStringify(data.editedBy),
+            anexos: safeStringifyArray(data.anexos)
         };
         
         await connection.query('UPDATE orders SET ? WHERE id = ?', [orderUpdateData, id]);
@@ -150,11 +153,11 @@ const updateOrder = async (req, res) => {
         if (!originalIsClosed && newIsClosed) {
             // GERAR DESPESA
             const expenseData = {
-                id: crypto.randomUUID(), // Despesas também precisam de UUID
+                id: crypto.randomUUID(), 
                 orderId: id,
                 description: `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
                 amount: orderUpdateData.totalValue,
-                obraId: data.obraId,
+                obraId: data.obraId || null,
                 category: 'Manutenção / Compras',
                 createdAt: new Date(),
                 createdBy: orderUpdateData.editedBy || orderUpdateData.createdBy,
@@ -170,7 +173,7 @@ const updateOrder = async (req, res) => {
             await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ? WHERE orderId = ?', [
                 orderUpdateData.totalValue,
                 `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
-                data.obraId,
+                data.obraId || null,
                 id,
             ]);
         }

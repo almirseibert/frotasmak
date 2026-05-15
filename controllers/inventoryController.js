@@ -199,7 +199,7 @@ const createItem = async (req, res) => {
                 id, sku, eaN, internalCode, name, description, categoryId,
                 quantity, minQuantity, maxQuantity, unitPrice, unit, createdBy
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [id, sku, eaN || null, internalCode || null, name, description || null, categoryId, quantity, minQuantity, maxQuantity ?? null, unitPrice, unit, userEmail]);
+        `, [id, sku, eaN || null, internalCode || null, name, description || null, categoryId || null, quantity, minQuantity, maxQuantity ?? null, unitPrice, unit, userEmail]);
 
         if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.status(201).json({ id, sku, name });
@@ -220,7 +220,7 @@ const updateItem = async (req, res) => {
             SET name=?, description=?, categoryId=?, minQuantity=?, maxQuantity=?,
                 unitPrice=?, unit=?, updatedBy=?, updatedAt=NOW()
             WHERE id=?
-        `, [name, description || null, categoryId, minQuantity, maxQuantity ?? null, unitPrice, unit, userEmail, id]);
+        `, [name, description || null, categoryId || null, minQuantity, maxQuantity ?? null, unitPrice, unit, userEmail, id]);
 
         if (req.io) req.io.emit('server:sync', { targets: ['inventory'] });
         res.json({ message: 'Item atualizado com sucesso' });
@@ -335,6 +335,9 @@ const getItemMovements = async (req, res) => {
     const { itemId } = req.params;
     const { limit = 20, offset = 0 } = req.query;
 
+    const safeLimit = Math.max(1, parseInt(limit, 10) || 20);
+    const safeOffset = Math.max(0, parseInt(offset, 10) || 0);
+
     try {
         const [movements] = await db.execute(`
             SELECT id, type, quantity, reason, reference, unitPrice, createdBy, createdAt
@@ -342,13 +345,13 @@ const getItemMovements = async (req, res) => {
             WHERE itemId = ?
             ORDER BY createdAt DESC
             LIMIT ? OFFSET ?
-        `, [itemId, parseInt(limit), parseInt(offset)]);
+        `, [itemId, safeLimit, safeOffset]);
 
         const [[{ total }]] = await db.execute(`
             SELECT COUNT(*) as total FROM inventory_movements WHERE itemId = ?
         `, [itemId]);
 
-        res.json({ movements, total });
+        res.json({ movements, total: Number(total) || 0 });
     } catch (error) {
         console.error('Erro ao buscar movimentos:', error);
         res.status(500).json({ error: 'Erro ao buscar movimentos' });
@@ -382,7 +385,6 @@ const getInventorySummary = async (req, res) => {
              WHERE quantity > 0 AND quantity <= minQuantity AND isActive = TRUE`
         );
         
-        // Conversões forçadas de Strings advindas do MySQL (SUM e COUNT)
         res.json({
             totalItems: Number(totalItems) || 0,
             totalValue: Number(totalValue) || 0,
@@ -430,7 +432,6 @@ const getValueByCategory = async (req, res) => {
             ORDER BY totalValue DESC
         `);
         
-        // Conversão de SUM e COUNT para os dados mapeados
         const formattedRows = rows.map(r => ({
             ...r,
             totalItems: Number(r.totalItems) || 0,
@@ -492,33 +493,22 @@ const acknowledgeAlert = async (req, res) => {
 };
 
 module.exports = {
-    // Categorias
     getAllCategories,
     createCategory,
     updateCategory,
     deleteCategory,
-
-    // Itens
     getAllItems,
     getItemById,
     createItem,
     updateItem,
     deactivateItem,
-
-    // Referências
     addItemReference,
     removeItemReference,
-
-    // Movimentações
     recordMovement,
     getItemMovements,
-
-    // Dashboard
     getInventorySummary,
     getLowStockItems,
     getValueByCategory,
-
-    // Alertas
     getActiveAlerts,
     acknowledgeAlert,
 };
