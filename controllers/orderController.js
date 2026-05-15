@@ -16,9 +16,16 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-// Evita a dupla formatação do JSON que gera quebras na inserção do banco
-const safeStringify = (val) => typeof val === 'string' ? val : JSON.stringify(val || null);
-const safeStringifyArray = (val) => typeof val === 'string' ? val : JSON.stringify(val || []);
+// Evita a dupla formatação do JSON e impede o envio do texto "null" em vez do valor NULL real
+const safeStringify = (val) => {
+    if (val === null || val === undefined || val === '') return null;
+    return typeof val === 'string' ? val : JSON.stringify(val);
+};
+
+const safeStringifyArray = (val) => {
+    if (val === null || val === undefined || val === '') return '[]';
+    return typeof val === 'string' ? val : JSON.stringify(val);
+};
 
 const parseOrderJsonFields = (order) => {
     if (!order) return null;
@@ -58,6 +65,7 @@ const createOrder = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
     try {
+        // Busca do contador de ordens
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "purchaseOrderCounter" FOR UPDATE');
         const newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
 
@@ -86,19 +94,24 @@ const createOrder = async (req, res) => {
         
         await connection.query('INSERT INTO orders SET ?', [orderData]);
 
-        await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "purchaseOrderCounter"', [newOrderNumber]);
+        // Fix de Confiabilidade: Insere a linha do contador caso não exista, ou atualiza se existir.
+        await connection.execute(
+            'INSERT INTO counters (name, lastNumber) VALUES ("purchaseOrderCounter", ?) ON DUPLICATE KEY UPDATE lastNumber = ?',
+            [newOrderNumber, newOrderNumber]
+        );
 
         // A DESPESA É GERADA COM BASE NO STATUS FINAL DA ORDEM
         if (orderData.status === 'Concluída' || (orderData.status === 'Ativa' && orderData.totalValue > 0)) {
             const expenseData = {
                 id: crypto.randomUUID(),
                 orderId: newOrderId,
+                date: orderData.date, // Adicionado por segurança para a tabela de despesas
                 description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
                 amount: orderData.totalValue,
-                obraId: data.obraId || null, // <--- TRAVA DE SEGURANÇA CHAVE ESTRANGEIRA
+                obraId: data.obraId || null,
                 category: 'Manutenção / Compras',
                 createdAt: new Date(),
-                createdBy: typeof data.createdBy === 'string' ? data.createdBy : JSON.stringify(data.createdBy || {}),
+                createdBy: safeStringify(data.createdBy),
             };
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
         }
@@ -108,7 +121,9 @@ const createOrder = async (req, res) => {
         res.status(201).json({ id: newOrderId, orderNumber: newOrderNumber });
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao criar ordem:', error);
+        // Log detalhado no backend para auditoria caso algo ainda falhe
+        console.error('--- ERRO FATAL AO CRIAR ORDEM ---');
+        console.error(error);
         res.status(500).json({ error: 'Falha ao salvar a ordem.' });
     } finally {
         connection.release();
@@ -155,12 +170,13 @@ const updateOrder = async (req, res) => {
             const expenseData = {
                 id: crypto.randomUUID(), 
                 orderId: id,
+                date: orderUpdateData.date, // Adicionado por segurança
                 description: `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
                 amount: orderUpdateData.totalValue,
                 obraId: data.obraId || null,
                 category: 'Manutenção / Compras',
                 createdAt: new Date(),
-                createdBy: orderUpdateData.editedBy || orderUpdateData.createdBy,
+                createdBy: orderUpdateData.editedBy || orderUpdateData.createdBy || null,
             };
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
             
@@ -183,7 +199,8 @@ const updateOrder = async (req, res) => {
         res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error('Erro ao atualizar ordem:', error);
+        console.error('--- ERRO FATAL AO ATUALIZAR ORDEM ---');
+        console.error(error);
         res.status(500).json({ error: 'Falha ao atualizar a ordem.' });
     } finally {
         connection.release();
