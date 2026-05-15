@@ -38,6 +38,15 @@ const parseOrderJsonFields = (order) => {
     return newOrder;
 };
 
+// --- PREVENÇÃO DE ERRO DE CHAVE ESTRANGEIRA (FOREIGN KEY) ---
+// Transforma os textos fixos vindos do frontend ("Administração", "Oficina") em NULL 
+// para evitar que o MySQL bloqueie o salvamento (Constraint orders_ibfk_2)
+const getSafeObraId = (id) => {
+    if (!id) return null;
+    if (id === 'Administração' || id === 'Oficina') return null;
+    return id;
+};
+
 // --- READ ---
 const getAllOrders = async (req, res) => {
     try {
@@ -73,6 +82,9 @@ const createOrder = async (req, res) => {
         newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
         newOrderId = crypto.randomUUID();
 
+        // Filtro de Chave Estrangeira aplicado aqui
+        const safeObraId = getSafeObraId(data.obraId);
+
         const orderData = {
             id: newOrderId,
             orderNumber: newOrderNumber,
@@ -81,7 +93,7 @@ const createOrder = async (req, res) => {
             supplier: data.supplier || null,     
             employeeId: data.employeeId || null,
             operatorId: data.operatorId || null, 
-            obraId: data.obraId || null,
+            obraId: safeObraId,
             vehicleId: data.vehicleId || null,
             revisionId: data.revisionId || null,
             totalValue: data.totalValue || 0,
@@ -108,7 +120,7 @@ const createOrder = async (req, res) => {
                 date: orderData.date,
                 description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
                 amount: orderData.totalValue,
-                obraId: data.obraId || null,
+                obraId: safeObraId, // Filtro de FK aplicado também nas despesas
                 category: 'Manutenção / Compras',
                 createdAt: new Date(),
                 createdBy: safeStringify(data.createdBy),
@@ -194,12 +206,15 @@ const updateOrder = async (req, res) => {
         originalOrder = parseOrderJsonFields(orderRows[0]);
         const newStatus = data.status;
 
+        // Filtro de Chave Estrangeira aplicado aqui
+        const safeObraId = getSafeObraId(data.obraId);
+
         const orderUpdateData = {
             supplierId: data.supplierId || null,
             supplier: data.supplier || null,
             employeeId: data.employeeId || null,
             operatorId: data.operatorId || null,
-            obraId: data.obraId || null,
+            obraId: safeObraId,
             vehicleId: data.vehicleId || null,
             revisionId: data.revisionId || null,
             invoiceNumber: data.invoiceNumber || null,
@@ -224,7 +239,7 @@ const updateOrder = async (req, res) => {
                 date: orderUpdateData.date,
                 description: `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
                 amount: orderUpdateData.totalValue,
-                obraId: data.obraId || null,
+                obraId: safeObraId, // Filtro aplicado aqui
                 category: 'Manutenção / Compras',
                 createdAt: new Date(),
                 createdBy: orderUpdateData.editedBy || orderUpdateData.createdBy || null,
@@ -237,7 +252,7 @@ const updateOrder = async (req, res) => {
             await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ? WHERE orderId = ?', [
                 orderUpdateData.totalValue,
                 `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
-                data.obraId || null,
+                safeObraId, // Filtro aplicado aqui
                 id,
             ]);
         }
