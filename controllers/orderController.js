@@ -1,6 +1,7 @@
 // controllers/orderController.js
 const db = require('../database');
 const crypto = require('crypto'); // Importado para gerar UUIDs compatíveis com sua migração do Firebase
+const whatsappService = require('../services/whatsappService'); // Importação do serviço de WhatsApp
 
 // --- Funções Auxiliares Seguras de Conversão ---
 const parseJsonSafe = (field, key) => {
@@ -16,7 +17,6 @@ const parseJsonSafe = (field, key) => {
     }
 };
 
-// Evita a dupla formatação do JSON e impede o envio do texto "null" em vez do valor NULL real
 const safeStringify = (val) => {
     if (val === null || val === undefined || val === '') return null;
     return typeof val === 'string' ? val : JSON.stringify(val);
@@ -65,10 +65,8 @@ const createOrder = async (req, res) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
     try {
-        // Busca do contador de ordens
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "purchaseOrderCounter" FOR UPDATE');
         const newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
-
         const newOrderId = crypto.randomUUID();
 
         const orderData = {
@@ -94,18 +92,16 @@ const createOrder = async (req, res) => {
         
         await connection.query('INSERT INTO orders SET ?', [orderData]);
 
-        // Fix de Confiabilidade: Insere a linha do contador caso não exista, ou atualiza se existir.
         await connection.execute(
             'INSERT INTO counters (name, lastNumber) VALUES ("purchaseOrderCounter", ?) ON DUPLICATE KEY UPDATE lastNumber = ?',
             [newOrderNumber, newOrderNumber]
         );
 
-        // A DESPESA É GERADA COM BASE NO STATUS FINAL DA ORDEM
         if (orderData.status === 'Concluída' || (orderData.status === 'Ativa' && orderData.totalValue > 0)) {
             const expenseData = {
                 id: crypto.randomUUID(),
                 orderId: newOrderId,
-                date: orderData.date, // Adicionado por segurança para a tabela de despesas
+                date: orderData.date,
                 description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
                 amount: orderData.totalValue,
                 obraId: data.obraId || null,
@@ -117,13 +113,61 @@ const createOrder = async (req, res) => {
         }
         
         await connection.commit();
+
+        // -----------------------------------------------------------------------------------
+        // INTEGRAÇÃO WHATSAPP: Disparo automático se marcado pelo usuário no Frontend
+        // -----------------------------------------------------------------------------------
+        if (data.notifyWhatsapp && data.supplierId) {
+            try {
+                const [partnerRows] = await connection.execute('SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?', [data.supplierId]);
+                const partner = partnerRows[0];
+
+                if (partner && (partner.whatsappNumber || partner.telefone)) {
+                    const phone = partner.whatsappNumber || partner.telefone;
+                    
+                    // Monta a mensagem formatada em Markdown para o WhatsApp
+                    let msg = `🛠️ *Frotas MAK - Nova Ordem de Compra/Serviço*\n\n`;
+                    msg += `Olá *${partner.razaoSocial}*,\n`;
+                    msg += `Uma nova ordem (Nº *${String(newOrderNumber).padStart(6, '0')}*) foi gerada e atribuída a você.\n\n`;
+                    
+                    msg += `*Status Atual:* ${orderData.status === 'Ativa' ? 'Aprovada / Liberada' : orderData.status}\n`;
+                    if (orderData.status !== 'Pendente de Valor') {
+                        msg += `*Valor Total Autorizado:* R$ ${Number(orderData.totalValue).toFixed(2)}\n`;
+                    } else {
+                        msg += `*Atenção:* Esta ordem encontra-se PENDENTE DE VALOR (A cotar).\n`;
+                    }
+                    
+                    msg += `\nCaso existam anexos ou orçamentos base, eles foram enviados juntamente com esta mensagem.\nPor favor, providencie o material/serviço conforme combinado.`;
+
+                    // Pega o primeiro anexo da ordem para enviar como documento via WhatsApp (se houver)
+                    let anexoUrl = null;
+                    try {
+                        const anexosArray = JSON.parse(orderData.anexos || '[]');
+                        if (anexosArray.length > 0 && anexosArray[0].url) {
+                            anexoUrl = anexosArray[0].url;
+                        }
+                    } catch (err) { /* ignora erro de parse silenciosamente */ }
+
+                    // Disparo assíncrono para não prender a resposta da requisição HTTP
+                    whatsappService.enviarMensagem(
+                        phone,
+                        partner.razaoSocial,
+                        `Nova Ordem C/S #${String(newOrderNumber).padStart(6, '0')}`,
+                        msg,
+                        anexoUrl
+                    ).catch(e => console.error('[WhatsApp] Falha ao enviar notificação de nova Ordem:', e.message));
+                }
+            } catch (waError) {
+                console.error('[WhatsApp] Erro ao processar envio de nova Ordem:', waError);
+            }
+        }
+        // -----------------------------------------------------------------------------------
+
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(201).json({ id: newOrderId, orderNumber: newOrderNumber });
     } catch (error) {
         await connection.rollback();
-        // Log detalhado no backend para auditoria caso algo ainda falhe
-        console.error('--- ERRO FATAL AO CRIAR ORDEM ---');
-        console.error(error);
+        console.error('--- ERRO FATAL AO CRIAR ORDEM ---', error);
         res.status(500).json({ error: 'Falha ao salvar a ordem.' });
     } finally {
         connection.release();
@@ -166,11 +210,10 @@ const updateOrder = async (req, res) => {
         const newIsClosed = newStatus === 'Concluída' || newStatus === 'Ativa';
 
         if (!originalIsClosed && newIsClosed) {
-            // GERAR DESPESA
             const expenseData = {
                 id: crypto.randomUUID(), 
                 orderId: id,
-                date: orderUpdateData.date, // Adicionado por segurança
+                date: orderUpdateData.date,
                 description: `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
                 amount: orderUpdateData.totalValue,
                 obraId: data.obraId || null,
@@ -181,11 +224,8 @@ const updateOrder = async (req, res) => {
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
             
         } else if (originalIsClosed && !newIsClosed) {
-            // ESTORNAR/DELETAR DESPESA
             await connection.execute('DELETE FROM expenses WHERE orderId = ?', [id]);
-            
         } else if (originalIsClosed && newIsClosed) {
-            // ATUALIZAR DESPESA EXISTENTE
             await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ? WHERE orderId = ?', [
                 orderUpdateData.totalValue,
                 `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
@@ -195,12 +235,52 @@ const updateOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // -----------------------------------------------------------------------------------
+        // INTEGRAÇÃO WHATSAPP: Notifica sobre a ATUALIZAÇÃO da Ordem
+        // -----------------------------------------------------------------------------------
+        if (data.notifyWhatsapp && data.supplierId) {
+            try {
+                const [partnerRows] = await connection.execute('SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?', [data.supplierId]);
+                const partner = partnerRows[0];
+
+                if (partner && (partner.whatsappNumber || partner.telefone)) {
+                    const phone = partner.whatsappNumber || partner.telefone;
+                    
+                    let msg = `🔄 *Frotas MAK - Atualização de Ordem de Compra*\n\n`;
+                    msg += `Olá *${partner.razaoSocial}*,\n`;
+                    msg += `A Ordem de Compra/Serviço Nº *${String(originalOrder.orderNumber).padStart(6, '0')}* sofreu alterações.\n\n`;
+                    msg += `*Novo Status:* ${newStatus === 'Ativa' ? 'Aprovada / Liberada' : newStatus}\n`;
+                    msg += `*Valor Atualizado:* R$ ${Number(orderUpdateData.totalValue).toFixed(2)}\n\n`;
+                    msg += `Por favor, considere estas informações atualizadas para a execução ou faturamento.`;
+
+                    let anexoUrl = null;
+                    try {
+                        const anexosArray = JSON.parse(orderUpdateData.anexos || '[]');
+                        if (anexosArray.length > 0 && anexosArray[0].url) {
+                            anexoUrl = anexosArray[0].url;
+                        }
+                    } catch (err) { /* ignora erro */ }
+
+                    whatsappService.enviarMensagem(
+                        phone,
+                        partner.razaoSocial,
+                        `Atualização Ordem #${String(originalOrder.orderNumber).padStart(6, '0')}`,
+                        msg,
+                        anexoUrl
+                    ).catch(e => console.error('[WhatsApp] Falha ao notificar atualização:', e.message));
+                }
+            } catch (waError) {
+                console.error('[WhatsApp] Erro ao processar envio de atualização:', waError);
+            }
+        }
+        // -----------------------------------------------------------------------------------
+
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
     } catch (error) {
         await connection.rollback();
-        console.error('--- ERRO FATAL AO ATUALIZAR ORDEM ---');
-        console.error(error);
+        console.error('--- ERRO FATAL AO ATUALIZAR ORDEM ---', error);
         res.status(500).json({ error: 'Falha ao atualizar a ordem.' });
     } finally {
         connection.release();
@@ -224,6 +304,27 @@ const cancelOrder = async (req, res) => {
         }
 
         await connection.commit();
+
+        // -----------------------------------------------------------------------------------
+        // INTEGRAÇÃO WHATSAPP: Alerta de Cancelamento
+        // -----------------------------------------------------------------------------------
+        if (originalOrder.supplierId) {
+            try {
+                const [partnerRows] = await connection.execute('SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?', [originalOrder.supplierId]);
+                const partner = partnerRows[0];
+                if (partner && (partner.whatsappNumber || partner.telefone)) {
+                    const phone = partner.whatsappNumber || partner.telefone;
+                    let msg = `❌ *Frotas MAK - CANCELAMENTO DE ORDEM*\n\n`;
+                    msg += `Atenção *${partner.razaoSocial}*,\n`;
+                    msg += `A Ordem de Compra/Serviço Nº *${String(originalOrder.orderNumber).padStart(6, '0')}* foi **CANCELADA** em nosso sistema.\n\n`;
+                    msg += `Por favor, suspenda qualquer atividade ou faturamento referente a esta ordem.\nQualquer dúvida, entre em contato com nossa equipe.`;
+
+                    whatsappService.enviarMensagem(phone, partner.razaoSocial, `Cancelamento Ordem #${originalOrder.orderNumber}`, msg).catch(() => {});
+                }
+            } catch (err) {}
+        }
+        // -----------------------------------------------------------------------------------
+
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem cancelada com sucesso.' });
     } catch (error) {
