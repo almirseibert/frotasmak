@@ -82,13 +82,13 @@ const createOrder = async (req, res) => {
         newOrderNumber = (counterRows[0]?.lastNumber || 0) + 1;
         newOrderId = crypto.randomUUID();
 
-        // Filtro de Chave Estrangeira aplicado aqui
         const safeObraId = getSafeObraId(data.obraId);
 
+        // DATA RESTAURADA AQUI PARA A TABELA DE ORDENS:
         const orderData = {
             id: newOrderId,
             orderNumber: newOrderNumber,
-            date: data.date ? new Date(data.date) : new Date(),
+            date: data.date ? new Date(data.date) : new Date(), 
             supplierId: data.supplierId || null, 
             supplier: data.supplier || null,     
             employeeId: data.employeeId || null,
@@ -117,12 +117,12 @@ const createOrder = async (req, res) => {
             const expenseData = {
                 id: crypto.randomUUID(),
                 orderId: newOrderId,
-                date: orderData.date,
+                // O ERRO ERA AQUI: 'date' não existe na tabela 'expenses'. Redirecionado para 'createdAt' abaixo.
                 description: `Ordem C/S #${String(newOrderNumber).padStart(6, '0')} - ${data.supplier || 'Fornecedor'}`,
                 amount: orderData.totalValue,
-                obraId: safeObraId, // Filtro de FK aplicado também nas despesas
+                obraId: safeObraId,
                 category: 'Manutenção / Compras',
-                createdAt: new Date(),
+                createdAt: orderData.date, // Data da ordem amarrada corretamente como data da despesa
                 createdBy: safeStringify(data.createdBy),
             };
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
@@ -131,25 +131,21 @@ const createOrder = async (req, res) => {
         await connection.commit();
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         
-        // Responde ao frontend Imediatamente! (A ordem foi salva com sucesso)
         res.status(201).json({ id: newOrderId, orderNumber: newOrderNumber });
 
     } catch (error) {
         await connection.rollback();
         console.error('--- ERRO FATAL AO CRIAR ORDEM ---', error);
-        // Expondo o error.message no payload para ajudar a depurar erros de MySQL no Frontend
         return res.status(500).json({ error: 'Falha ao salvar a ordem.', details: error.message });
     } finally {
         connection.release();
     }
 
     // -----------------------------------------------------------------------------------
-    // INTEGRAÇÃO WHATSAPP: Disparo automático em BACKGROUND
-    // Rodar fora do escopo da transação impede que falhas na API derrubem o salvamento
+    // INTEGRAÇÃO WHATSAPP EM BACKGROUND
     // -----------------------------------------------------------------------------------
     if (data.notifyWhatsapp && data.supplierId && newOrderNumber) {
         try {
-            // Usa db.execute (nova conexão da pool) pois a connection original foi liberada no finally
             const [partnerRows] = await db.execute('SELECT razaoSocial, whatsappNumber, telefone FROM partners WHERE id = ?', [data.supplierId]);
             const partner = partnerRows[0];
 
@@ -169,14 +165,13 @@ const createOrder = async (req, res) => {
                 
                 msg += `\nCaso existam anexos ou orçamentos base, eles foram enviados juntamente com esta mensagem.\nPor favor, providencie o material/serviço conforme combinado.`;
 
-                // Pega o primeiro anexo da ordem (foto/pdf) para enviar como documento via WhatsApp
                 let anexoUrl = null;
                 try {
                     const anexosArray = JSON.parse(safeStringifyArray(data.anexos));
                     if (anexosArray.length > 0 && anexosArray[0].url) {
                         anexoUrl = anexosArray[0].url;
                     }
-                } catch (err) { /* ignora erro silenciosamente no background */ }
+                } catch (err) { }
 
                 whatsappService.enviarMensagem(
                     phone,
@@ -184,10 +179,10 @@ const createOrder = async (req, res) => {
                     `Nova Ordem C/S #${String(newOrderNumber).padStart(6, '0')}`,
                     msg,
                     anexoUrl
-                ).catch(e => console.error('[WhatsApp] Falha ao enviar notificação de nova Ordem:', e.message));
+                ).catch(e => console.error('[WhatsApp] Falha ao enviar:', e.message));
             }
         } catch (waError) {
-            console.error('[WhatsApp] Erro background envio de nova Ordem:', waError);
+            console.error('[WhatsApp] Erro background envio:', waError);
         }
     }
 };
@@ -206,9 +201,9 @@ const updateOrder = async (req, res) => {
         originalOrder = parseOrderJsonFields(orderRows[0]);
         const newStatus = data.status;
 
-        // Filtro de Chave Estrangeira aplicado aqui
         const safeObraId = getSafeObraId(data.obraId);
 
+        // DATA RESTAURADA AQUI
         const orderUpdateData = {
             supplierId: data.supplierId || null,
             supplier: data.supplier || null,
@@ -236,12 +231,11 @@ const updateOrder = async (req, res) => {
             const expenseData = {
                 id: crypto.randomUUID(), 
                 orderId: id,
-                date: orderUpdateData.date,
                 description: `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
                 amount: orderUpdateData.totalValue,
-                obraId: safeObraId, // Filtro aplicado aqui
+                obraId: safeObraId, 
                 category: 'Manutenção / Compras',
-                createdAt: new Date(),
+                createdAt: orderUpdateData.date, // Data transferida corretamente
                 createdBy: orderUpdateData.editedBy || orderUpdateData.createdBy || null,
             };
             await connection.query('INSERT INTO expenses SET ?', [expenseData]);
@@ -249,10 +243,11 @@ const updateOrder = async (req, res) => {
         } else if (originalIsClosed && !newIsClosed) {
             await connection.execute('DELETE FROM expenses WHERE orderId = ?', [id]);
         } else if (originalIsClosed && newIsClosed) {
-            await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ? WHERE orderId = ?', [
+            await connection.execute('UPDATE expenses SET amount = ?, description = ?, obraId = ?, createdAt = ? WHERE orderId = ?', [
                 orderUpdateData.totalValue,
                 `Ordem C/S #${String(originalOrder.orderNumber).padStart(6, '0')} - NF: ${data.invoiceNumber || 'S/N'} (${data.supplier})`,
-                safeObraId, // Filtro aplicado aqui
+                safeObraId, 
+                orderUpdateData.date,
                 id,
             ]);
         }
@@ -269,7 +264,7 @@ const updateOrder = async (req, res) => {
     }
 
     // -----------------------------------------------------------------------------------
-    // INTEGRAÇÃO WHATSAPP: Alerta de Atualização (Background)
+    // INTEGRAÇÃO WHATSAPP EM BACKGROUND (Atualização)
     // -----------------------------------------------------------------------------------
     if (data.notifyWhatsapp && data.supplierId && originalOrder) {
         try {
@@ -338,7 +333,7 @@ const cancelOrder = async (req, res) => {
     }
 
     // -----------------------------------------------------------------------------------
-    // INTEGRAÇÃO WHATSAPP: Alerta de Cancelamento (Background)
+    // INTEGRAÇÃO WHATSAPP EM BACKGROUND (Cancelamento)
     // -----------------------------------------------------------------------------------
     if (originalOrder && originalOrder.supplierId) {
         try {
