@@ -9,14 +9,11 @@ const HORA_EXECUCAO = 8;    // Ex: 8 para 08:00, 9 para 09:00
 const MINUTO_EXECUCAO = 0;  // Ex: 0 para exatos 08:00, 30 para 08:30
 
 // ===================================================================================
-// REGRAS DE NEGÓCIO DE VEÍCULOS (Replicado do Frontend)
+// REGRAS DE NEGÓCIO DE VEÍCULOS
+// ✅ Fonte única de verdade: importado de vehicleRules.js
+//    Nunca edite os grupos aqui. Altere apenas em src/utils/vehicleRules.js
 // ===================================================================================
-const vehicleGroups = {
-    'Veículos Leves': ['Automóvel', 'Camionete', 'Utilitários', 'Moto'],
-    'Caminhões': ['Bitruck', 'Caminhão Pipa', 'Caminhão Tanque', 'Caminhão Carroceria', 'Cavalo', 'Caçamba Bitruck', 'Caçamba Toco', 'Caçamba Traçado', 'Caçamba Truckado', 'Caminhão', 'Caçamba'],
-    'Caminhões de Trecho': ['Caminhão Prancha', 'Semirreboques'], 
-    'Máquinas Pesadas': ['Motoniveladora', 'Pá Carregadeira', 'Retroescavadeira', 'Rolo', 'Trator', 'Escavadeira', 'Escavadeira + Rompedor', 'Fresadora', 'Trator Esteira']
-};
+const { vehicleGroups } = require('../utils/vehicleRules');
 
 const getVehicleGroup = (tipoStr) => {
     if (!tipoStr) return 'Outros';
