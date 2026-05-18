@@ -89,23 +89,22 @@ const upsertDailyLog = async (req, res) => {
 
         if (targetId) {
             const query = `
-                UPDATE daily_work_logs
-                SET vehicleId = ?, employeeId = ?, date = ?,
-                    morningStart = ?, morningEnd = ?, afternoonStart = ?, afternoonEnd = ?,
-                    totalHours = ?, observation = ?, justificativaTipo = ?
+                UPDATE daily_work_logs 
+                SET vehicleId = ?, employeeId = ?, date = ?, 
+                    morningStart = ?, morningEnd = ?, afternoonStart = ?, afternoonEnd = ?, 
+                    totalHours = ?, observation = ?
                 WHERE id = ?
             `;
             await db.execute(query, [
-                data.vehicleId,
-                data.employeeId || null,
-                data.date,
-                data.morningStart || null,
-                data.morningEnd || null,
-                data.afternoonStart || null,
-                data.afternoonEnd || null,
-                data.totalHours || 0,
+                data.vehicleId, 
+                data.employeeId || null, 
+                data.date, 
+                data.morningStart || null, 
+                data.morningEnd || null, 
+                data.afternoonStart || null, 
+                data.afternoonEnd || null, 
+                data.totalHours || 0, 
                 data.observation || null,
-                data.justificativaTipo || null,
                 targetId
             ]);
             
@@ -113,20 +112,20 @@ const upsertDailyLog = async (req, res) => {
             res.json({ message: 'Registro atualizado.', id: targetId });
         } else {
             const newId = uuidv4();
-            const {
-                obraId, vehicleId, employeeId, date,
-                morningStart, morningEnd, afternoonStart, afternoonEnd, totalHours, observation, justificativaTipo
+            const { 
+                obraId, vehicleId, employeeId, date, 
+                morningStart, morningEnd, afternoonStart, afternoonEnd, totalHours, observation 
             } = data;
 
             const query = `
-                INSERT INTO daily_work_logs
-                (id, obraId, vehicleId, employeeId, date, morningStart, morningEnd, afternoonStart, afternoonEnd, totalHours, observation, justificativaTipo)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO daily_work_logs 
+                (id, obraId, vehicleId, employeeId, date, morningStart, morningEnd, afternoonStart, afternoonEnd, totalHours, observation)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
             await db.execute(query, [
-                newId, obraId, vehicleId, employeeId || null, date,
-                morningStart || null, morningEnd || null, afternoonStart || null, afternoonEnd || null,
-                totalHours || 0, observation || null, justificativaTipo || null
+                newId, obraId, vehicleId, employeeId || null, date, 
+                morningStart || null, morningEnd || null, afternoonStart || null, afternoonEnd || null, 
+                totalHours || 0, observation || null
             ]);
             
             if (req.io) req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
