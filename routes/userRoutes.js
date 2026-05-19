@@ -3,10 +3,36 @@ const router = express.Router();
 const db = require('../database');
 const authMiddleware = require('../middlewares/authMiddleware');
 
-/**
- * Rota GET /api/users/profile
- * Rota protegida para obter os dados do perfil do utilizador.
- */
+// Listar todos os usuários (necessário para CommunicationTab e UserManagementTab)
+router.get('/', authMiddleware, async (req, res) => {
+    try {
+        const [rows] = await db.query(`
+            SELECT u.id, u.name, u.email, u.user_type, u.role, u.status,
+                   u.canAccessRefueling AS podeAcessarAbastecimento,
+                   u.group_id, g.name AS group_name,
+                   u.bloqueado_abastecimento, u.tentativas_falhas_abastecimento
+            FROM users u
+            LEFT JOIN access_groups g ON u.group_id = g.id
+            ORDER BY u.name ASC
+        `);
+        res.json(rows.map(u => ({ ...u, podeAcessarAbastecimento: !!u.podeAcessarAbastecimento })));
+    } catch (error) {
+        // Se access_groups ainda não existe, retorna sem o JOIN
+        try {
+            const [rows] = await db.query(
+                `SELECT id, name, email, user_type, role, status,
+                        canAccessRefueling AS podeAcessarAbastecimento
+                 FROM users ORDER BY name ASC`
+            );
+            res.json(rows.map(u => ({ ...u, podeAcessarAbastecimento: !!u.podeAcessarAbastecimento })));
+        } catch (err) {
+            console.error('Erro ao listar usuários:', err);
+            res.status(500).json({ error: 'Erro ao listar usuários.' });
+        }
+    }
+});
+
+// Rota GET /api/users/profile
 router.get('/profile', authMiddleware, async (req, res) => {
     // O token JWT contém `id` (o ID do utilizador no banco de dados).
     const userId = req.user.id; 
