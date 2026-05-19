@@ -264,7 +264,439 @@ router.put('/users/:id/unlock', adminOnly, async (req, res) => {
     }
 });
 
-// Rota temporária para teste de disparo
+// ─── GRUPOS DE ACESSO ─────────────────────────────────────────────────────────
+
+router.get('/groups', adminOnly, async (req, res) => {
+    try {
+        const [groups] = await db.query('SELECT * FROM access_groups ORDER BY name ASC');
+        const [counts] = await db.query(
+            'SELECT group_id, COUNT(*) AS userCount FROM users WHERE group_id IS NOT NULL GROUP BY group_id'
+        );
+        const countMap = Object.fromEntries(counts.map(r => [r.group_id, Number(r.userCount)]));
+        res.json(groups.map(g => ({
+            ...g,
+            modules: typeof g.modules === 'string' ? JSON.parse(g.modules || '[]') : (g.modules || []),
+            userCount: countMap[g.id] || 0,
+        })));
+    } catch (error) {
+        console.error('Erro ao listar grupos:', error);
+        res.status(500).json({ error: 'Erro ao listar grupos.' });
+    }
+});
+
+router.post('/groups', adminOnly, async (req, res) => {
+    const { name, description, modules } = req.body;
+    if (!name) return res.status(400).json({ error: 'Nome é obrigatório.' });
+    try {
+        const id = uuidv4();
+        await db.query(
+            'INSERT INTO access_groups (id, name, description, modules) VALUES (?, ?, ?, ?)',
+            [id, name, description || null, JSON.stringify(modules || [])]
+        );
+        res.status(201).json({ id, name, description: description || null, modules: modules || [], userCount: 0 });
+    } catch (error) {
+        console.error('Erro ao criar grupo:', error);
+        res.status(500).json({ error: 'Erro ao criar grupo.' });
+    }
+});
+
+router.patch('/groups/:id', adminOnly, async (req, res) => {
+    const { id } = req.params;
+    const { name, description, modules } = req.body;
+    try {
+        const sets = [];
+        const params = [];
+        if (name !== undefined)        { sets.push('name = ?');        params.push(name); }
+        if (description !== undefined) { sets.push('description = ?'); params.push(description || null); }
+        if (modules !== undefined)     { sets.push('modules = ?');     params.push(JSON.stringify(modules)); }
+        if (sets.length === 0) return res.json({ message: 'Nada para atualizar.' });
+        params.push(id);
+        await db.query(`UPDATE access_groups SET ${sets.join(', ')} WHERE id = ?`, params);
+        res.json({ message: 'Grupo atualizado com sucesso.' });
+    } catch (error) {
+        console.error('Erro ao atualizar grupo:', error);
+        res.status(500).json({ error: 'Erro ao atualizar grupo.' });
+    }
+});
+
+router.delete('/groups/:id', adminOnly, async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query('UPDATE users SET group_id = NULL WHERE group_id = ?', [id]);
+        await db.query('DELETE FROM access_groups WHERE id = ?', [id]);
+        res.json({ message: 'Grupo removido.' });
+    } catch (error) {
+        console.error('Erro ao remover grupo:', error);
+        res.status(500).json({ error: 'Erro ao remover grupo.' });
+    }
+});
+
+// ─── CONFIGURAÇÃO DE E-MAIL ───────────────────────────────────────────────────
+
+router.get('/email-config', adminOnly, async (req, res) => {
+    try {
+        const config = await getSetting('email_config', {
+            host: '', port: 587, user: '', password: '',
+            fromAddress: '', fromName: 'MAK Frotas', tls: true,
+        });
+        res.json(config);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao buscar configuração de e-mail.' });
+    }
+});
+
+router.put('/email-config', adminOnly, async (req, res) => {
+    try {
+        await saveSetting('email_config', req.body);
+        res.json({ message: 'Configuração de e-mail salva com sucesso.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao salvar configuração de e-mail.' });
+    }
+});
+
+router.post('/email-config/test', adminOnly, async (req, res) => {
+    const { to } = req.body;
+    if (!to) return res.status(400).json({ error: 'Destinatário é obrigatório.' });
+    try {
+        const config = await getSetting('email_config', {});
+        if (!config.host || !config.user) {
+            return res.status(400).json({ error: 'Configure o SMTP antes de enviar o teste.' });
+        }
+        const nodemailer = require('nodemailer');
+        const port = Number(config.port) || 587;
+        const transporter = nodemailer.createTransport({
+            host: config.host,
+            port,
+            secure: port === 465, // SSL direto só na 465; 587 usa STARTTLS (secure: false)
+            auth: { user: config.user, pass: config.password },
+            tls: { rejectUnauthorized: false },
+            connectionTimeout: 10000,
+            greetingTimeout: 10000,
+            socketTimeout: 15000,
+        });
+        await transporter.sendMail({
+            from: `"${config.fromName || 'MAK Frotas'}" <${config.fromAddress || config.user}>`,
+            to,
+            subject: 'Teste de e-mail — MAK Frotas',
+            text: 'Este é um e-mail de teste enviado pelo sistema MAK Frotas. Se recebeu, a configuração está correta.',
+        });
+        res.json({ message: 'E-mail de teste enviado com sucesso.' });
+    } catch (error) {
+        console.error('Erro ao enviar e-mail de teste:', error);
+        res.status(500).json({ error: 'Erro ao enviar e-mail: ' + error.message });
+    }
+});
+
+// ─── ROTEAMENTO DE NOTIFICAÇÕES ───────────────────────────────────────────────
+
+router.get('/notification-routing', adminOnly, async (req, res) => {
+    try {
+        const routing = await getSetting('notification_routing', {});
+        res.json(routing);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao buscar roteamento de notificações.' });
+    }
+});
+
+router.put('/notification-routing', adminOnly, async (req, res) => {
+    try {
+        await saveSetting('notification_routing', req.body);
+        res.json({ message: 'Roteamento de notificações salvo com sucesso.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao salvar roteamento de notificações.' });
+    }
+});
+
+// ─── TEMPLATES DE MENSAGEM ────────────────────────────────────────────────────
+
+router.get('/message-templates', adminOnly, async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT * FROM message_templates ORDER BY created_at DESC');
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao listar templates.' });
+    }
+});
+
+router.post('/message-templates', adminOnly, async (req, res) => {
+    const { name, channel, content } = req.body;
+    if (!name || !content) return res.status(400).json({ error: 'Nome e conteúdo são obrigatórios.' });
+    try {
+        const [result] = await db.query(
+            'INSERT INTO message_templates (name, channel, content) VALUES (?, ?, ?)',
+            [name, channel || 'whatsapp', content]
+        );
+        res.status(201).json({ id: result.insertId, name, channel: channel || 'whatsapp', content });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao criar template.' });
+    }
+});
+
+router.put('/message-templates/:id', adminOnly, async (req, res) => {
+    const { id } = req.params;
+    const { name, channel, content } = req.body;
+    try {
+        await db.query(
+            'UPDATE message_templates SET name = ?, channel = ?, content = ? WHERE id = ?',
+            [name, channel, content, id]
+        );
+        res.json({ message: 'Template atualizado.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao atualizar template.' });
+    }
+});
+
+router.delete('/message-templates/:id', adminOnly, async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query('DELETE FROM message_templates WHERE id = ?', [id]);
+        res.json({ message: 'Template removido.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao remover template.' });
+    }
+});
+
+// ─── CONFIGURAÇÃO DE ALERTAS ──────────────────────────────────────────────────
+
+router.get('/alert-config', adminOnly, async (req, res) => {
+    try {
+        const config = await getSetting('alert_config', {});
+        res.json(config);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao buscar configuração de alertas.' });
+    }
+});
+
+router.put('/alert-config', adminOnly, async (req, res) => {
+    try {
+        await saveSetting('alert_config', req.body);
+        res.json({ message: 'Configuração de alertas salva com sucesso.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao salvar configuração de alertas.' });
+    }
+});
+
+// ─── RELATÓRIOS PROGRAMADOS ───────────────────────────────────────────────────
+
+router.get('/scheduled-reports', adminOnly, async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT * FROM admin_scheduled_reports ORDER BY created_at DESC');
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao listar relatórios programados.' });
+    }
+});
+
+router.post('/scheduled-reports', adminOnly, async (req, res) => {
+    const { name, module, frequency, time } = req.body;
+    if (!name) return res.status(400).json({ error: 'Nome é obrigatório.' });
+    try {
+        const [result] = await db.query(
+            'INSERT INTO admin_scheduled_reports (name, module, frequency, time) VALUES (?, ?, ?, ?)',
+            [name, module || 'Abastecimento', frequency || 'weekly', time || '08:00']
+        );
+        res.status(201).json({ id: result.insertId, name, module, frequency, time });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao criar relatório programado.' });
+    }
+});
+
+router.put('/scheduled-reports/:id', adminOnly, async (req, res) => {
+    const { id } = req.params;
+    const { name, module, frequency, time } = req.body;
+    try {
+        await db.query(
+            'UPDATE admin_scheduled_reports SET name = ?, module = ?, frequency = ?, time = ? WHERE id = ?',
+            [name, module, frequency, time, id]
+        );
+        res.json({ message: 'Relatório atualizado.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao atualizar relatório.' });
+    }
+});
+
+router.delete('/scheduled-reports/:id', adminOnly, async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query('DELETE FROM admin_scheduled_reports WHERE id = ?', [id]);
+        res.json({ message: 'Relatório removido.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao remover relatório.' });
+    }
+});
+
+// ─── WORKFLOWS DE APROVAÇÃO ───────────────────────────────────────────────────
+
+router.get('/approval-workflows', adminOnly, async (req, res) => {
+    try {
+        const workflows = await getSetting('approval_workflows', []);
+        res.json(workflows);
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao buscar workflows de aprovação.' });
+    }
+});
+
+router.put('/approval-workflows', adminOnly, async (req, res) => {
+    try {
+        await saveSetting('approval_workflows', req.body);
+        res.json({ message: 'Workflows de aprovação salvos com sucesso.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao salvar workflows de aprovação.' });
+    }
+});
+
+// ─── FERIADOS ─────────────────────────────────────────────────────────────────
+
+router.get('/holidays', adminOnly, async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT * FROM admin_holidays ORDER BY date ASC');
+        res.json(rows.map(h => ({
+            ...h,
+            date: h.date instanceof Date ? h.date.toISOString().slice(0, 10) : h.date,
+        })));
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao listar feriados.' });
+    }
+});
+
+router.post('/holidays', adminOnly, async (req, res) => {
+    const { name, date } = req.body;
+    if (!name || !date) return res.status(400).json({ error: 'Nome e data são obrigatórios.' });
+    try {
+        const [result] = await db.query(
+            'INSERT INTO admin_holidays (name, date) VALUES (?, ?)',
+            [name, date]
+        );
+        res.status(201).json({ id: result.insertId, name, date });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao adicionar feriado.' });
+    }
+});
+
+router.delete('/holidays/:id', adminOnly, async (req, res) => {
+    const { id } = req.params;
+    try {
+        await db.query('DELETE FROM admin_holidays WHERE id = ?', [id]);
+        res.json({ message: 'Feriado removido.' });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao remover feriado.' });
+    }
+});
+
+// ─── BROADCAST ────────────────────────────────────────────────────────────────
+
+router.post('/broadcast', adminOnly, async (req, res) => {
+    const { message, target, channels } = req.body;
+    if (!message) return res.status(400).json({ error: 'Mensagem é obrigatória.' });
+    if (!channels || channels.length === 0) return res.status(400).json({ error: 'Selecione ao menos um canal.' });
+    try {
+        if (channels.includes('inapp') && global.io) {
+            global.io.emit('server:broadcast', {
+                message,
+                target: target || 'all',
+                sentAt: new Date().toISOString(),
+                sentBy: req.user.name || req.user.email,
+            });
+        }
+        // Canais whatsapp e email requerem integração adicional (implementar conforme necessidade)
+        res.json({ message: 'Broadcast enviado com sucesso.' });
+    } catch (error) {
+        console.error('Erro ao enviar broadcast:', error);
+        res.status(500).json({ error: 'Erro ao enviar broadcast.' });
+    }
+});
+
+// ─── STATUS DO SISTEMA ────────────────────────────────────────────────────────
+
+router.get('/system/health', adminOnly, async (req, res) => {
+    const health = { api: 'ok', whatsapp: 'unknown', socket: 'unknown' };
+    const usage = {};
+
+    try {
+        await db.query('SELECT 1');
+        health.api = 'ok';
+    } catch {
+        health.api = 'error';
+    }
+
+    try {
+        const status = await whatsappService.getStatus?.();
+        health.whatsapp = status?.connected ? 'ok' : 'error';
+    } catch {
+        health.whatsapp = 'unknown';
+    }
+
+    health.socket = global.io ? 'ok' : 'error';
+
+    try {
+        const [activeUsers] = await db.query("SELECT COUNT(*) AS count FROM users WHERE status = 'ativo'");
+        usage.activeUsers = activeUsers[0].count;
+        usage.uptime = `${Math.floor(process.uptime() / 3600)}h ${Math.floor((process.uptime() % 3600) / 60)}m`;
+        usage.requestsPerHour = '-';
+        usage.todaySessions = '-';
+    } catch (_) {}
+
+    res.json({ ...health, usage });
+});
+
+router.get('/usage-stats', adminOnly, async (req, res) => {
+    try {
+        const [activeUsers] = await db.query("SELECT COUNT(*) AS count FROM users WHERE status = 'ativo'");
+        res.json({
+            activeUsers: activeUsers[0].count,
+            todaySessions: '-',
+            requestsPerHour: '-',
+            uptime: `${Math.floor(process.uptime() / 3600)}h`,
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Erro ao buscar estatísticas.' });
+    }
+});
+
+// ─── LOG DE AUDITORIA (stub — implementar conforme necessidade) ───────────────
+
+router.get('/audit-log', adminOnly, async (req, res) => {
+    res.json([]);
+});
+
+// ─── SESSÕES ATIVAS (stub) ────────────────────────────────────────────────────
+
+router.get('/sessions', adminOnly, async (req, res) => {
+    res.json([]);
+});
+
+router.delete('/sessions/:id', adminOnly, async (req, res) => {
+    res.json({ message: 'Sessão encerrada.' });
+});
+
+// ─── BACKUP & EXPORTAÇÃO ──────────────────────────────────────────────────────
+
+const EXPORT_TABLES = {
+    vehicles:   'SELECT * FROM vehicles',
+    obras:      'SELECT * FROM obras',
+    employees:  'SELECT * FROM employees',
+    refuelings: 'SELECT * FROM refuelings',
+    revisions:  'SELECT * FROM revisions',
+    fines:      'SELECT * FROM fines',
+    tires:      'SELECT * FROM tires',
+    orders:     'SELECT * FROM orders',
+};
+
+router.get('/export/:module', adminOnly, async (req, res) => {
+    const { module } = req.params;
+    const query = EXPORT_TABLES[module];
+    if (!query) return res.status(404).json({ error: 'Módulo de exportação não encontrado.' });
+    try {
+        const [rows] = await db.query(query);
+        res.json(rows);
+    } catch (error) {
+        console.error('Erro ao exportar dados:', error);
+        res.status(500).json({ error: 'Erro ao exportar dados: ' + error.message });
+    }
+});
+
+// ─── TESTE WHATSAPP ───────────────────────────────────────────────────────────
+
 router.post('/teste-whatsapp', async (req, res) => {
     try {
         const numeroTeste = req.body.numero;
