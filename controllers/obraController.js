@@ -430,8 +430,8 @@ const deleteObraHistoryEntry = async (req, res) => {
         const entry = rows[0];
         const isActive = !entry.dataSaida;
 
-        // Se era alocação ativa, libera o veículo e o funcionário
         if (isActive) {
+            // Libera veículo e funcionário
             await connection.execute(
                 'UPDATE vehicles SET obraAtualId = NULL, status = ?, alocadoEm = NULL WHERE id = ?',
                 ['Disponível', entry.veiculoId]
@@ -439,10 +439,16 @@ const deleteObraHistoryEntry = async (req, res) => {
             if (entry.employeeId) {
                 await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [entry.employeeId]);
             }
-            // Remove o registro aberto em vehicle_history
+            // Remove registro aberto no vehicle_history
             await connection.execute(
                 'DELETE FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
                 [entry.veiculoId, 'obra']
+            );
+        } else if (entry.dataEntrada) {
+            // Remove registro encerrado no vehicle_history pela data de início
+            await connection.execute(
+                'DELETE FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND startDate = ?',
+                [entry.veiculoId, 'obra', entry.dataEntrada]
             );
         }
 
