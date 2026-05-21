@@ -412,6 +412,61 @@ const updateObraHistoryEntry = async (req, res) => {
     }
 };
 
+// --- DELETE HISTORICO (Remove alocação incorreta) ---
+const deleteObraHistoryEntry = async (req, res) => {
+    const { historyId } = req.params;
+
+    let connection;
+    try {
+        connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        const [rows] = await connection.execute('SELECT * FROM obras_historico_veiculos WHERE id = ?', [historyId]);
+        if (rows.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ error: 'Registro não encontrado.' });
+        }
+
+        const entry = rows[0];
+        const isActive = !entry.dataSaida;
+
+        if (isActive) {
+            // Libera veículo e funcionário
+            await connection.execute(
+                'UPDATE vehicles SET obraAtualId = NULL, status = ?, alocadoEm = NULL WHERE id = ?',
+                ['Disponível', entry.veiculoId]
+            );
+            if (entry.employeeId) {
+                await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [entry.employeeId]);
+            }
+            // Remove registro aberto no vehicle_history
+            await connection.execute(
+                'DELETE FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
+                [entry.veiculoId, 'obra']
+            );
+        } else if (entry.dataEntrada) {
+            // Remove registro encerrado no vehicle_history pela data de início
+            await connection.execute(
+                'DELETE FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND startDate = ?',
+                [entry.veiculoId, 'obra', entry.dataEntrada]
+            );
+        }
+
+        await connection.execute('DELETE FROM obras_historico_veiculos WHERE id = ?', [historyId]);
+
+        await connection.commit();
+        req.io.emit('server:sync', { targets: ['obras', 'vehicles'] });
+
+        res.json({ message: 'Registro de alocação excluído com sucesso.' });
+    } catch (error) {
+        if (connection) await connection.rollback();
+        console.error('Erro ao excluir histórico:', error);
+        res.status(500).json({ error: 'Erro ao excluir registro.', details: error.message });
+    } finally {
+        if (connection) connection.release();
+    }
+};
+
 module.exports = {
     getAllObras,
     getObraById,
@@ -419,5 +474,6 @@ module.exports = {
     updateObra,
     deleteObra,
     finishObra,
-    updateObraHistoryEntry
+    updateObraHistoryEntry,
+    deleteObraHistoryEntry
 };
