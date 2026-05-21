@@ -1,10 +1,12 @@
 {
-  "start": "node server.js",
   "name": "backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
+    "start": "node server.js",
+    "start:prod": "cross-env NODE_ENV=production node server.js",
+    "test:db": "node -e \"require('./database').query('SELECT DATABASE() AS db, NOW() AS now').then(([r]) => { console.log('Conectado em:', r[0]); process.exit(0); }).catch(e => { console.error('Falha:', e.message); process.exit(1); })\"",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

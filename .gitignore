@@ -1,6 +1,5 @@
 # Dependências
 node_modules/
-package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
@@ -8,6 +7,9 @@ pnpm-lock.yaml
 .env
 .env.local
 .env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
 
 # Logs
 logs/
@@ -18,8 +20,9 @@ yarn-error.log*
 lerna-debug.log*
 
 # Editor e IDE
-.vscode/
+.vscode/*
 !.vscode/extensions.json
+!.vscode/settings.json
 .idea/
 .DS_Store
 *.suo
