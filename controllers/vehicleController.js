@@ -37,14 +37,14 @@ const parseVehicleJsonFields = (vehicle) => {
 
 const getAllVehicles = async (req, res) => {
     try {
-        // CORREÇÃO CRÍTICA: Adicionada subquery para contar checklists
-        // Isso permite que o frontend saiba se deve pintar o botão de roxo
+        // LEFT JOIN + subquery agrupada: O(V + C) em vez de O(V × C)
         const query = `
-            SELECT v.*, 
-            (SELECT COUNT(*) FROM checklists c WHERE c.vehicle_id = v.id) as checklistCount 
+            SELECT v.*, COALESCE(cc.cnt, 0) AS checklistCount
             FROM vehicles v
+            LEFT JOIN (
+                SELECT vehicle_id, COUNT(*) AS cnt FROM checklists GROUP BY vehicle_id
+            ) cc ON cc.vehicle_id = v.id
         `;
-        
         const [rows] = await db.execute(query);
         const vehicles = rows.map(parseVehicleJsonFields);
         res.json(vehicles);
@@ -103,23 +103,32 @@ const createVehicle = async (req, res) => {
     }
 };
 
+// Whitelist de colunas permitidas em UPDATE — evita SQL injection por nome de campo
+const ALLOWED_VEHICLE_FIELDS = new Set([
+    'placa', 'registroInterno', 'tipo', 'marca', 'modelo', 'anoFabricacao', 'anoCombustivel',
+    'status', 'localizacaoAtual', 'obraAtualId', 'fotoURL', 'cor', 'renavam', 'chassi',
+    'proprietario', 'seguradora', 'apolice', 'vencimentoSeguro', 'vencimentoCRLV',
+    'vencimentoLicenca', 'vencimentoExtintor', 'vencimentoTacografo',
+    'fuelLevels', 'alocadoEm', 'maintenanceLocation', 'operationalAssignment',
+    'odometro', 'horimetro', 'hodometro', 'capacidadeTanque', 'tipoCombustivel',
+    'observacoes', 'proximaRevisaoOdometro', 'proximaRevisaoHorimetro', 'proximaRevisaoData',
+    'tamanho', 'capacidadeCarga', 'numeroPneus', 'numeroEixos',
+]);
+
 const updateVehicle = async (req, res) => {
     const { id } = req.params;
     const data = req.body;
-    
+
     if (data.fuelLevels) data.fuelLevels = JSON.stringify(data.fuelLevels);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.maintenanceLocation) data.maintenanceLocation = JSON.stringify(data.maintenanceLocation);
     if (data.operationalAssignment) data.operationalAssignment = JSON.stringify(data.operationalAssignment);
-    
-    delete data.history;
-    delete data.checklistCount;
 
-    const fields = Object.keys(data).filter(key => key !== 'id');
+    const fields = Object.keys(data).filter(key => key !== 'id' && ALLOWED_VEHICLE_FIELDS.has(key));
     const values = fields.map(field => data[field]);
-    const setClause = fields.map(field => `${field} = ?`).join(', ');
+    const setClause = fields.map(field => `\`${field}\` = ?`).join(', ');
     const query = `UPDATE vehicles SET ${setClause} WHERE id = ?`;
-    
+
     if (fields.length === 0) return res.status(400).json({ error: 'Nenhum dado para atualizar.' });
 
     try {
