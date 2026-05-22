@@ -4,7 +4,36 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const db = require('./database');
-const http = require('http'); 
+const http = require('http');
+
+// ====================================================================
+// MIGRAÇÃO AUTOMÁTICA DE SCHEMA (adiciona colunas se não existirem)
+// ====================================================================
+(async () => {
+    const migrations = [
+        `ALTER TABLE users ADD COLUMN IF NOT EXISTS tentativas_falhas_abastecimento INT DEFAULT 0`,
+        `ALTER TABLE users ADD COLUMN IF NOT EXISTS bloqueado_abastecimento TINYINT(1) DEFAULT 0`,
+    ];
+    for (const sql of migrations) {
+        try {
+            await db.query(sql);
+        } catch (e) {
+            // MySQL < 8.0.3 não suporta ADD COLUMN IF NOT EXISTS — usa fallback
+            if (e.code === 'ER_PARSE_ERROR') {
+                const col = sql.includes('tentativas') ? 'tentativas_falhas_abastecimento' : 'bloqueado_abastecimento';
+                const type = col === 'tentativas_falhas_abastecimento' ? 'INT DEFAULT 0' : 'TINYINT(1) DEFAULT 0';
+                try {
+                    await db.query(`ALTER TABLE users ADD COLUMN ${col} ${type}`);
+                } catch (e2) {
+                    if (e2.code !== 'ER_DUP_FIELDNAME') console.warn(`[migration] ${col}:`, e2.message);
+                }
+            } else if (e.code !== 'ER_DUP_FIELDNAME') {
+                console.warn('[migration]', e.message);
+            }
+        }
+    }
+    console.log('✅ Migração de schema concluída.');
+})();
 const { Server } = require("socket.io"); 
 const multer = require('multer');
 
