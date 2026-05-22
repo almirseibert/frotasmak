@@ -111,9 +111,9 @@ const corsOptions = {
 const app = express();
 
 // ⚠️ IMPORTANTE: Aplicar CORS ANTES de qualquer outra rota!
+// O middleware genérico abaixo já captura e finaliza as requisições de preflight (OPTIONS)
+// sem precisarmos definir app.options('*', ...) o que estava quebrando o path-to-regexp atualizado.
 app.use(cors(corsOptions));
-// 🚨 CORREÇÃO: Garante explicitamente que TODAS as requisições OPTIONS passem pelo CORS
-app.options('*', cors(corsOptions)); 
 
 app.use(express.json());
 
