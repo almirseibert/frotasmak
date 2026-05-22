@@ -10,28 +10,37 @@ const http = require('http');
 // MIGRAÇÃO AUTOMÁTICA DE SCHEMA (adiciona colunas se não existirem)
 // ====================================================================
 (async () => {
+    // { table, column, definition }
     const migrations = [
-        `ALTER TABLE users ADD COLUMN IF NOT EXISTS tentativas_falhas_abastecimento INT DEFAULT 0`,
-        `ALTER TABLE users ADD COLUMN IF NOT EXISTS bloqueado_abastecimento TINYINT(1) DEFAULT 0`,
+        { table: 'users',                  column: 'tentativas_falhas_abastecimento', def: 'INT DEFAULT 0' },
+        { table: 'users',                  column: 'bloqueado_abastecimento',         def: 'TINYINT(1) DEFAULT 0' },
+        { table: 'comboio_transactions',   column: 'authNumber',                      def: 'INT UNSIGNED DEFAULT NULL' },
     ];
-    for (const sql of migrations) {
+
+    for (const { table, column, def } of migrations) {
         try {
-            await db.query(sql);
+            await db.query(`ALTER TABLE \`${table}\` ADD COLUMN IF NOT EXISTS \`${column}\` ${def}`);
         } catch (e) {
-            // MySQL < 8.0.3 não suporta ADD COLUMN IF NOT EXISTS — usa fallback
             if (e.code === 'ER_PARSE_ERROR') {
-                const col = sql.includes('tentativas') ? 'tentativas_falhas_abastecimento' : 'bloqueado_abastecimento';
-                const type = col === 'tentativas_falhas_abastecimento' ? 'INT DEFAULT 0' : 'TINYINT(1) DEFAULT 0';
+                // MySQL < 8.0.3: fallback sem IF NOT EXISTS
                 try {
-                    await db.query(`ALTER TABLE users ADD COLUMN ${col} ${type}`);
+                    await db.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${def}`);
                 } catch (e2) {
-                    if (e2.code !== 'ER_DUP_FIELDNAME') console.warn(`[migration] ${col}:`, e2.message);
+                    if (e2.code !== 'ER_DUP_FIELDNAME') console.warn(`[migration] ${table}.${column}:`, e2.message);
                 }
             } else if (e.code !== 'ER_DUP_FIELDNAME') {
-                console.warn('[migration]', e.message);
+                console.warn(`[migration] ${table}.${column}:`, e.message);
             }
         }
     }
+
+    // Índice de performance para authNumber em comboio_transactions
+    try {
+        await db.query('ALTER TABLE `comboio_transactions` ADD INDEX `idx_authNumber` (`authNumber`)');
+    } catch (e) {
+        if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_authNumber:', e.message);
+    }
+
     console.log('✅ Migração de schema concluída.');
 })();
 const { Server } = require("socket.io"); 
