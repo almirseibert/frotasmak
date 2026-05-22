@@ -39,8 +39,8 @@ const validateMeterReading = (current, previous, type = 'km') => {
         return `${type === 'km' ? 'Odômetro' : 'Horímetro'} menor que o anterior (${prev}).`;
     }
 
-    // Regra 2: Salto excessivo (Segurança contra digitação errada)
-    const limit = type === 'km' ? 2000 : 100; // 2000km ou 100h
+    // Regra 2: Salto excessivo — alinhado com vehicleRules.js (1000 Km / 50 Hr)
+    const limit = type === 'km' ? 1000 : 50;
     if ((curr - prev) > limit) {
         return `Salto excessivo de ${type === 'km' ? 'Odômetro' : 'Horímetro'} (> ${limit}). Verifique a digitação.`;
     }

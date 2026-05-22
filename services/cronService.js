@@ -58,7 +58,48 @@ const formatMsgInterno = (msg) => {
     return `*Sistema de Frotas MAK*\n\n${msg}`;
 };
 
-let lastDailyRunDate = null;
+// ===================================================================================
+// ESTADO PERSISTENTE DO CRON
+// Persiste no banco para sobreviver restarts e evitar duplicação em cluster mode.
+// ===================================================================================
+const CRON_LOCK_KEY = 'cron_lastDailyRunDate';
+
+let _lastDailyRunDate = null; // cache em memória (fallback se DB falhar)
+
+const initCronState = async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS system_settings (
+                \`key\` VARCHAR(100) NOT NULL PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        const [rows] = await db.query('SELECT value FROM system_settings WHERE `key` = ?', [CRON_LOCK_KEY]);
+        if (rows.length > 0 && rows[0].value) {
+            _lastDailyRunDate = rows[0].value;
+            console.log(`✅ [CRON] Estado restaurado do banco: lastDailyRunDate = ${_lastDailyRunDate}`);
+        }
+    } catch (e) {
+        console.warn('[CRON] Falha ao restaurar estado do banco (usando in-memory):', e.message);
+    }
+};
+
+const getLastDailyRunDate = () => _lastDailyRunDate;
+
+const setLastDailyRunDate = async (dateStr) => {
+    _lastDailyRunDate = dateStr;
+    try {
+        await db.query(
+            'INSERT INTO system_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = ?',
+            [CRON_LOCK_KEY, dateStr, dateStr]
+        );
+    } catch (e) {
+        console.warn('[CRON] Falha ao persistir lastDailyRunDate no banco:', e.message);
+    }
+};
+
+initCronState();
 
 const horaTeste = getGmt3Date();
 console.log(`✅ [CRON] Inicializado. Horário atual calculado (GMT-3): ${String(horaTeste.getUTCHours()).padStart(2, '0')}:${String(horaTeste.getUTCMinutes()).padStart(2, '0')}`);
@@ -79,9 +120,9 @@ cron.schedule('* * * * *', async () => {
         // ====================================================================
         // 1. ROTINA DIÁRIA (RH, WhatsApp, Manutenção, Férias)
         // ====================================================================
-        if (isTimeForDailyRun && lastDailyRunDate !== todayStr) {
+        if (isTimeForDailyRun && getLastDailyRunDate() !== todayStr) {
             console.log(`⏳ [CRON] Executando rotina diária principal (Dia ${todayStr})...`);
-            lastDailyRunDate = todayStr; 
+            await setLastDailyRunDate(todayStr);
             
             try {
                 const daqui30DiasStr = getTzDateStr(30);
@@ -101,8 +142,8 @@ cron.schedule('* * * * *', async () => {
                                 try {
                                     await db.query(`
                                         INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
-                                        VALUES (?, ?, ?, NOW(), ?, NULL, ?, 'pending')
-                                    `, [gestor.id, `⚠️ CNH Vencendo: ${emp.nome}`, `A CNH do funcionário ${emp.nome} vence em 30 dias.`, 'employee', '#EF4444']);
+                                        VALUES (?, ?, ?, NOW(), ?, ?, ?, 'pending')
+                                    `, [gestor.id, `⚠️ CNH Vencendo: ${emp.nome}`, `A CNH do funcionário ${emp.nome} vence em 30 dias.`, 'employee', emp.id, '#EF4444']);
                                 } catch(e) { console.error('❌ Erro Insert Agenda CNH:', e.message); }
                             }
                         }
@@ -169,7 +210,7 @@ cron.schedule('* * * * *', async () => {
                             if (!needsMaintenance && v.proximaRevisaoData) {
                                 const revDate = new Date(v.proximaRevisaoData);
                                 const limitDate = getGmt3Date();
-                                limitDate.setDate(limitDate.getDate() + 15); 
+                                limitDate.setUTCDate(limitDate.getUTCDate() + 15);
                                 
                                 if (revDate <= limitDate) {
                                     needsMaintenance = true;
@@ -192,8 +233,8 @@ cron.schedule('* * * * *', async () => {
                                         if (jaAvisou.length === 0) {
                                             await db.query(`
                                                 INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
-                                                VALUES (?, ?, ?, NOW(), ?, NULL, ?, 'pending')
-                                            `, [gestor.id, `🔧 Manutenção Próxima: ${v.placa}`, reasonStr, 'vehicle', '#EAB308']);
+                                                VALUES (?, ?, ?, NOW(), ?, ?, ?, 'pending')
+                                            `, [gestor.id, `🔧 Manutenção Próxima: ${v.placa}`, reasonStr, 'vehicle', v.id, '#EAB308']);
                                             
                                             enviouAgendaRecentemente = true;
                                         }
@@ -269,8 +310,8 @@ cron.schedule('* * * * *', async () => {
                             try {
                                 await db.query(`
                                     INSERT INTO user_agenda (user_id, title, description, event_datetime, related_type, related_id, color_hex, notification_status)
-                                    VALUES (?, ?, ?, NOW(), 'employee', NULL, '#3B82F6', 'pending')
-                                `, [gestor.id, `✅ Retorno de ${emp.statusAfastamentoTipo}: ${emp.nome}`, `O colaborador ${emp.nome} finalizou seu período de afastamento e retornou às atividades hoje.`]);
+                                    VALUES (?, ?, ?, NOW(), 'employee', ?, '#3B82F6', 'pending')
+                                `, [gestor.id, `✅ Retorno de ${emp.statusAfastamentoTipo}: ${emp.nome}`, `O colaborador ${emp.nome} finalizou seu período de afastamento e retornou às atividades hoje.`, emp.id]);
                             } catch(e) { console.error(`Erro na Agenda Retorno Férias:`, e.message); }
                         }
 
@@ -288,29 +329,36 @@ cron.schedule('* * * * *', async () => {
                     }
                 } catch (e) { console.error('❌ [CRON] Erro Retorno Afastamento:', e.message); }
 
-                // Limpar sessões expiradas do chatbot WhatsApp
-                try {
-                    await db.query(
-                        `UPDATE whatsapp_chatbot_sessions SET step = 'cancelado'
-                         WHERE step NOT IN ('concluido', 'cancelado')
-                           AND last_activity < DATE_SUB(NOW(), INTERVAL 30 MINUTE)`
-                    );
-                } catch (e) { console.error('❌ [CRON] Erro ao limpar sessões chatbot:', e.message); }
-
                 console.log('✅ [CRON] Rotina diária concluída com sucesso sem erros.');
             } catch (error) {
                 console.error('❌ [CRON] Erro grave na rotina diária:', error);
-                lastDailyRunDate = null; 
+                // Reseta para tentar novamente amanhã (não apaga o banco — só o cache em memória)
+                _lastDailyRunDate = null;
             }
         }
 
         // ====================================================================
-        // 2. ROTINA DE MINUTOS (Lembretes Agenda Real-Time)
+        // 2. LIMPEZA DE SESSÕES CHATBOT (roda a cada minuto — idempotente)
+        // Remove sessões inativas há mais de 30min que não foram concluídas
+        // ====================================================================
+        try {
+            await db.query(
+                `UPDATE whatsapp_chatbot_sessions SET step = 'cancelado'
+                 WHERE step NOT IN ('concluido', 'cancelado')
+                   AND last_activity < DATE_SUB(NOW(), INTERVAL 30 MINUTE)`
+            );
+        } catch (e) { console.error('❌ [CRON] Erro ao limpar sessões chatbot:', e.message); }
+
+        // ====================================================================
+        // 3. ROTINA DE MINUTOS (Lembretes Agenda Real-Time)
+        // Pré-filtrado no SQL: só eventos com reminders pendentes no próximo mês
         // ====================================================================
         const [eventos] = await db.query(`
-            SELECT id, user_id, title, DATE_FORMAT(event_datetime, '%Y-%m-%dT%H:%i:%s') as event_datetime_str, reminders 
-            FROM user_agenda 
+            SELECT id, user_id, title, DATE_FORMAT(event_datetime, '%Y-%m-%dT%H:%i:%s') as event_datetime_str, reminders
+            FROM user_agenda
             WHERE is_completed = 0
+              AND reminders IS NOT NULL
+              AND event_datetime BETWEEN NOW() - INTERVAL 1 DAY AND NOW() + INTERVAL 1 MONTH
         `);
 
         if (eventos.length > 0) {
@@ -368,6 +416,41 @@ cron.schedule('* * * * *', async () => {
         }
     } catch (error) {
         console.error('❌ [CRON] Erro crítico no Tick do Cron:', error);
+    }
+});
+
+// ====================================================================
+// CRON SEMANAL — Limpeza de arquivos de upload antigos (domingo 02:00)
+// ====================================================================
+cron.schedule('0 2 * * 0', () => {
+    const { join } = require('path');
+    const { readdir, stat, unlink } = require('fs');
+    const uploadPath = join(__dirname, '../public/uploads/orders');
+    const maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias
+    const now = Date.now();
+
+    readdir(uploadPath, (err, files) => {
+        if (err) return;
+        files.forEach(file => {
+            const filePath = join(uploadPath, file);
+            stat(filePath, (err, stats) => {
+                if (err) return;
+                if (now - stats.mtime.getTime() > maxAge) {
+                    unlink(filePath, () => {});
+                }
+            });
+        });
+    });
+});
+
+// ====================================================================
+// CRON DIÁRIO — Rotação de logs WhatsApp (mantém só os últimos 6 meses)
+// ====================================================================
+cron.schedule('0 3 * * *', async () => {
+    try {
+        await db.query(`DELETE FROM whatsapp_logs WHERE data_envio < DATE_SUB(NOW(), INTERVAL 6 MONTH)`);
+    } catch (e) {
+        console.error('❌ [CRON] Erro na limpeza de logs WhatsApp:', e.message);
     }
 });
 

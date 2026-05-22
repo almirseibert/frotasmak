@@ -65,7 +65,7 @@ async function createSession(phone, employeeId, employeeName) {
 
 async function updateSession(sessionId, step, sessionData, fotoPainelPath) {
     const params = [step, JSON.stringify(sessionData || {})];
-    let q = 'UPDATE whatsapp_chatbot_sessions SET step = ?, session_data = ?';
+    let q = 'UPDATE whatsapp_chatbot_sessions SET step = ?, session_data = ?, last_activity = NOW()';
     if (fotoPainelPath !== undefined) {
         q += ', foto_painel_path = ?';
         params.push(fotoPainelPath);

@@ -52,40 +52,6 @@ const getSafeObraId = (id) => {
     return id;
 };
 
-// ============================================================================
-// HELPER: detecta se a coluna `date` existe na tabela orders (cache em memória)
-// ============================================================================
-let _hasDateColumn = null;
-
-const checkDateColumn = async (connection) => {
-    if (_hasDateColumn !== null) return _hasDateColumn;
-    try {
-        const [cols] = await connection.execute(
-            `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'date'`
-        );
-        _hasDateColumn = cols.length > 0;
-        if (!_hasDateColumn) {
-            console.warn('[orderController] ⚠️  Coluna `date` NÃO encontrada na tabela orders.');
-            console.warn('[orderController] Execute a migration: migration_add_date_to_orders.sql');
-        }
-    } catch (e) {
-        _hasDateColumn = false;
-    }
-    return _hasDateColumn;
-};
-
-// Monta o objeto de dados da ordem com ou sem a coluna `date`
-const buildOrderData = async (connection, fields) => {
-    const hasDate = await checkDateColumn(connection);
-    if (hasDate) {
-        return fields; // inclui `date` normalmente
-    }
-    // Remove `date` do objeto para não causar erro de coluna desconhecida
-    const safe = { ...fields };
-    delete safe.date;
-    return safe;
-};
 
 // ============================================================================
 // Helper: envia WhatsApp em background (não bloqueia a resposta HTTP)
@@ -217,8 +183,7 @@ const createOrder = async (req, res) => {
             anexos:    safeStringifyArray(data.anexos),
         };
 
-        const orderData = await buildOrderData(connection, rawOrderData);
-        await connection.query('INSERT INTO orders SET ?', [orderData]);
+        await connection.query('INSERT INTO orders SET ?', [rawOrderData]);
 
         await connection.execute(
             'INSERT INTO counters (name, lastNumber) VALUES ("purchaseOrderCounter", ?) ON DUPLICATE KEY UPDATE lastNumber = ?',
@@ -308,8 +273,7 @@ const updateOrder = async (req, res) => {
             anexos:   safeStringifyArray(data.anexos),
         };
 
-        const orderUpdateData = await buildOrderData(connection, rawUpdateData);
-        await connection.query('UPDATE orders SET ? WHERE id = ?', [orderUpdateData, id]);
+        await connection.query('UPDATE orders SET ? WHERE id = ?', [rawUpdateData, id]);
 
         const originalIsClosed = ['Concluída', 'Ativa'].includes(originalOrder.status);
         const newIsClosed      = ['Concluída', 'Ativa'].includes(newStatus);

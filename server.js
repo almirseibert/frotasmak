@@ -155,6 +155,7 @@ const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
 const inventoryRoutes = require('./routes/inventoryRoutes');
 const whatsappRoutes = require('./routes/whatsappRoutes');
+const sigasulRoutes = require('./routes/sigasulRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -266,6 +267,7 @@ apiRouter.use('/washings', washingRoutes);
 apiRouter.use('/agenda', agendaRoutes);
 apiRouter.use('/inventory', inventoryRoutes);
 apiRouter.use('/whatsapp', whatsappRoutes);
+apiRouter.use('/sigasul', sigasulRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware

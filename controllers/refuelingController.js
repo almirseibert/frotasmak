@@ -6,58 +6,32 @@ const path = require('path');
 const multer = require('multer');
 const nodemailer = require('nodemailer');
 
-// --- CONFIGURAÇÃO NODEMAILER ---
-// Configure as variáveis no seu arquivo .env para segurança
-const transporter = nodemailer.createTransport({
-    host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-    port: process.env.EMAIL_PORT || 587,
-    secure: false, // true para 465, false para outras portas
-    auth: {
-        user: process.env.EMAIL_USER || 'seu-email@exemplo.com',
-        pass: process.env.EMAIL_PASS || 'sua-senha-de-app' // Use Senha de App
-    },
-    tls: {
-        rejectUnauthorized: false
-    }
-});
-
-// --- CONFIGURAÇÃO MULTER (UPLOAD COM AUTO-LIMPEZA) ---
-
-// Função para limpar arquivos antigos (> 30 dias)
-const cleanupOldFiles = (directory) => {
-    fs.readdir(directory, (err, files) => {
-        if (err) return console.error("Erro ao ler diretório para limpeza:", err);
-
-        const now = Date.now();
-        const maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias em milissegundos
-
-        files.forEach(file => {
-            const filePath = path.join(directory, file);
-            fs.stat(filePath, (err, stats) => {
-                if (err) return;
-                if (now - stats.mtime.getTime() > maxAge) {
-                    fs.unlink(filePath, (err) => {
-                        if (err) console.error(`Erro ao deletar arquivo antigo ${file}:`, err);
-                    });
-                }
-            });
+// --- CONFIGURAÇÃO NODEMAILER (lazy — criado apenas quando necessário) ---
+let _transporter = null;
+const getTransporter = () => {
+    if (!_transporter) {
+        _transporter = nodemailer.createTransport({
+            host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+            port: process.env.EMAIL_PORT || 587,
+            secure: false,
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS,
+            },
+            tls: { rejectUnauthorized: false }
         });
-    });
+    }
+    return _transporter;
 };
+
+// --- CONFIGURAÇÃO MULTER ---
 
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        // Caminho para salvar os arquivos
         const uploadPath = path.join(__dirname, '../public/uploads/orders');
-        
-        // Garante que a pasta existe
         if (!fs.existsSync(uploadPath)){
             fs.mkdirSync(uploadPath, { recursive: true });
         }
-        
-        // Executa limpeza assíncrona
-        cleanupOldFiles(uploadPath);
-
         cb(null, uploadPath);
     },
     filename: function (req, file, cb) {
@@ -236,7 +210,7 @@ const sendOrderEmail = async (req, res) => {
             attachments: attachments
         };
 
-        await transporter.sendMail(mailOptions);
+        await getTransporter().sendMail(mailOptions);
         res.json({ message: 'Email enviado com sucesso!' });
 
     } catch (error) {
