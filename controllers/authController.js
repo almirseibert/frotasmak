@@ -13,12 +13,26 @@ const login = async (req, res) => {
         return res.status(400).json({ message: 'E-mail e senha são obrigatórios.' });
     }
 
+    if (!process.env.JWT_SECRET) {
+        console.error('[login] ERRO CRÍTICO: JWT_SECRET não está definido nas variáveis de ambiente!');
+        return res.status(500).json({ message: 'Erro de configuração do servidor.' });
+    }
+
     try {
-        // Busca usuário e status de bloqueio
-        const [rows] = await db.query(
-            'SELECT id, name, email, password, role, user_type, status, canAccessRefueling, bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE email = ?', 
-            [email]
-        );
+        // Tenta buscar todas as colunas; faz fallback se colunas novas ainda não existirem
+        let rows;
+        try {
+            [rows] = await db.query(
+                'SELECT id, name, email, password, role, user_type, status, canAccessRefueling, bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE email = ?',
+                [email]
+            );
+        } catch (colErr) {
+            console.warn('[login] Fallback query (colunas novas ausentes):', colErr.message);
+            [rows] = await db.query(
+                'SELECT id, name, email, password, role, user_type, status, canAccessRefueling FROM users WHERE email = ?',
+                [email]
+            );
+        }
         const user = rows[0];
 
         if (!user) {
@@ -32,7 +46,7 @@ const login = async (req, res) => {
         }
 
         // --- VERIFICAÇÃO: BLOQUEIO DE ABASTECIMENTO (REGRA DE 3 TENTATIVAS) ---
-        if (user.bloqueado_abastecimento === 1) {
+        if ((user.bloqueado_abastecimento ?? 0) === 1) {
             return res.status(403).json({ 
                 message: 'Usuário BLOQUEADO para abastecimentos. Entre em contato com a gestão de frotas.',
                 isBlocked: true
@@ -64,15 +78,14 @@ const login = async (req, res) => {
                 email: user.email, 
                 role: user.role || user.user_type,
                 canAccessRefueling: user.canAccessRefueling === 1,
-                // Novos campos essenciais para o Frontend do Operador
-                bloqueado_abastecimento: user.bloqueado_abastecimento,
-                tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento
+                bloqueado_abastecimento: user.bloqueado_abastecimento ?? 0,
+                tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento ?? 0
             }
         });
 
     } catch (error) {
-        console.error('Erro no login:', error);
-        res.status(500).json({ message: 'Erro interno do servidor.' });
+        console.error('[login] Erro:', error.code || '', error.message, error.sqlMessage || '');
+        res.status(500).json({ message: 'Erro interno do servidor.', detail: error.code || error.message });
     }
 };
 
