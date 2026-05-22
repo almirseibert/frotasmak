@@ -7,10 +7,12 @@ const { v4: uuidv4 } = require('uuid');
 // FUNÇÃO DE LOGIN
 // ====================================================================
 const login = async (req, res) => {
-    const { email, password } = req.body;
+    // Permite que o frontend mande "email" ou "username" no body
+    const { email, username, password } = req.body;
+    const loginIdentifier = email || username;
 
-    if (!email || !password) {
-        return res.status(400).json({ message: 'E-mail e senha são obrigatórios.' });
+    if (!loginIdentifier || !password) {
+        return res.status(400).json({ message: 'E-mail/Usuário e senha são obrigatórios.' });
     }
 
     if (!process.env.JWT_SECRET) {
@@ -19,147 +21,144 @@ const login = async (req, res) => {
     }
 
     try {
-        // Tenta buscar todas as colunas; faz fallback se colunas novas ainda não existirem
+        // Tenta buscar todas as colunas originais; faz fallback se colunas novas ainda não existirem
         let rows;
         try {
             [rows] = await db.query(
-                'SELECT id, name, email, password, role, user_type, status, canAccessRefueling, bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE email = ?',
-                [email]
+                'SELECT id, name, email, username, password, role, user_type, status, canAccessRefueling, bloqueado_abastecimento, tentativas_falhas_abastecimento FROM users WHERE email = ? OR username = ?',
+                [loginIdentifier, loginIdentifier]
             );
         } catch (colErr) {
             console.warn('[login] Fallback query (colunas novas ausentes):', colErr.message);
             [rows] = await db.query(
-                'SELECT id, name, email, password, role, user_type, status, canAccessRefueling FROM users WHERE email = ?',
-                [email]
+                'SELECT id, username as name, email, username, password, role, status FROM users WHERE email = ? OR username = ?',
+                [loginIdentifier, loginIdentifier]
             );
         }
+
         const user = rows[0];
 
         if (!user) {
-            return res.status(401).json({ message: 'Credenciais inválidas.' });
+            return res.status(401).json({ message: 'Credenciais inválidas ou usuário não encontrado.' });
         }
 
-        // --- VERIFICAÇÃO DE STATUS GERAL DA CONTA ---
-        const statusConta = user.status ? user.status.toLowerCase() : '';
-        if (statusConta === 'inativo') {
-            return res.status(403).json({ message: 'Sua conta aguarda aprovação do administrador.' });
-        }
-
-        // --- VERIFICAÇÃO: BLOQUEIO DE ABASTECIMENTO (REGRA DE 3 TENTATIVAS) ---
-        if ((user.bloqueado_abastecimento ?? 0) === 1) {
-            return res.status(403).json({ 
-                message: 'Usuário BLOQUEADO para abastecimentos. Entre em contato com a gestão de frotas.',
-                isBlocked: true
-            });
+        if (user.status === 'Inativo') {
+            return res.status(403).json({ message: 'Usuário inativo.' });
         }
 
         const isMatch = await bcrypt.compare(password, user.password);
+
         if (!isMatch) {
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
 
-        // Gera token com permissões e flags atualizadas
         const token = jwt.sign(
             { 
                 id: user.id, 
-                email: user.email, 
-                role: user.role || user.user_type, 
-                canAccessRefueling: user.canAccessRefueling === 1
+                role: user.role, 
+                email: user.email,
+                username: user.username,
+                user_type: user.user_type
             },
             process.env.JWT_SECRET,
             { expiresIn: '24h' }
         );
 
-        res.json({ 
-            token, 
-            user: { 
-                id: user.id, 
-                name: user.name, 
-                email: user.email, 
-                role: user.role || user.user_type,
-                canAccessRefueling: user.canAccessRefueling === 1,
-                bloqueado_abastecimento: user.bloqueado_abastecimento ?? 0,
-                tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento ?? 0
+        res.status(200).json({
+            token,
+            user: {
+                id: user.id,
+                name: user.name,
+                email: user.email,
+                username: user.username,
+                role: user.role,
+                user_type: user.user_type,
+                status: user.status,
+                canAccessRefueling: user.canAccessRefueling,
+                bloqueado_abastecimento: user.bloqueado_abastecimento
             }
         });
 
     } catch (error) {
-        console.error('[login] Erro:', error.code || '', error.message, error.sqlMessage || '');
-        res.status(500).json({ message: 'Erro interno do servidor.', detail: error.code || error.message });
+        console.error('Erro geral no login:', error);
+        res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 };
 
 // ====================================================================
-// FUNÇÃO DE REGISTRO (Solicitação de Cadastro)
+// REGISTRO DE USUÁRIO
 // ====================================================================
 const register = async (req, res) => {
-    const { name, email, password } = req.body;
-
-    if (!name || !email || !password) {
-        return res.status(400).json({ message: 'Nome, e-mail e senha são obrigatórios.' });
-    }
-
     try {
-        const [existingUsers] = await db.query('SELECT id FROM users WHERE email = ?', [email]);
-        if (existingUsers.length > 0) {
-            return res.status(409).json({ message: 'Este e-mail já está em uso.' });
+        const { name, email, username, password, role = 'user', user_type = 'Comum' } = req.body;
+        const loginIdentifier = email || username;
+
+        if (!loginIdentifier || !password) {
+            return res.status(400).json({ message: 'E-mail/Usuário e senha são obrigatórios.' });
         }
 
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
-        const newUserId = uuidv4();
+        const userId = uuidv4();
 
-        // Insere na tabela USERS com status INATIVO e inicializa colunas de controle de abastecimento
-        await db.query(
-            `INSERT INTO users (
-                id, name, email, password, 
-                role, user_type, 
-                status, 
-                canAccessRefueling, 
-                tentativas_falhas_abastecimento,
-                bloqueado_abastecimento,
-                data_criacao
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())`,
-            [
-                newUserId, name, email, hashedPassword, 
-                'guest', 'guest', 
-                'inativo', 
-                0
-            ] 
-        );
+        let rows;
+        try {
+            // Verifica se usuário ou e-mail já existe
+            [rows] = await db.query('SELECT id FROM users WHERE email = ? OR username = ?', [email || '', username || '']);
+            if (rows.length > 0) {
+                return res.status(400).json({ message: 'Usuário ou e-mail já está em uso.' });
+            }
 
-        res.status(201).json({ message: 'Solicitação enviada! Aguarde a liberação do administrador.' });
+            await db.query(
+                'INSERT INTO users (id, name, email, username, password, role, user_type, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [userId, name || loginIdentifier, loginIdentifier, username || loginIdentifier, hashedPassword, role, user_type, 'Ativo']
+            );
+        } catch (colErr) {
+            console.warn('[register] Fallback de inserção (usando ID auto incrementado ou faltando colunas):', colErr.message);
+            await db.query(
+                'INSERT INTO users (name, email, username, password, role, status) VALUES (?, ?, ?, ?, ?, ?)',
+                [name || loginIdentifier, loginIdentifier, username || loginIdentifier, hashedPassword, role, 'Ativo']
+            );
+        }
+
+        res.status(201).json({ message: 'Usuário registrado com sucesso!' });
 
     } catch (error) {
-        console.error('Erro no registro:', error);
-        if (error.sqlMessage) console.error('SQL Error:', error.sqlMessage);
-        
-        res.status(500).json({ message: 'Erro ao processar cadastro. Tente novamente.' });
+        console.error('Erro geral no registro:', error);
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(400).json({ message: 'Usuário ou e-mail já existe.' });
+        }
+        res.status(500).json({ message: 'Erro interno do servidor.' });
     }
 };
 
 // ====================================================================
-// VALIDAR SENHA
+// OBTER DADOS DO USUÁRIO LOGADO (GET ME)
 // ====================================================================
-const validatePassword = async (req, res) => {
-    const userId = req.user.id;
-    const { password } = req.body;
-
-    if (!password) return res.status(400).json({ message: 'Senha obrigatória.' });
-
+const getMe = async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT password FROM users WHERE id = ?', [userId]);
+        let rows;
+        try {
+            [rows] = await db.query(
+                'SELECT id, name, email, username, role, user_type, status, canAccessRefueling, bloqueado_abastecimento FROM users WHERE id = ?',
+                [req.user.id]
+            );
+        } catch (colErr) {
+            [rows] = await db.query(
+                'SELECT id, username as name, email, username, role, status FROM users WHERE id = ?',
+                [req.user.id]
+            );
+        }
+
         const user = rows[0];
 
-        if (!user) return res.status(404).json({ message: 'Usuário não encontrado.' });
-
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) return res.status(401).json({ message: 'Senha incorreta.' });
-
-        res.status(200).json({ message: 'Senha validada.' });
+        if (!user) {
+            return res.status(404).json({ message: 'Usuário não encontrado' });
+        }
+        res.status(200).json(user);
     } catch (error) {
-        console.error('Erro validação senha:', error);
-        res.status(500).json({ message: 'Erro interno.' });
+        console.error('Erro na rota /me:', error);
+        res.status(500).json({ message: 'Erro interno do servidor' });
     }
 };
 
@@ -192,13 +191,13 @@ const changePassword = async (req, res) => {
 
     } catch (error) {
         console.error('Erro ao trocar senha:', error);
-        res.status(500).json({ message: 'Erro ao trocar senha.' });
+        res.status(500).json({ message: 'Erro interno.' });
     }
 };
 
 module.exports = {
     login,
     register,
-    validatePassword,
+    getMe,
     changePassword
 };
