@@ -63,18 +63,19 @@ const customOrigins = envOrigins
   .map(sanitizeUrl)
   .filter(Boolean); // Remove strings vazias
 
-// Fallback com origens padrão (sempre incluir localhost para desenvolvimento)
-const allowedOrigins = customOrigins.length > 0 
-  ? customOrigins 
-  : [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://127.0.0.1:3000',
-      'http://127.0.0.1:3001',
-      'https://frotamak.com',
-      'https://www.frotamak.com',
-      'https://frotasmak-frotas-backend.oehpg2.easypanel.host'
-    ];
+// 🚨 CORREÇÃO: Fallback com origens padrão SEMPRE incluído
+const defaultOrigins = [
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+  'https://frotamak.com',
+  'https://www.frotamak.com',
+  'https://frotasmak-frotas-backend.oehpg2.easypanel.host'
+];
+
+// 🚨 CORREÇÃO: Unimos as origens padrão com as customizadas para garantir que o sistema não perca o acesso
+const allowedOrigins = [...new Set([...defaultOrigins, ...customOrigins])];
 
 console.log('✅ Origens CORS permitidas:', allowedOrigins);
 
@@ -82,7 +83,6 @@ console.log('✅ Origens CORS permitidas:', allowedOrigins);
 const corsOptions = {
   origin: function (origin, callback) {
     // ⚠️ IMPORTANTE: Requisições sem 'origin' header (como preflight OPTIONS) são permitidas
-    // Isso é necessário para requests do mesmo servidor (localhost:3000 chamando localhost:3001)
     if (!origin) {
       console.log('ℹ️ Requisição sem header Origin (provavelmente preflight ou mesma origem) - PERMITIDA');
       return callback(null, true);
@@ -91,17 +91,18 @@ const corsOptions = {
     const cleanOrigin = sanitizeUrl(origin);
     
     if (allowedOrigins.includes(cleanOrigin)) {
-      console.log(`✅ Origem permitida: ${cleanOrigin}`);
       callback(null, true);
     } else {
-      console.error(`❌ CORS BLOQUEADO: Origem '${origin}' (limpa: '${cleanOrigin}') não está na whitelist`);
-      callback(new Error('CORS: Origem não permitida. Entre em contato com o administrador.'));
+      console.warn(`❌ CORS BLOQUEADO: Origem '${origin}' (limpa: '${cleanOrigin}') não está na whitelist`);
+      // 🚨 CORREÇÃO CRÍTICA: Não retornar new Error(), retornar false. 
+      // Retornar um erro quebrava o preflight (OPTIONS) e causava o "TypeError: Failed to fetch".
+      callback(null, false); 
     }
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   credentials: true, // Permite cookies e credenciais
-  optionsSuccessStatus: 200 // Para navegadores antigos
+  optionsSuccessStatus: 204 // 204 No Content é o padrão mais seguro para respostas OPTIONS (preflight)
 };
 
 // ====================================================================
@@ -111,7 +112,13 @@ const app = express();
 
 // ⚠️ IMPORTANTE: Aplicar CORS ANTES de qualquer outra rota!
 app.use(cors(corsOptions));
+// 🚨 CORREÇÃO: Garante explicitamente que TODAS as requisições OPTIONS passem pelo CORS
+app.options('*', cors(corsOptions)); 
+
 app.use(express.json());
+
+// 🚨 CORREÇÃO: Rota vazia para o favicon.ico para não poluir os logs com erro 404
+app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // Middleware para logar todas as requisições (debug)
 app.use((req, res, next) => {
