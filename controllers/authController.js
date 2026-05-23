@@ -195,9 +195,41 @@ const changePassword = async (req, res) => {
     }
 };
 
+// ====================================================================
+// VALIDAR SENHA
+// ====================================================================
+const validatePassword = async (req, res) => {
+    const userId = req.user.id;
+    const { password } = req.body;
+
+    if (!password) {
+        return res.status(400).json({ message: 'A senha é obrigatória.' });
+    }
+
+    try {
+        const [rows] = await db.query('SELECT password FROM users WHERE id = ?', [userId]);
+        const user = rows[0];
+
+        if (!user) return res.status(404).json({ message: 'Usuário não encontrado.' });
+
+        const isMatch = await bcrypt.compare(password, user.password);
+        
+        if (!isMatch) {
+            return res.status(401).json({ message: 'Senha incorreta.', valid: false });
+        }
+
+        res.status(200).json({ message: 'Senha válida.', valid: true });
+
+    } catch (error) {
+        console.error('Erro ao validar senha:', error);
+        res.status(500).json({ message: 'Erro interno ao validar senha.', valid: false });
+    }
+};
+
 module.exports = {
     login,
     register,
     getMe,
-    changePassword
+    changePassword,
+    validatePassword
 };

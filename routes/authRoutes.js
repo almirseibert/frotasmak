@@ -10,7 +10,7 @@ router.post('/register', authController.register);
 
 // --- ROTAS PROTEGIDAS ---
 // 🚨 Rota comentada para corrigir o TypeError (a função validatePassword não existe no controller)
-// router.post('/validate-password', authMiddleware, authController.validatePassword);
+router.post('/validate-password', authMiddleware, authController.validatePassword);
 
 router.post('/change-password', authMiddleware, authController.changePassword);
 
