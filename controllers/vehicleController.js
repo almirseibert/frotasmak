@@ -106,11 +106,16 @@ const createVehicle = async (req, res) => {
 // Whitelist de colunas permitidas em UPDATE — evita SQL injection por nome de campo
 const ALLOWED_VEHICLE_FIELDS = new Set([
     'placa', 'registroInterno', 'tipo', 'marca', 'modelo', 'anoFabricacao', 'anoCombustivel',
+    'ano_fabricacao', 'ano_modelo',
     'status', 'localizacaoAtual', 'obraAtualId', 'fotoURL', 'cor', 'renavam', 'chassi',
     'proprietario', 'seguradora', 'apolice', 'vencimentoSeguro', 'vencimentoCRLV',
     'vencimentoLicenca', 'vencimentoExtintor', 'vencimentoTacografo',
+    // Nomes reais das colunas no banco (usados pelo VehicleModal)
+    'canCirculate', 'validadeTacografo', 'validadeAET_DAER', 'validadeAET_DNIT', 'validadeLicenciamento',
+    'ativo', 'rastreador', 'isComboioVehicle', 'mediaCalculo', 'capacidade', 'fuelCapacity',
+    'contratoTerceiro',
     'fuelLevels', 'alocadoEm', 'maintenanceLocation', 'operationalAssignment',
-    'odometro', 'horimetro', 'hodometro', 'capacidadeTanque', 'tipoCombustivel',
+    'odometro', 'horimetro', 'capacidadeTanque', 'tipoCombustivel',
     'observacoes', 'proximaRevisaoOdometro', 'proximaRevisaoHorimetro', 'proximaRevisaoData',
     'tamanho', 'capacidadeCarga', 'numeroPneus', 'numeroEixos',
 ]);
@@ -299,7 +304,7 @@ const allocateToObra = async (req, res) => {
             id: randomUUID(),
             obraId: obraIdStr,
             veiculoId: vehicle.id,
-            tipo: vehicle.tipo || 'Desconhecido', 
+            tipo: vehicle.tipo || 'Desconhecido',
             registroInterno: vehicle.registroInterno || '',
             placa: vehicle.placa || '',
             modelo: `${vehicle.marca || ''} ${vehicle.modelo || ''}`.trim() || 'Modelo N/A',
@@ -307,10 +312,10 @@ const allocateToObra = async (req, res) => {
             employeeName: employee.nome || 'Funcionário',
             dataEntrada: new Date(dataEntrada || new Date()),
             dataSaida: null,
-            odometroEntrada: readingType === 'odometro' ? readingVal : 0,
-            odometroSaida: 0, 
-            horimetroEntrada: readingType === 'horimetro' ? readingVal : 0,
-            horimetroSaida: 0, 
+            odometroEntrada: readingType === 'odometro' ? readingVal : null,
+            odometroSaida: null,
+            horimetroEntrada: readingType === 'horimetro' ? readingVal : null,
+            horimetroSaida: null,
             observacoes: observacoes || ''
         };
         

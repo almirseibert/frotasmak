@@ -495,17 +495,20 @@ const confirmRefuelingOrder = async (req, res) => {
         const readingVal = safeNum(confirmedReading);
 
         if (readingVal) {
-            // Lógica mais robusta para garantir que Leves/Caminhões de Trecho usem Odômetro,
-            // espelhando as regras do Frontend (vehicleRules.js).
+            // Usa o tipo de leitura registrado na ordem como sinal primário.
+            // Isso garante consistência mesmo quando o campo tipo do veículo no banco
+            // não bate exatamente com a lista de leves/trecho (acentuação, variações).
+            // Fallback secundário: tipo do veículo conforme vehicleRules.js.
+            const orderUsesHorimetro = order.horimetro !== null && parseFloat(order.horimetro) > 0;
             const isLeveOrTrecho = [
-                'Automóvel', 'Camionete', 'Utilitários', 'Moto', 
+                'Automóvel', 'Camionete', 'Utilitários', 'Moto',
                 'Caminhão Prancha', 'Semirreboques'
             ].includes(vehicle.tipo);
 
-            if (isLeveOrTrecho) {
-                 vehicleUpdate.odometro = readingVal;
+            if (!orderUsesHorimetro && (order.odometro > 0 || isLeveOrTrecho)) {
+                vehicleUpdate.odometro = readingVal;
             } else {
-                 vehicleUpdate.horimetro = readingVal;
+                vehicleUpdate.horimetro = readingVal;
             }
         }
 

@@ -287,19 +287,29 @@ const updateObraHistoryEntry = async (req, res) => {
             employeeName = null;
         }
 
-        // 3. Prepara valores de leitura (mantém o que já existia ou atualiza)
+        // 3. Prepara valores de leitura baseado no tipo do veículo (armazenado no histórico)
+        const leveOuTrecho = [
+            'Automóvel', 'Camionete', 'Utilitários', 'Moto',
+            'Caminhão Prancha', 'Semirreboques'
+        ].includes(currentEntry.tipo);
+
         let odometroEntrada = currentEntry.odometroEntrada;
         let horimetroEntrada = currentEntry.horimetroEntrada;
         let odometroSaida = currentEntry.odometroSaida;
         let horimetroSaida = currentEntry.horimetroSaida;
 
-        // Se o registro original tinha odômetro ou se a nova leitura veio e não há horímetro
-        if (currentEntry.odometroEntrada !== null || (leituraEntrada && !currentEntry.horimetroEntrada)) {
-            odometroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
-            odometroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
+        if (leveOuTrecho) {
+            // Veículo leve ou trecho: usa odômetro
+            if (leituraEntrada !== undefined) odometroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
+            if (leituraSaida !== undefined) odometroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
+            horimetroEntrada = null;
+            horimetroSaida = null;
         } else {
-            horimetroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
-            horimetroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
+            // Caminhão pesado ou máquina: usa horímetro
+            if (leituraEntrada !== undefined) horimetroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
+            if (leituraSaida !== undefined) horimetroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
+            odometroEntrada = null;
+            odometroSaida = null;
         }
 
         // 4. ATUALIZA 'obras_historico_veiculos'
