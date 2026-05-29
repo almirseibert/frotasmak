@@ -1,11 +1,21 @@
+const path = require('path');
+const fs = require('fs');
 const mysql = require('mysql2/promise');
-require('dotenv').config();
+const dotenv = require('dotenv');
 
-// ====================================================================
-// CONFIGURAÇÃO DE BANCO DE DADOS LIMPA (Ideal para Easypanel)
-// Como o Easypanel injeta variáveis de ambiente de forma nativa, 
-// o pool de conexão abaixo puxará corretamente de process.env.
-// ====================================================================
+// Local: .env.local carregado primeiro com override (banco de teste)
+// Easypanel: arquivos .env não existem no container, process.env já vem
+//            com as variáveis de produção injetadas nativamente
+const envLocalPath = path.resolve(process.cwd(), '.env.local');
+const envPath = path.resolve(process.cwd(), '.env');
+
+if (fs.existsSync(envLocalPath)) {
+    dotenv.config({ path: envLocalPath, override: true });
+}
+if (fs.existsSync(envPath)) {
+    dotenv.config({ path: envPath, override: false });
+}
+
 const db = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -15,6 +25,18 @@ const db = mysql.createPool({
     waitForConnections: true,
     connectionLimit: 10,
     queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
+    connectTimeout: 30000,
 });
+
+(async () => {
+    try {
+        const [[{ bancoConectado }]] = await db.query('SELECT DATABASE() AS bancoConectado');
+        console.log(`✅ Banco de dados conectado: ${bancoConectado} (${process.env.DB_HOST})`);
+    } catch (err) {
+        console.error('❌ Erro ao verificar conexão com o banco:', err.message);
+    }
+})();
 
 module.exports = db;
