@@ -362,27 +362,105 @@ router.post('/email-config/test', adminOnly, async (req, res) => {
         if (!config.host || !config.user) {
             return res.status(400).json({ error: 'Configure o SMTP antes de enviar o teste.' });
         }
+        if (!config.password) {
+            return res.status(400).json({ error: 'Senha do SMTP ausente. Salve a configuração com senha antes de testar.' });
+        }
         const nodemailer = require('nodemailer');
         const port = Number(config.port) || 587;
+        const secure = port === 465;
         const transporter = nodemailer.createTransport({
             host: config.host,
             port,
-            secure: port === 465, // SSL direto só na 465; 587 usa STARTTLS (secure: false)
+            secure, // 465 = SSL direto; 587/25 = STARTTLS
             auth: { user: config.user, pass: config.password },
             tls: { rejectUnauthorized: false },
-            connectionTimeout: 10000,
-            greetingTimeout: 10000,
-            socketTimeout: 15000,
+            connectionTimeout: 15000,
+            greetingTimeout: 15000,
+            socketTimeout: 20000,
+            logger: true,
+            debug: true,
         });
-        await transporter.sendMail({
-            from: `"${config.fromName || 'MAK Frotas'}" <${config.fromAddress || config.user}>`,
+
+        // 1) Verifica conexão + auth ANTES de enviar — captura erros silenciosos
+        try {
+            await transporter.verify();
+            console.log(`[email-test] verify OK — host=${config.host}:${port} user=${config.user}`);
+        } catch (verifyErr) {
+            console.error('[email-test] verify FALHOU:', verifyErr);
+            return res.status(500).json({
+                error: 'Falha ao conectar/autenticar no SMTP: ' + verifyErr.message,
+                stage: 'verify',
+                code: verifyErr.code,
+                command: verifyErr.command,
+            });
+        }
+
+        const fromAddress = config.fromAddress || config.user;
+        const fromName    = config.fromName || 'MAK Frotas';
+
+        // 2) Envia e captura a resposta completa do servidor SMTP
+        let info;
+        try {
+            info = await transporter.sendMail({
+                from: `"${fromName}" <${fromAddress}>`,
+                to,
+                subject: 'Teste de e-mail — MAK Frotas',
+                text: `Este é um e-mail de teste enviado pelo sistema MAK Frotas em ${new Date().toLocaleString('pt-BR')}. Se recebeu, a configuração está correta.`,
+                html: `<p>Este é um e-mail de teste enviado pelo sistema <strong>MAK Frotas</strong> em ${new Date().toLocaleString('pt-BR')}.</p><p>Se recebeu, a configuração está correta.</p>`,
+            });
+        } catch (sendErr) {
+            console.error('[email-test] sendMail FALHOU:', sendErr);
+            return res.status(500).json({
+                error: 'SMTP rejeitou o envio: ' + sendErr.message,
+                stage: 'sendMail',
+                code: sendErr.code,
+                response: sendErr.response,
+                responseCode: sendErr.responseCode,
+            });
+        }
+
+        console.log('[email-test] sendMail INFO:', {
+            messageId: info.messageId,
+            response: info.response,
+            accepted: info.accepted,
+            rejected: info.rejected,
+            pending: info.pending,
+            envelope: info.envelope,
+        });
+
+        // 3) Detecta caso "aceitou mas rejeitou destinatário"
+        if (Array.isArray(info.rejected) && info.rejected.length > 0) {
+            return res.status(500).json({
+                error: `SMTP rejeitou o(s) destinatário(s): ${info.rejected.join(', ')}`,
+                stage: 'rejected',
+                response: info.response,
+                accepted: info.accepted,
+                rejected: info.rejected,
+            });
+        }
+        if (!info.accepted || info.accepted.length === 0) {
+            return res.status(500).json({
+                error: 'SMTP retornou OK mas não confirmou nenhum destinatário aceito. Verifique se o remetente está autorizado a enviar a partir desta conta.',
+                stage: 'no_accepted',
+                response: info.response,
+                envelope: info.envelope,
+            });
+        }
+
+        res.json({
+            message: 'E-mail de teste aceito pelo servidor SMTP.',
+            from: `${fromName} <${fromAddress}>`,
             to,
-            subject: 'Teste de e-mail — MAK Frotas',
-            text: 'Este é um e-mail de teste enviado pelo sistema MAK Frotas. Se recebeu, a configuração está correta.',
+            messageId: info.messageId,
+            response: info.response,
+            accepted: info.accepted,
+            envelope: info.envelope,
+            dica: fromAddress.toLowerCase() !== String(config.user).toLowerCase()
+                ? 'O endereço "De" é diferente do usuário autenticado — alguns provedores (Gmail/Office365) bloqueiam ou marcam como spam. Verifique também a pasta de spam.'
+                : 'Verifique também a pasta de spam do destinatário.',
         });
-        res.json({ message: 'E-mail de teste enviado com sucesso.' });
     } catch (error) {
-        console.error('Erro ao enviar e-mail de teste:', error);
+        console.error('Erro inesperado no e-mail de teste:', error);
         res.status(500).json({ error: 'Erro ao enviar e-mail: ' + error.message });
     }
 });
@@ -659,6 +737,198 @@ router.get('/audit-log', adminOnly, async (req, res) => {
     res.json([]);
 });
 
+// ─── COMBOIO → PARTNERS (espelho de posto para cada veículo-comboio) ─────────
+
+const {
+    ensureComboioPartner,
+    deactivateComboioPartner,
+    syncAllComboioPartners,
+    buildComboioPartnerId,
+} = require('../utils/ensureComboioPartner');
+const { listPeriods: listComboioPeriods } = require('../utils/comboioPeriodo');
+
+// Lista todos os veículos-comboio com o status do seu partner-espelho
+router.get('/comboios', adminOnly, async (req, res) => {
+    try {
+        const [vehicles] = await db.query(
+            `SELECT id, placa, registroInterno, modelo, status, isComboioVehicle, fuelLevels
+             FROM vehicles
+             WHERE isComboioVehicle = 1
+             ORDER BY registroInterno ASC`
+        );
+        const partnerIds = vehicles.map(v => buildComboioPartnerId(v.id));
+        let partnersMap = {};
+        if (partnerIds.length > 0) {
+            const placeholders = partnerIds.map(() => '?').join(',');
+            const [partnerRows] = await db.query(
+                `SELECT id, razaoSocial, status_operacional, telefone, whatsapp, email
+                 FROM partners WHERE id IN (${placeholders})`,
+                partnerIds
+            );
+            partnersMap = Object.fromEntries(partnerRows.map(p => [p.id, p]));
+        }
+        const result = vehicles.map(v => {
+            const pid = buildComboioPartnerId(v.id);
+            return {
+                vehicleId: v.id,
+                placa: v.placa,
+                registroInterno: v.registroInterno,
+                modelo: v.modelo,
+                status: v.status,
+                fuelLevels: v.fuelLevels,
+                partner: partnersMap[pid] || null,
+                partnerId: pid,
+            };
+        });
+        res.json(result);
+    } catch (error) {
+        console.error('Erro ao listar comboios:', error);
+        res.status(500).json({ error: 'Erro ao listar comboios.' });
+    }
+});
+
+// Roda a sincronização (cria partners-espelho ausentes)
+router.post('/comboios/sync', adminOnly, async (req, res) => {
+    try {
+        const result = await syncAllComboioPartners(db);
+        if (req.io) req.io.emit('server:sync', { targets: ['partners'] });
+        res.json({ message: `${result.synced}/${result.total} comboios sincronizados.`, ...result });
+    } catch (error) {
+        console.error('Erro ao sincronizar comboios:', error);
+        res.status(500).json({ error: 'Erro ao sincronizar comboios.' });
+    }
+});
+
+// Reativa o partner-espelho de um comboio específico
+router.post('/comboios/:vehicleId/activate', adminOnly, async (req, res) => {
+    try {
+        const partner = await ensureComboioPartner(db, req.params.vehicleId, { activate: true });
+        if (!partner) return res.status(404).json({ error: 'Veículo não encontrado.' });
+        if (req.io) req.io.emit('server:sync', { targets: ['partners'] });
+        res.json({ message: 'Partner-comboio ativado.', partner });
+    } catch (error) {
+        console.error('Erro ao ativar partner-comboio:', error);
+        res.status(500).json({ error: 'Erro ao ativar partner-comboio.' });
+    }
+});
+
+// Desativa (BLOQUEADO) o partner-espelho — preserva histórico
+router.post('/comboios/:vehicleId/deactivate', adminOnly, async (req, res) => {
+    try {
+        await deactivateComboioPartner(db, req.params.vehicleId);
+        if (req.io) req.io.emit('server:sync', { targets: ['partners'] });
+        res.json({ message: 'Partner-comboio desativado.' });
+    } catch (error) {
+        console.error('Erro ao desativar partner-comboio:', error);
+        res.status(500).json({ error: 'Erro ao desativar partner-comboio.' });
+    }
+});
+
+// Atualiza contatos do partner-comboio (telefone, whatsapp, email) — usado
+// para o envio automático de ordens via WhatsApp/E-mail (Fase 2.6/3.3).
+router.patch('/comboios/:vehicleId/partner', adminOnly, async (req, res) => {
+    const allowed = ['telefone', 'whatsapp', 'email', 'contatoResponsavel'];
+    const sets = [];
+    const params = [];
+    for (const key of allowed) {
+        if (key in req.body) {
+            sets.push(`${key} = ?`);
+            params.push(req.body[key] || null);
+        }
+    }
+    if (sets.length === 0) return res.json({ message: 'Nada para atualizar.' });
+    try {
+        const partnerId = buildComboioPartnerId(req.params.vehicleId);
+        // Garante que o partner existe antes de patchear
+        await ensureComboioPartner(db, req.params.vehicleId);
+        params.push(partnerId);
+        await db.query(`UPDATE partners SET ${sets.join(', ')} WHERE id = ?`, params);
+        if (req.io) req.io.emit('server:sync', { targets: ['partners'] });
+        res.json({ message: 'Contatos do comboio atualizados.' });
+    } catch (error) {
+        console.error('Erro ao atualizar contatos do comboio:', error);
+        res.status(500).json({ error: 'Erro ao atualizar contatos do comboio.' });
+    }
+});
+
+// Histórico de períodos por obra de um comboio (Fase 2.6)
+// Retorna períodos + totais agregados (litros entrada/saída/drenagem) por período.
+router.get('/comboios/:vehicleId/periodos', adminOnly, async (req, res) => {
+    try {
+        const { vehicleId } = req.params;
+        const periods = await listComboioPeriods(db, vehicleId);
+        if (periods.length === 0) return res.json([]);
+
+        const ids = periods.map(p => p.id);
+        const placeholders = ids.map(() => '?').join(',');
+        const [agg] = await db.query(
+            `SELECT obra_periodo_id, type, SUM(liters) AS total_litros, COUNT(*) AS qtd
+             FROM comboio_transactions
+             WHERE obra_periodo_id IN (${placeholders})
+             GROUP BY obra_periodo_id, type`,
+            ids
+        );
+        const aggMap = {};
+        for (const r of agg) {
+            const id = r.obra_periodo_id;
+            if (!aggMap[id]) aggMap[id] = { entrada: 0, saida: 0, drenagem: 0, qtdTotal: 0 };
+            aggMap[id][r.type] = Number(r.total_litros) || 0;
+            aggMap[id].qtdTotal += Number(r.qtd) || 0;
+        }
+        res.json(periods.map(p => ({
+            ...p,
+            totais: aggMap[p.id] || { entrada: 0, saida: 0, drenagem: 0, qtdTotal: 0 },
+        })));
+    } catch (error) {
+        console.error('Erro ao listar períodos do comboio:', error);
+        res.status(500).json({ error: 'Erro ao listar períodos do comboio.' });
+    }
+});
+
+// ─── LOG DE ERROS DE SOLICITAÇÃO DE ABASTECIMENTO (APP) ───────────────────────
+
+router.get('/solicitacao-erros', adminOnly, async (req, res) => {
+    try {
+        const { from, to, usuario_id, limit } = req.query;
+        const conds = [];
+        const params = [];
+        if (from)        { conds.push('created_at >= ?');   params.push(from); }
+        if (to)          { conds.push('created_at <= ?');   params.push(to + ' 23:59:59'); }
+        if (usuario_id)  { conds.push('usuario_id = ?');    params.push(usuario_id); }
+        const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+        const max = Math.min(parseInt(limit, 10) || 500, 2000);
+        const [rows] = await db.query(
+            `SELECT * FROM solicitacao_erros_log ${where} ORDER BY created_at DESC LIMIT ${max}`,
+            params
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('Erro ao listar log de erros:', error);
+        res.status(500).json({ error: 'Erro ao listar log de erros de solicitação.' });
+    }
+});
+
+router.get('/solicitacao-erros/resumo', adminOnly, async (req, res) => {
+    try {
+        const [porUsuario] = await db.query(`
+            SELECT usuario_id, usuario_nome, COUNT(*) AS total,
+                   MAX(created_at) AS ultimo_erro,
+                   SUM(tipo_erro = 'regressao')       AS qtd_regressao,
+                   SUM(tipo_erro = 'salto_excessivo') AS qtd_salto,
+                   SUM(tipo_erro = 'duplicado')       AS qtd_duplicado,
+                   SUM(tipo_erro = 'orcamento')       AS qtd_orcamento
+            FROM solicitacao_erros_log
+            WHERE created_at >= DATE_SUB(NOW(), INTERVAL 90 DAY)
+            GROUP BY usuario_id, usuario_nome
+            ORDER BY total DESC
+        `);
+        res.json({ porUsuario });
+    } catch (error) {
+        console.error('Erro ao gerar resumo de erros:', error);
+        res.status(500).json({ error: 'Erro ao gerar resumo.' });
+    }
+});
+
 // ─── SESSÕES ATIVAS (stub) ────────────────────────────────────────────────────
 
 router.get('/sessions', adminOnly, async (req, res) => {
@@ -706,6 +976,156 @@ router.post('/teste-whatsapp', async (req, res) => {
     } catch (error) {
         console.error(error);
         res.status(500).json({ sucesso: false, erro: 'Falha na comunicação com a Evolution API.' });
+    }
+});
+
+// ─── NOTIFICAÇÕES — Destinos por evento (Fase 3.1) ───────────────────────────
+// Lista todos os destinos cadastrados (opcionalmente filtrado por event_type).
+router.get('/notification-targets', adminOnly, async (req, res) => {
+    try {
+        const { event_type } = req.query;
+        const conds = [];
+        const params = [];
+        if (event_type) { conds.push('event_type = ?'); params.push(event_type); }
+        const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
+        const [rows] = await db.query(
+            `SELECT id, event_type, channel, target_type, target_value, label, active, created_at
+             FROM notification_targets
+             ${where}
+             ORDER BY event_type ASC, channel ASC, created_at ASC`,
+            params
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('Erro ao listar notification_targets:', error);
+        res.status(500).json({ error: 'Erro ao listar destinos de notificação.' });
+    }
+});
+
+router.post('/notification-targets', adminOnly, async (req, res) => {
+    try {
+        const { event_type, channel, target_type, target_value, label, active } = req.body || {};
+        if (!event_type || !channel || !target_type || !target_value) {
+            return res.status(400).json({ error: 'event_type, channel, target_type e target_value são obrigatórios.' });
+        }
+        const validChannels = ['whatsapp', 'email'];
+        const validTargetTypes = ['user', 'role', 'employee', 'phone', 'email_address'];
+        if (!validChannels.includes(channel)) return res.status(400).json({ error: 'channel inválido.' });
+        if (!validTargetTypes.includes(target_type)) return res.status(400).json({ error: 'target_type inválido.' });
+
+        const id = uuidv4();
+        await db.query(
+            `INSERT INTO notification_targets (id, event_type, channel, target_type, target_value, label, active)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [id, event_type, channel, target_type, String(target_value).trim(), label || null, active === 0 || active === false ? 0 : 1]
+        );
+        res.status(201).json({ id, message: 'Destino criado.' });
+    } catch (error) {
+        console.error('Erro ao criar notification_target:', error);
+        res.status(500).json({ error: 'Erro ao criar destino de notificação.' });
+    }
+});
+
+router.put('/notification-targets/:id', adminOnly, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const allowed = ['event_type', 'channel', 'target_type', 'target_value', 'label', 'active'];
+        const sets = [];
+        const params = [];
+        for (const key of allowed) {
+            if (req.body[key] !== undefined) {
+                sets.push(`${key} = ?`);
+                params.push(key === 'active' ? (req.body[key] ? 1 : 0) : req.body[key]);
+            }
+        }
+        if (sets.length === 0) return res.json({ message: 'Nada para atualizar.' });
+        params.push(id);
+        const [result] = await db.query(`UPDATE notification_targets SET ${sets.join(', ')} WHERE id = ?`, params);
+        if (!result.affectedRows) return res.status(404).json({ error: 'Destino não encontrado.' });
+        res.json({ message: 'Destino atualizado.' });
+    } catch (error) {
+        console.error('Erro ao atualizar notification_target:', error);
+        res.status(500).json({ error: 'Erro ao atualizar destino de notificação.' });
+    }
+});
+
+// ─── CONTATOS INTERNOS (Fase 4.1) ─────────────────────────────────────────────
+router.get('/internal-contacts', adminOnly, async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            `SELECT id, nome, cargo, setor, whatsapp, email, observacao, ativo, created_at
+             FROM internal_contacts
+             ORDER BY ativo DESC, nome ASC`
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('Erro ao listar internal_contacts:', error);
+        res.status(500).json({ error: 'Erro ao listar contatos internos.' });
+    }
+});
+
+router.post('/internal-contacts', adminOnly, async (req, res) => {
+    try {
+        const { nome, cargo, setor, whatsapp, email, observacao, ativo } = req.body || {};
+        if (!nome || !String(nome).trim()) return res.status(400).json({ error: 'Nome é obrigatório.' });
+        const id = uuidv4();
+        await db.query(
+            `INSERT INTO internal_contacts (id, nome, cargo, setor, whatsapp, email, observacao, ativo)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [id, String(nome).trim(), cargo || null, setor || null, whatsapp || null, email || null, observacao || null,
+             ativo === 0 || ativo === false ? 0 : 1]
+        );
+        res.status(201).json({ id, message: 'Contato criado.' });
+    } catch (error) {
+        console.error('Erro ao criar internal_contact:', error);
+        res.status(500).json({ error: 'Erro ao criar contato interno.' });
+    }
+});
+
+router.put('/internal-contacts/:id', adminOnly, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const allowed = ['nome', 'cargo', 'setor', 'whatsapp', 'email', 'observacao', 'ativo'];
+        const sets = [];
+        const params = [];
+        for (const key of allowed) {
+            if (req.body[key] !== undefined) {
+                sets.push(`${key} = ?`);
+                params.push(key === 'ativo' ? (req.body[key] ? 1 : 0) : (req.body[key] === '' ? null : req.body[key]));
+            }
+        }
+        if (sets.length === 0) return res.json({ message: 'Nada para atualizar.' });
+        params.push(id);
+        const [result] = await db.query(`UPDATE internal_contacts SET ${sets.join(', ')} WHERE id = ?`, params);
+        if (!result.affectedRows) return res.status(404).json({ error: 'Contato não encontrado.' });
+        res.json({ message: 'Contato atualizado.' });
+    } catch (error) {
+        console.error('Erro ao atualizar internal_contact:', error);
+        res.status(500).json({ error: 'Erro ao atualizar contato interno.' });
+    }
+});
+
+router.delete('/internal-contacts/:id', adminOnly, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const [result] = await db.query('DELETE FROM internal_contacts WHERE id = ?', [id]);
+        if (!result.affectedRows) return res.status(404).json({ error: 'Contato não encontrado.' });
+        res.status(204).end();
+    } catch (error) {
+        console.error('Erro ao excluir internal_contact:', error);
+        res.status(500).json({ error: 'Erro ao excluir contato interno.' });
+    }
+});
+
+router.delete('/notification-targets/:id', adminOnly, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const [result] = await db.query('DELETE FROM notification_targets WHERE id = ?', [id]);
+        if (!result.affectedRows) return res.status(404).json({ error: 'Destino não encontrado.' });
+        res.status(204).end();
+    } catch (error) {
+        console.error('Erro ao excluir notification_target:', error);
+        res.status(500).json({ error: 'Erro ao excluir destino de notificação.' });
     }
 });
 

@@ -1,4 +1,5 @@
 require('dotenv').config();
+require('dotenv').config({ path: '.env.local', override: true });
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -14,7 +15,36 @@ const http = require('http');
     const migrations = [
         { table: 'users',                  column: 'tentativas_falhas_abastecimento', def: 'INT DEFAULT 0' },
         { table: 'users',                  column: 'bloqueado_abastecimento',         def: 'TINYINT(1) DEFAULT 0' },
+        { table: 'users',                  column: 'page_permissions',                def: 'JSON DEFAULT NULL' },
         { table: 'comboio_transactions',   column: 'authNumber',                      def: 'INT UNSIGNED DEFAULT NULL' },
+        { table: 'obras',                  column: 'tipo_registro',                   def: "ENUM('obra','centro_custo') DEFAULT 'obra'" },
+        // FASE 1.3 — Campos adicionais em obras
+        { table: 'obras',                  column: 'orgao_contratante',               def: "VARCHAR(50) DEFAULT NULL" },
+        { table: 'obras',                  column: 'regiao',                          def: "ENUM('Lajeado','Santa Maria') DEFAULT NULL" },
+        // FASE 0.4 — Sub-tipos e médias de consumo
+        { table: 'vehicles',               column: 'sub_tipo',                        def: 'VARCHAR(100) DEFAULT NULL' },
+        { table: 'vehicles',               column: 'media_consumo',                   def: 'DECIMAL(10,3) DEFAULT NULL' },
+        { table: 'vehicles',               column: 'percentual_tolerancia',           def: 'DECIMAL(5,2) DEFAULT 20.00' },
+        // Veículos fictícios (ajuda de custo, gerador, lava-jato etc.) — ignoram bloqueio de ordem duplicada
+        { table: 'vehicles',               column: 'permiteMultiplosAbastecimentos',  def: 'TINYINT(1) DEFAULT 0' },
+        // Funcionários "placeholder" (COLABORADOR, TESTE, MAK SERVIÇOS etc.) usados
+        // como operador temporário ao alocar veículo em obra antes do operador real.
+        { table: 'employees',              column: 'isPlaceholder',                   def: 'TINYINT(1) DEFAULT 0' },
+        // FASE 2.4 — Toxicológico
+        { table: 'employees',              column: 'exameToxicologicoVencimento',      def: 'DATE DEFAULT NULL' },
+        // FASE 2.9 — Canais de envio de ordem para parceiros (posto)
+        { table: 'partners',               column: 'envia_por_whatsapp',               def: 'TINYINT(1) DEFAULT 0' },
+        { table: 'partners',               column: 'envia_por_email',                  def: 'TINYINT(1) DEFAULT 0' },
+        // FASE 2.10 — Colunas de movimentação de pneus
+        { table: 'tire_transactions',      column: 'employeeName',                     def: 'VARCHAR(255) NULL' },
+        { table: 'tire_transactions',      column: 'odometer',                         def: 'DECIMAL(10,1) NULL' },
+        { table: 'tire_transactions',      column: 'horimeter',                        def: 'DECIMAL(10,1) NULL' },
+        // FASE 2.6 — Comboio: períodos por obra + parceiro comboio
+        { table: 'comboio_transactions',   column: 'obra_periodo_id',                  def: 'VARCHAR(36) DEFAULT NULL' },
+        { table: 'partners',               column: 'vehicle_id',                       def: 'VARCHAR(36) DEFAULT NULL' },
+        // Campo KM/Hr atual no modal de OS/OC
+        { table: 'orders',                 column: 'kmHrAtual',                        def: 'DECIMAL(12,1) DEFAULT NULL' },
+        { table: 'orders',                 column: 'kmHrUnit',                         def: "VARCHAR(10) DEFAULT NULL" },
     ];
 
     for (const { table, column, def } of migrations) {
@@ -41,9 +71,431 @@ const http = require('http');
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_authNumber:', e.message);
     }
 
+    // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' ─────
+    // Causa do erro: "Data truncated for column 'tipo_parceiro' at row 1"
+    // ao distribuir combustível de comboio (qualquer gravação que tentasse
+    // 'comboio' falhava porque o ENUM só tinha 'posto' e 'fornecedor').
+    try {
+        await db.query(`
+            ALTER TABLE \`partners\`
+            MODIFY COLUMN \`tipo_parceiro\` ENUM('posto','fornecedor','comboio') DEFAULT 'posto'
+        `);
+        // Garante que nenhum registro fique com tipo nulo/vazio
+        await db.query(`UPDATE partners SET tipo_parceiro = 'posto' WHERE tipo_parceiro IS NULL OR tipo_parceiro = ''`);
+    } catch (e) {
+        console.warn('[migration] partners.tipo_parceiro ENUM:', e.message);
+    }
+
+    // ───── Seed de funcionários "placeholder" conhecidos ─────
+    // Marca como isPlaceholder=1 funcionários cujo nome bate com os usados
+    // historicamente como operador temporário ao alocar veículo a uma obra.
+    // Admin pode marcar mais funcionários manualmente pelo cadastro.
+    try {
+        await db.query(`
+            UPDATE employees
+            SET isPlaceholder = 1
+            WHERE isPlaceholder = 0
+              AND UPPER(TRIM(nome)) IN (
+                'COLABORADOR', 'TESTE', 'FUNC. TESTE', 'FUNC TESTE',
+                'FUNCIONÁRIO TESTE', 'FUNCIONARIO TESTE', 'MAK SERVIÇOS', 'MAK SERVICOS'
+              )
+        `);
+    } catch (e) {
+        console.warn('[migration] seed employees.isPlaceholder:', e.message);
+    }
+
     console.log('✅ Migração de schema concluída.');
 })();
-const { Server } = require("socket.io"); 
+
+// ====================================================================
+// MIGRAÇÃO AUTOMÁTICA — Tabelas Siga Sul (criação segura IF NOT EXISTS)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS sigasul_sync_state (
+                id INT PRIMARY KEY DEFAULT 1,
+                last_evento_controle_id BIGINT DEFAULT 0,
+                last_positions_sync_date DATE DEFAULT NULL,
+                last_summary_sync_date DATE DEFAULT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        await db.query(`INSERT IGNORE INTO sigasul_sync_state (id) VALUES (1)`);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS sigasul_positions (
+                pos_id_ref BIGINT PRIMARY KEY,
+                pos_data_hora_receb DATETIME NOT NULL,
+                pos_placa VARCHAR(20) NOT NULL,
+                pos_latitude DECIMAL(10,7),
+                pos_longitude DECIMAL(10,7),
+                pos_ignicao TINYINT(1),
+                pos_velocidade INT,
+                pos_odometro_calc INT,
+                pos_equip_id VARCHAR(50),
+                synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_placa_data (pos_placa, pos_data_hora_receb),
+                INDEX idx_data (pos_data_hora_receb)
+            )
+        `);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS sigasul_journeys (
+                id_jornada BIGINT PRIMARY KEY,
+                id_motorista INT,
+                nome_motorista VARCHAR(200),
+                cartao_motorista VARCHAR(50),
+                id_cliente INT,
+                nome_cliente VARCHAR(200),
+                data_inicial DATETIME,
+                data_final DATETIME,
+                duracao_segundos INT,
+                synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_data_inicial (data_inicial)
+            )
+        `);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS sigasul_journey_events (
+                id_evento BIGINT PRIMARY KEY,
+                id_evento_controle BIGINT UNIQUE,
+                id_jornada BIGINT NOT NULL,
+                id_tipo_evento INT,
+                nome_tipo_evento VARCHAR(100),
+                placa VARCHAR(20),
+                latitude DECIMAL(10,7),
+                longitude DECIMAL(10,7),
+                data_inicio DATETIME,
+                data_fim DATETIME,
+                synced_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_jornada (id_jornada),
+                INDEX idx_placa_data (placa, data_inicio),
+                INDEX idx_controle (id_evento_controle)
+            )
+        `);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS sigasul_daily_summary (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                placa VARCHAR(20) NOT NULL,
+                data DATE NOT NULL,
+                total_horas_ligado DECIMAL(8,4) DEFAULT 0,
+                total_km DECIMAL(10,2) DEFAULT 0,
+                num_eventos INT DEFAULT 0,
+                synced_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_placa_data (placa, data),
+                INDEX idx_data (data)
+            )
+        `);
+        console.log('✅ Migração Siga Sul concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] Siga Sul:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Tabela de Configuração de Tipos/Sub-tipos de Veículos
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_type_configs (
+                id              VARCHAR(36)    PRIMARY KEY,
+                tipo            VARCHAR(100)   NOT NULL,
+                sub_tipo        VARCHAR(100)   DEFAULT NULL,
+                media_consumo_padrao      DECIMAL(10,3)  DEFAULT NULL,
+                percentual_tolerancia_padrao  DECIMAL(5,2)   DEFAULT 20.00,
+                unidade         ENUM('L/h','h/L','Km/L','L/Km') NOT NULL DEFAULT 'L/h',
+                created_at      TIMESTAMP      DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_tipo_subtipo (tipo, sub_tipo)
+            )
+        `);
+        // Tabelas antigas: amplia o ENUM (L/hr,L/100km -> 4 unidades) e converte valores legados.
+        try {
+            await db.query(`ALTER TABLE vehicle_type_configs
+                MODIFY COLUMN unidade ENUM('L/h','h/L','Km/L','L/Km','L/hr','L/100km') NOT NULL DEFAULT 'L/h'`);
+            await db.query(`UPDATE vehicle_type_configs SET unidade = 'L/h'  WHERE unidade = 'L/hr'`);
+            await db.query(`UPDATE vehicle_type_configs SET unidade = 'Km/L' WHERE unidade = 'L/100km'`);
+            await db.query(`ALTER TABLE vehicle_type_configs
+                MODIFY COLUMN unidade ENUM('L/h','h/L','Km/L','L/Km') NOT NULL DEFAULT 'L/h'`);
+        } catch (e2) {
+            console.warn('⚠️ [migration] ajuste ENUM unidade:', e2.message);
+        }
+        console.log('✅ Migração vehicle_type_configs concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] vehicle_type_configs:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Taxonomia de Veículos (grupos → tipos → sub-tipos)
+// Com seed idempotente a partir de utils/vehicleRules (fallback hardcoded)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_groups (
+                id          VARCHAR(36)  PRIMARY KEY,
+                nome        VARCHAR(100) NOT NULL UNIQUE,
+                unidade     ENUM('L/h','h/L','Km/L','L/Km') NOT NULL DEFAULT 'L/h',
+                ordem       INT          DEFAULT 0,
+                created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                updated_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_types (
+                id          VARCHAR(36)  PRIMARY KEY,
+                group_id    VARCHAR(36)  NOT NULL,
+                nome        VARCHAR(100) NOT NULL,
+                created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                updated_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_group_nome (group_id, nome),
+                CONSTRAINT fk_vt_group FOREIGN KEY (group_id) REFERENCES vehicle_groups(id) ON DELETE CASCADE
+            )
+        `);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_sub_types (
+                id          VARCHAR(36)  PRIMARY KEY,
+                type_id     VARCHAR(36)  NOT NULL,
+                nome        VARCHAR(100) NOT NULL,
+                created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                updated_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_type_nome (type_id, nome),
+                CONSTRAINT fk_vst_type FOREIGN KEY (type_id) REFERENCES vehicle_types(id) ON DELETE CASCADE
+            )
+        `);
+
+        // Seed apenas quando vazio (não sobrescreve edições do admin)
+        const [[{ total }]] = await db.query('SELECT COUNT(*) AS total FROM vehicle_groups');
+        if (total === 0) {
+            const { randomUUID } = require('crypto');
+            const { vehicleGroups, vehicleSubTypes } = require('./utils/vehicleRules');
+            const groupNames = Object.keys(vehicleGroups);
+            let ordem = 0;
+            for (const grupo of groupNames) {
+                const unidade = (grupo === 'Veículos Leves' || grupo === 'Caminhões de Trecho') ? 'Km/L' : 'L/h';
+                const groupId = randomUUID();
+                await db.query(
+                    'INSERT INTO vehicle_groups (id, nome, unidade, ordem) VALUES (?, ?, ?, ?)',
+                    [groupId, grupo, unidade, ordem++]
+                );
+                for (const tipo of vehicleGroups[grupo]) {
+                    const typeId = randomUUID();
+                    await db.query(
+                        'INSERT INTO vehicle_types (id, group_id, nome) VALUES (?, ?, ?)',
+                        [typeId, groupId, tipo]
+                    );
+                    for (const sub of (vehicleSubTypes[tipo] || [])) {
+                        await db.query(
+                            'INSERT INTO vehicle_sub_types (id, type_id, nome) VALUES (?, ?, ?)',
+                            [randomUUID(), typeId, sub]
+                        );
+                    }
+                }
+            }
+            console.log('🌱 Seed de taxonomia de veículos populado.');
+        }
+        console.log('✅ Migração taxonomia de veículos concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] taxonomia de veículos:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Tabela de períodos por obra dos comboios (Fase 2.6)
+// Toda vez que um comboio é alocado/realocado entre obras, fechamos o
+// período anterior e abrimos um novo. Permite atribuir cada transação
+// do comboio a uma "estadia" específica em uma obra.
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS comboio_periodos_obra (
+                id          VARCHAR(36) PRIMARY KEY,
+                comboio_id  VARCHAR(36) NOT NULL,
+                obra_id     VARCHAR(36) NOT NULL,
+                data_inicio DATETIME    NOT NULL,
+                data_fim    DATETIME    DEFAULT NULL,
+                ativo       TINYINT(1)  DEFAULT 1,
+                created_at  TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_comboio (comboio_id),
+                INDEX idx_obra    (obra_id),
+                INDEX idx_ativo   (ativo)
+            )
+        `);
+
+        // Backfill: para cada veículo-comboio com obraAtualId mas sem período ativo,
+        // abre um período. Idempotente — só faz nada se já existir.
+        const { ensureOpenComboioPeriod } = require('./utils/comboioPeriodo');
+        const [comboios] = await db.query(
+            "SELECT id, obraAtualId FROM vehicles WHERE isComboioVehicle = 1 AND obraAtualId IS NOT NULL"
+        );
+        let opened = 0;
+        for (const c of comboios) {
+            const result = await ensureOpenComboioPeriod(db, c.id, c.obraAtualId);
+            if (result?.created) opened++;
+        }
+        console.log(`✅ comboio_periodos_obra: ${opened} períodos abertos (backfill).`);
+    } catch (e) {
+        console.warn('⚠️ [migration] comboio_periodos_obra:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Tabela de contatos internos (Fase 4.1)
+// Cadastro central de pessoas-chave (RH, Coordenação, Gestores) para
+// referência rápida e como destinos de notificação futuros.
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS internal_contacts (
+                id         VARCHAR(36)  PRIMARY KEY,
+                nome       VARCHAR(200) NOT NULL,
+                cargo      VARCHAR(100) DEFAULT NULL,
+                setor      VARCHAR(100) DEFAULT NULL,
+                whatsapp   VARCHAR(20)  DEFAULT NULL,
+                email      VARCHAR(200) DEFAULT NULL,
+                observacao VARCHAR(500) DEFAULT NULL,
+                ativo      TINYINT(1)   DEFAULT 1,
+                created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_ativo (ativo),
+                INDEX idx_nome  (nome)
+            )
+        `);
+        console.log('✅ internal_contacts: tabela ok.');
+    } catch (e) {
+        console.warn('⚠️ [migration] internal_contacts:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Tabela de destinos de notificação (Fase 3.1)
+// Configura, por event_type + canal (whatsapp/email), quem deve receber
+// notificações. Substitui destinatários hardcoded no cronService.
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS notification_targets (
+                id           VARCHAR(36)   PRIMARY KEY,
+                event_type   VARCHAR(100)  NOT NULL,
+                channel      ENUM('whatsapp','email') NOT NULL,
+                target_type  ENUM('user','role','employee','phone','email_address') NOT NULL,
+                target_value VARCHAR(255)  NOT NULL,
+                label        VARCHAR(200)  DEFAULT NULL,
+                active       TINYINT(1)    DEFAULT 1,
+                created_at   TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_event   (event_type),
+                INDEX idx_channel (channel),
+                INDEX idx_active  (active)
+            )
+        `);
+        console.log('✅ notification_targets: tabela ok.');
+    } catch (e) {
+        console.warn('⚠️ [migration] notification_targets:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Garante partner-espelho para todo veículo-comboio existente
+// ====================================================================
+(async () => {
+    try {
+        const { syncAllComboioPartners } = require('./utils/ensureComboioPartner');
+        const result = await syncAllComboioPartners(db);
+        console.log(`✅ Comboio→partners sync: ${result.synced}/${result.total} veículos.`);
+    } catch (e) {
+        console.warn('⚠️ [migration] sync comboio→partners:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Tabela de log de erros de solicitação de abastecimento (app)
+// Registra cada tentativa errônea (regressão de leitura, salto excessivo,
+// duplicidade, estouro orçamentário) para análise de quem/quando/por quê.
+// Também desbloqueia usuários que ficaram travados pelo antigo limite de 3.
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS solicitacao_erros_log (
+                id              INT AUTO_INCREMENT PRIMARY KEY,
+                usuario_id      INT          NOT NULL,
+                usuario_nome    VARCHAR(200) DEFAULT NULL,
+                veiculo_id      VARCHAR(36)  DEFAULT NULL,
+                veiculo_placa   VARCHAR(20)  DEFAULT NULL,
+                obra_id         VARCHAR(36)  DEFAULT NULL,
+                campo_erro      VARCHAR(50)  NOT NULL,
+                tipo_erro       VARCHAR(50)  NOT NULL,
+                mensagem        TEXT         NOT NULL,
+                valor_informado VARCHAR(50)  DEFAULT NULL,
+                valor_anterior  VARCHAR(50)  DEFAULT NULL,
+                created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_usuario (usuario_id),
+                INDEX idx_data    (created_at)
+            )
+        `);
+        // Liberar usuários bloqueados pelo antigo critério dos 3 erros
+        await db.query('UPDATE users SET bloqueado_abastecimento = 0 WHERE bloqueado_abastecimento = 1');
+        console.log('✅ Migração solicitacao_erros_log concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] solicitacao_erros_log:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Fase 1.2: Tabela de médias de consumo de combustível
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_fuel_averages (
+                id                VARCHAR(36)    PRIMARY KEY,
+                vehicle_id        VARCHAR(36)    NOT NULL,
+                vehicle_tipo      VARCHAR(100),
+                vehicle_sub_tipo  VARCHAR(100),
+                last_refueling_id VARCHAR(36),
+                avg_last_1        DECIMAL(10,3)  DEFAULT NULL,
+                avg_last_2        DECIMAL(10,3)  DEFAULT NULL,
+                avg_last_3        DECIMAL(10,3)  DEFAULT NULL,
+                avg_by_tipo       DECIMAL(10,3)  DEFAULT NULL,
+                avg_by_subtipo    DECIMAL(10,3)  DEFAULT NULL,
+                updated_at        TIMESTAMP      DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_vehicle (vehicle_id),
+                INDEX idx_tipo    (vehicle_tipo),
+                FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE
+            )
+        `);
+        console.log('✅ Migração vehicle_fuel_averages concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] vehicle_fuel_averages:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Tabela de Períodos de Obra do Comboio (Fase 2.6)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS comboio_periodos_obra (
+                id          VARCHAR(36)  PRIMARY KEY,
+                comboio_id  VARCHAR(36)  NOT NULL,
+                obra_id     VARCHAR(36)  NOT NULL,
+                data_inicio DATETIME     NOT NULL,
+                data_fim    DATETIME     DEFAULT NULL,
+                ativo       TINYINT(1)   DEFAULT 1,
+                INDEX idx_comboio (comboio_id),
+                INDEX idx_obra    (obra_id)
+            )
+        `);
+        console.log('✅ Migração comboio_periodos_obra concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] comboio_periodos_obra:', e.message);
+    }
+})();
+
+const { Server } = require("socket.io");
 const multer = require('multer');
 
 // ====================================================================
@@ -71,7 +523,8 @@ const defaultOrigins = [
   'http://127.0.0.1:3001',
   'https://frotamak.com',
   'https://www.frotamak.com',
-  'https://frotasmak-frotas-backend.oehpg2.easypanel.host'
+  'https://frotasmak-frotas-backend.oehpg2.easypanel.host',
+  'https://frotasmak-front-desenvolvimento.oehpg2.easypanel.host'
 ];
 
 // 🚨 CORREÇÃO: Unimos as origens padrão com as customizadas para garantir que o sistema não perca o acesso
@@ -115,7 +568,8 @@ const app = express();
 // sem precisarmos definir app.options('*', ...) o que estava quebrando o path-to-regexp atualizado.
 app.use(cors(corsOptions));
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // 🚨 CORREÇÃO: Rota vazia para o favicon.ico para não poluir os logs com erro 404
 app.get('/favicon.ico', (req, res) => res.status(204).end());
@@ -201,6 +655,8 @@ const washingRoutes = require('./routes/washingRoutes');
 const inventoryRoutes = require('./routes/inventoryRoutes');
 const whatsappRoutes = require('./routes/whatsappRoutes');
 const sigasulRoutes = require('./routes/sigasulRoutes');
+const vehicleTypeConfigRoutes = require('./routes/vehicleTypeConfigRoutes');
+const vehicleTaxonomyRoutes = require('./routes/vehicleTaxonomyRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -313,6 +769,8 @@ apiRouter.use('/agenda', agendaRoutes);
 apiRouter.use('/inventory', inventoryRoutes);
 apiRouter.use('/whatsapp', whatsappRoutes);
 apiRouter.use('/sigasul', sigasulRoutes);
+apiRouter.use('/vehicle-type-configs', vehicleTypeConfigRoutes);
+apiRouter.use('/vehicle-taxonomy', vehicleTaxonomyRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware

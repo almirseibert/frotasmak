@@ -1,5 +1,7 @@
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
+const { updateVehicleReading } = require('../utils/updateVehicleReading');
+const { dispatchAsync } = require('../services/notificationDispatcher');
 
 // ===================================================================================
 // FUNÇÃO AUXILIAR DE PARSE SEGURO
@@ -35,7 +37,7 @@ const parseObraJsonFields = (obra) => {
 // --- GET ALL OBRAS ---
 const getAllObras = async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT * FROM obras');
+        const [rows] = await db.query('SELECT * FROM obras ORDER BY nome ASC');
         const [historyRows] = await db.query('SELECT * FROM obras_historico_veiculos');
 
         const [billingRows] = await db.query(`
@@ -143,6 +145,13 @@ const createObra = async (req, res) => {
         // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['obras'] });
 
+        // Notificação configurável (Fase 3.2)
+        dispatchAsync('obra_criada', {
+            nome: data.nome,
+            orgao_contratante: data.orgao_contratante || data.orgaoContratante || null,
+            regiao: data.regiao || null,
+        });
+
         res.status(201).json({ message: 'Obra criada com sucesso' });
     } catch (error) {
         console.error('Erro ao criar obra:', error);
@@ -182,10 +191,33 @@ const updateObra = async (req, res) => {
     const query = `UPDATE obras SET ${setClause} WHERE id = ?`;
 
     try {
+        // Snapshot anterior para detectar cruzamento de marcos de progresso
+        let pctAntes = null;
+        const newPct = req.body.percentualConcluido ?? req.body.progresso;
+        if (newPct != null) {
+            try {
+                const [prevRows] = await db.query('SELECT nome, percentualConcluido FROM obras WHERE id = ?', [id]);
+                if (prevRows[0]) pctAntes = Number(prevRows[0].percentualConcluido) || 0;
+            } catch { /* coluna pode não existir — ignora */ }
+        }
+
         await db.execute(query, [...values, id]);
 
         // EMITIR EVENTO SOCKET.IO
         req.io.emit('server:sync', { targets: ['obras'] });
+
+        // Notificação configurável (Fase 3.2) — marcos 30/50/70%
+        if (newPct != null && pctAntes != null) {
+            const pctDepois = Number(newPct) || 0;
+            const marcos = [30, 50, 70];
+            for (const m of marcos) {
+                if (pctAntes < m && pctDepois >= m) {
+                    const [r] = await db.query('SELECT nome FROM obras WHERE id = ?', [id]);
+                    dispatchAsync('obra_progresso', { obra: r[0]?.nome || '—', pct: m });
+                    break;
+                }
+            }
+        }
 
         res.json({ message: 'Obra atualizada com sucesso' });
     } catch (error) {
@@ -287,29 +319,19 @@ const updateObraHistoryEntry = async (req, res) => {
             employeeName = null;
         }
 
-        // 3. Prepara valores de leitura baseado no tipo do veículo (armazenado no histórico)
-        const leveOuTrecho = [
-            'Automóvel', 'Camionete', 'Utilitários', 'Moto',
-            'Caminhão Prancha', 'Semirreboques'
-        ].includes(currentEntry.tipo);
-
+        // 3. Prepara valores de leitura (mantém o que já existia ou atualiza)
         let odometroEntrada = currentEntry.odometroEntrada;
         let horimetroEntrada = currentEntry.horimetroEntrada;
         let odometroSaida = currentEntry.odometroSaida;
         let horimetroSaida = currentEntry.horimetroSaida;
 
-        if (leveOuTrecho) {
-            // Veículo leve ou trecho: usa odômetro
-            if (leituraEntrada !== undefined) odometroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
-            if (leituraSaida !== undefined) odometroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
-            horimetroEntrada = null;
-            horimetroSaida = null;
+        // Se o registro original tinha odômetro ou se a nova leitura veio e não há horímetro
+        if (currentEntry.odometroEntrada !== null || (leituraEntrada && !currentEntry.horimetroEntrada)) {
+            odometroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
+            odometroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
         } else {
-            // Caminhão pesado ou máquina: usa horímetro
-            if (leituraEntrada !== undefined) horimetroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
-            if (leituraSaida !== undefined) horimetroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
-            odometroEntrada = null;
-            odometroSaida = null;
+            horimetroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
+            horimetroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
         }
 
         // 4. ATUALIZA 'obras_historico_veiculos'
@@ -331,8 +353,21 @@ const updateObraHistoryEntry = async (req, res) => {
             historyId
         ]);
 
-        // 5. PROPAGAÇÃO DE MUDANÇAS (Sincronização)
-        
+        // 5. Propaga leitura máxima (entrada ou saída) para vehicles
+        {
+            const [[vRow]] = await connection.execute('SELECT tipo FROM vehicles WHERE id = ?', [veiculoId]);
+            if (vRow) {
+                const maxOdo = Math.max(odometroEntrada || 0, odometroSaida || 0);
+                const maxHor = Math.max(horimetroEntrada || 0, horimetroSaida || 0);
+                const readingVal = maxOdo > 0 ? maxOdo : (maxHor > 0 ? maxHor : null);
+                if (readingVal) {
+                    await updateVehicleReading(connection, veiculoId, vRow.tipo, readingVal, 'auto');
+                }
+            }
+        }
+
+        // 6. PROPAGAÇÃO DE MUDANÇAS (Sincronização)
+
         // Verifica se é uma alocação ATIVA (sem data de saída)
         const isActiveAllocation = (!dataSaida && !currentEntry.dataSaida);
 

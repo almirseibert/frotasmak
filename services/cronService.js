@@ -1,6 +1,8 @@
 const cron = require('node-cron');
 const db = require('../database');
 const whatsappService = require('./whatsappService');
+const { dispatchAsync } = require('./notificationDispatcher');
+const { syncJourneyEvents, syncPositions, syncDailySummary } = require('./sigasulSyncService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -105,6 +107,9 @@ const horaTeste = getGmt3Date();
 console.log(`✅ [CRON] Inicializado. Horário atual calculado (GMT-3): ${String(horaTeste.getUTCHours()).padStart(2, '0')}:${String(horaTeste.getUTCMinutes()).padStart(2, '0')}`);
 console.log(`✅ [CRON] Rotina diária de RH configurada para disparar às: ${String(HORA_EXECUCAO).padStart(2, '0')}:${String(MINUTO_EXECUCAO).padStart(2, '0')}`);
 
+// item 12: rastreia sessões que já receberam aviso de timeout (sem schema change)
+const chatbotTimeoutWarningsSent = new Set();
+
 // ====================================================================
 // O CRON RODA TODO MINUTO PARA GARANTIR A PRECISÃO (Agenda e Diário)
 // ====================================================================
@@ -138,6 +143,7 @@ cron.schedule('* * * * *', async () => {
                         `, [daqui30DiasStr]);
 
                         for (const emp of cnhVencendo) {
+                            // cnh_vencendo (Fase 3.2) — disparado em C (vencimentosRH) para evitar duplicidade
                             for (const gestor of gestores) {
                                 try {
                                     await db.query(`
@@ -220,6 +226,16 @@ cron.schedule('* * * * *', async () => {
 
                             // Se atingiu o limite, grava na Agenda e envia WhatsApp
                             if (needsMaintenance) {
+                                // Notificação configurável (Fase 3.2)
+                                const eventoRev = usaOdometro ? 'revisao_veiculo_leve' : 'revisao_veiculo_pesado';
+                                dispatchAsync(eventoRev, {
+                                    placa: v.placa,
+                                    modelo: `${v.marca || ''} ${v.modelo || ''}`.trim(),
+                                    kmAtual: v.hodometro,
+                                    kmRevisao: v.proximaRevisaoOdometro,
+                                    hrAtual: v.horimetro,
+                                    hrRevisao: v.proximaRevisaoHorimetro,
+                                });
                                 let enviouAgendaRecentemente = false;
                                 
                                 for (const gestor of gestores) {
@@ -272,6 +288,11 @@ cron.schedule('* * * * *', async () => {
                         const cnhVenc = formatDateDb(emp.cnhVencimento);
                         const toxVenc = formatDateDb(emp.exameToxicologicoVencimento);
 
+                        // Notificações configuráveis (Fase 3.2)
+                        if (cnhVenc === daqui30DiasStr) dispatchAsync('cnh_vencendo',          { funcionario: emp.nome, vencimento: emp.cnhVencimento,             dias: 30 });
+                        if (cnhVenc === todayStr)       dispatchAsync('cnh_vencida',           { funcionario: emp.nome, vencimento: emp.cnhVencimento });
+                        if (toxVenc === daqui30DiasStr) dispatchAsync('toxicologico_vencendo', { funcionario: emp.nome, vencimento: emp.exameToxicologicoVencimento, dias: 30 });
+
                         if (emp.contato && typeof whatsappService !== 'undefined') {
                             if (cnhVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta CNH 30 Dias', formatMsgFuncionario(`Olá ${emp.nome}, sua CNH vencerá em 30 dias. Por favor, programe a renovação.`)).catch(()=>{});
                             if (toxVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta Toxicológico 30 Dias', formatMsgFuncionario(`Olá ${emp.nome}, seu Exame Toxicológico vencerá em 30 dias. Por favor, programe a renovação.`)).catch(()=>{});
@@ -300,11 +321,17 @@ cron.schedule('* * * * *', async () => {
                     for (const emp of afastados) {
                         try {
                             await db.query(`
-                                UPDATE employees 
+                                UPDATE employees
                                 SET statusAfastamentoTipo = NULL, statusAfastamentoTermino = NULL, dataRetornoAfastamento = ?
                                 WHERE id = ?
                             `, [todayStr, emp.id]);
                         } catch(e) { console.error(`Erro ao atualizar BD para retorno de ${emp.nome}`, e); }
+
+                        // Notificação configurável (Fase 3.2)
+                        if (String(emp.statusAfastamentoTipo || '').toLowerCase().includes('férias')
+                            || String(emp.statusAfastamentoTipo || '').toLowerCase().includes('ferias')) {
+                            dispatchAsync('funcionario_retornou_ferias', { nome: emp.nome });
+                        }
 
                         for (const gestor of gestores) {
                             try {
@@ -329,6 +356,72 @@ cron.schedule('* * * * *', async () => {
                     }
                 } catch (e) { console.error('❌ [CRON] Erro Retorno Afastamento:', e.message); }
 
+                // --- E. DOCUMENTOS DE VEÍCULO VENCIDOS (Fase 3.2) ---
+                try {
+                    const [docsVencidos] = await db.query(`
+                        SELECT id, placa, registroInterno, vencimentoCRLV, vencimentoSeguro
+                        FROM vehicles
+                        WHERE status = 'Ativo'
+                          AND ((vencimentoCRLV IS NOT NULL AND vencimentoCRLV = ?) OR
+                               (vencimentoSeguro IS NOT NULL AND vencimentoSeguro = ?))
+                    `, [todayStr, todayStr]);
+
+                    for (const v of docsVencidos) {
+                        if (formatDateDb(v.vencimentoCRLV) === todayStr) {
+                            dispatchAsync('documento_veiculo_vencido', {
+                                placa: v.placa,
+                                tipoDocumento: 'CRLV',
+                                vencimento: v.vencimentoCRLV,
+                            });
+                        }
+                        if (formatDateDb(v.vencimentoSeguro) === todayStr) {
+                            dispatchAsync('documento_veiculo_vencido', {
+                                placa: v.placa,
+                                tipoDocumento: 'Seguro',
+                                vencimento: v.vencimentoSeguro,
+                            });
+                        }
+                    }
+                } catch (e) { console.error('❌ [CRON] Erro Documentos Veículo:', e.message); }
+
+                // --- F. VEÍCULOS EM OBRA COM OPERADOR PLACEHOLDER (>7 DIAS) ---
+                // Lista veículos cujo operador atual na obra é "fictício" (COLABORADOR,
+                // TESTE, MAK SERVIÇOS etc.) e que estão assim há mais de 7 dias.
+                // Dispara um único evento agregando todos numa só mensagem para
+                // não inundar o destinatário (Plinio, configurado em notification_targets).
+                try {
+                    const [placeholders] = await db.query(`
+                        SELECT v.id, v.placa, v.registroInterno,
+                               h.dataEntrada, e.nome AS operadorPlaceholder,
+                               o.nome AS obraNome,
+                               DATEDIFF(NOW(), h.dataEntrada) AS dias
+                          FROM obras_historico_veiculos h
+                          INNER JOIN vehicles  v ON v.id = h.veiculoId
+                          INNER JOIN employees e ON e.id = h.employeeId
+                          LEFT  JOIN obras     o ON o.id = h.obraId
+                         WHERE h.dataSaida IS NULL
+                           AND e.isPlaceholder = 1
+                           AND h.dataEntrada <= DATE_SUB(NOW(), INTERVAL 7 DAY)
+                         ORDER BY h.dataEntrada ASC
+                    `);
+
+                    if (placeholders.length > 0) {
+                        dispatchAsync('operador_placeholder_obra_7dias', {
+                            veiculos: placeholders.map(p => ({
+                                id: p.id,
+                                placa: p.placa,
+                                registroInterno: p.registroInterno,
+                                obraNome: p.obraNome,
+                                operadorPlaceholder: p.operadorPlaceholder,
+                                dataEntrada: p.dataEntrada,
+                                dias: Number(p.dias) || 0,
+                            })),
+                            total: placeholders.length,
+                        });
+                        console.log(`📋 [CRON] ${placeholders.length} veículo(s) com operador placeholder >7d.`);
+                    }
+                } catch (e) { console.error('❌ [CRON] Erro Operador Placeholder >7d:', e.message); }
+
                 console.log('✅ [CRON] Rotina diária concluída com sucesso sem erros.');
             } catch (error) {
                 console.error('❌ [CRON] Erro grave na rotina diária:', error);
@@ -338,9 +431,32 @@ cron.schedule('* * * * *', async () => {
         }
 
         // ====================================================================
-        // 2. LIMPEZA DE SESSÕES CHATBOT (roda a cada minuto — idempotente)
-        // Remove sessões inativas há mais de 30min que não foram concluídas
+        // 2. LIMPEZA + AVISO DE TIMEOUT DO CHATBOT
         // ====================================================================
+        // item 12: avisa sessões prestes a expirar (entre 25 e 29 min de inatividade)
+        try {
+            const [quaseExpirando] = await db.query(
+                `SELECT id, phone_number, employee_name FROM whatsapp_chatbot_sessions
+                 WHERE step NOT IN ('concluido', 'cancelado', 'processando')
+                   AND last_activity BETWEEN DATE_SUB(NOW(), INTERVAL 29 MINUTE)
+                                        AND DATE_SUB(NOW(), INTERVAL 25 MINUTE)`
+            );
+            for (const s of quaseExpirando) {
+                if (!chatbotTimeoutWarningsSent.has(s.id)) {
+                    chatbotTimeoutWarningsSent.add(s.id);
+                    await whatsappService.enviarMensagem(
+                        s.phone_number,
+                        s.employee_name || 'Usuário',
+                        'CHATBOT_TIMEOUT_AVISO',
+                        `⏰ Sua solicitação de abastecimento será cancelada em 5 minutos por inatividade.\n\nResponda para continuar ou envie *cancelar* para encerrar.`
+                    ).catch(e => console.error('[CRON] Erro ao enviar aviso timeout chatbot:', e.message));
+                }
+            }
+            // Limpa o Set periodicamente para não crescer indefinidamente
+            if (chatbotTimeoutWarningsSent.size > 500) chatbotTimeoutWarningsSent.clear();
+        } catch (e) { console.error('❌ [CRON] Erro no aviso timeout chatbot:', e.message); }
+
+        // Remove sessões inativas há mais de 30min que não foram concluídas
         try {
             await db.query(
                 `UPDATE whatsapp_chatbot_sessions SET step = 'cancelado'
@@ -414,8 +530,26 @@ cron.schedule('* * * * *', async () => {
                 }
             }
         }
+        // ====================================================================
+        // 4. SYNC INCREMENTAL SIGA SUL (jornadas, a cada minuto)
+        // ====================================================================
+        try {
+            await syncJourneyEvents();
+        } catch (e) { console.error('❌ [CRON] Erro syncJourneyEvents:', e.message); }
+
     } catch (error) {
         console.error('❌ [CRON] Erro crítico no Tick do Cron:', error);
+    }
+});
+
+// ====================================================================
+// CRON DIÁRIO — Sync de posições GPS Siga Sul (02:05 GMT-3)
+// ====================================================================
+cron.schedule('5 5 * * *', async () => {
+    try {
+        await syncPositions();
+    } catch (e) {
+        console.error('❌ [CRON] Erro syncPositions:', e.message);
     }
 });
 
@@ -425,28 +559,43 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('0 2 * * 0', () => {
     const { join } = require('path');
     const { readdir, stat, unlink } = require('fs');
-    const uploadPath = join(__dirname, '../public/uploads/orders');
     const maxAge = 30 * 24 * 60 * 60 * 1000; // 30 dias
     const now = Date.now();
 
-    readdir(uploadPath, (err, files) => {
-        if (err) return;
-        files.forEach(file => {
-            const filePath = join(uploadPath, file);
-            stat(filePath, (err, stats) => {
-                if (err) return;
-                if (now - stats.mtime.getTime() > maxAge) {
-                    unlink(filePath, () => {});
-                }
+    // Diretórios cobertos: PDFs antigos (frontend jsPDF) e os novos PDFs
+    // server-side gerados pelo orderNotifier para envio automático.
+    const dirs = [
+        join(__dirname, '../public/uploads/orders'),
+        join(__dirname, '../public/uploads/ordens'),
+    ];
+
+    dirs.forEach(uploadPath => {
+        readdir(uploadPath, (err, files) => {
+            if (err) return; // diretório pode não existir ainda
+            files.forEach(file => {
+                const filePath = join(uploadPath, file);
+                stat(filePath, (err, stats) => {
+                    if (err) return;
+                    if (now - stats.mtime.getTime() > maxAge) {
+                        unlink(filePath, (e) => {
+                            if (!e) console.log(`[cron-cleanup] removido ${filePath}`);
+                        });
+                    }
+                });
             });
         });
     });
 });
 
 // ====================================================================
-// CRON DIÁRIO — Rotação de logs WhatsApp (mantém só os últimos 6 meses)
+// CRON DIÁRIO — Sync resumo diário Siga Sul + Rotação de logs WhatsApp
 // ====================================================================
 cron.schedule('0 3 * * *', async () => {
+    try {
+        await syncDailySummary();
+    } catch (e) {
+        console.error('❌ [CRON] Erro syncDailySummary:', e.message);
+    }
     try {
         await db.query(`DELETE FROM whatsapp_logs WHERE data_envio < DATE_SUB(NOW(), INTERVAL 6 MONTH)`);
     } catch (e) {

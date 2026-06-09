@@ -1,7 +1,9 @@
 const db = require('../database');
 const { randomUUID } = require('crypto');
-const fs = require('fs'); 
-const path = require('path'); 
+const fs = require('fs');
+const path = require('path');
+const { ensureComboioPartner, deactivateComboioPartner } = require('../utils/ensureComboioPartner');
+const { openPeriod: openComboioPeriod, closeActivePeriod: closeComboioPeriod } = require('../utils/comboioPeriodo');
 
 // --- FUNÇÕES AUXILIARES ---
 
@@ -44,6 +46,7 @@ const getAllVehicles = async (req, res) => {
             LEFT JOIN (
                 SELECT vehicle_id, COUNT(*) AS cnt FROM checklists GROUP BY vehicle_id
             ) cc ON cc.vehicle_id = v.id
+            ORDER BY v.registroInterno ASC, v.placa ASC
         `;
         const [rows] = await db.execute(query);
         const vehicles = rows.map(parseVehicleJsonFields);
@@ -76,6 +79,27 @@ const getVehicleById = async (req, res) => {
     }
 };
 
+// Garante que veículo comboio tem entrada correspondente em partners
+const syncComboioPartner = async (vehicleId, registroInterno, placa, ativo) => {
+    try {
+        const nome = `Comboio ${registroInterno || placa || vehicleId}`;
+        const status = ativo ? 'ativo' : 'inativo';
+        const { randomUUID } = require('crypto');
+        const [[existing]] = await db.execute('SELECT id FROM partners WHERE vehicle_id = ?', [vehicleId]);
+        if (existing) {
+            await db.execute('UPDATE partners SET razaoSocial = ?, status_operacional = ? WHERE vehicle_id = ?', [nome, status, vehicleId]);
+        } else {
+            const partnerId = randomUUID();
+            await db.execute(
+                `INSERT INTO partners (id, razaoSocial, tipo_parceiro, status_operacional, vehicle_id) VALUES (?, ?, 'comboio', ?, ?)`,
+                [partnerId, nome, status, vehicleId]
+            );
+        }
+    } catch (err) {
+        console.warn('[syncComboioPartner]', err.message);
+    }
+};
+
 const createVehicle = async (req, res) => {
     const data = req.body;
     
@@ -95,8 +119,13 @@ const createVehicle = async (req, res) => {
 
     try {
         await db.execute(query, values);
-        req.io.emit('server:sync', { targets: ['vehicles'] });
-        res.status(201).json({ ...req.body, id: data.id }); 
+        // Se for veículo comboio, garante o registro correspondente em `partners`
+        if (data.isComboioVehicle == 1 || data.isComboioVehicle === true) {
+            try { await ensureComboioPartner(db, data.id); }
+            catch (e) { console.warn('[ensureComboioPartner createVehicle]', e.message); }
+        }
+        req.io.emit('server:sync', { targets: ['vehicles', 'partners'] });
+        res.status(201).json({ ...req.body, id: data.id });
     } catch (error) {
         console.error('Erro ao criar veículo:', error);
         res.status(500).json({ error: 'Erro ao criar veículo: ' + error.message });
@@ -105,19 +134,17 @@ const createVehicle = async (req, res) => {
 
 // Whitelist de colunas permitidas em UPDATE — evita SQL injection por nome de campo
 const ALLOWED_VEHICLE_FIELDS = new Set([
-    'placa', 'registroInterno', 'tipo', 'marca', 'modelo', 'anoFabricacao', 'anoCombustivel',
-    'ano_fabricacao', 'ano_modelo',
+    'placa', 'registroInterno', 'tipo', 'sub_tipo', 'marca', 'modelo', 'anoFabricacao', 'anoCombustivel',
     'status', 'localizacaoAtual', 'obraAtualId', 'fotoURL', 'cor', 'renavam', 'chassi',
     'proprietario', 'seguradora', 'apolice', 'vencimentoSeguro', 'vencimentoCRLV',
     'vencimentoLicenca', 'vencimentoExtintor', 'vencimentoTacografo',
-    // Nomes reais das colunas no banco (usados pelo VehicleModal)
-    'canCirculate', 'validadeTacografo', 'validadeAET_DAER', 'validadeAET_DNIT', 'validadeLicenciamento',
-    'ativo', 'rastreador', 'isComboioVehicle', 'mediaCalculo', 'capacidade', 'fuelCapacity',
-    'contratoTerceiro',
     'fuelLevels', 'alocadoEm', 'maintenanceLocation', 'operationalAssignment',
-    'odometro', 'horimetro', 'capacidadeTanque', 'tipoCombustivel',
+    'odometro', 'horimetro', 'hodometro', 'capacidadeTanque', 'tipoCombustivel',
     'observacoes', 'proximaRevisaoOdometro', 'proximaRevisaoHorimetro', 'proximaRevisaoData',
     'tamanho', 'capacidadeCarga', 'numeroPneus', 'numeroEixos',
+    'media_consumo', 'percentual_tolerancia',
+    'isComboioVehicle', 'ativo', 'isSucata', 'isOutsourced',
+    'permiteMultiplosAbastecimentos',
 ]);
 
 const updateVehicle = async (req, res) => {
@@ -138,7 +165,20 @@ const updateVehicle = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
-        req.io.emit('server:sync', { targets: ['vehicles'] });
+        // Sincroniza o partner espelho do comboio conforme a flag enviada.
+        // Se ela não foi tocada nesta requisição, não fazemos nada (preserva estado atual).
+        if ('isComboioVehicle' in data) {
+            try {
+                if (data.isComboioVehicle == 1 || data.isComboioVehicle === true) {
+                    await ensureComboioPartner(db, id);
+                } else {
+                    await deactivateComboioPartner(db, id);
+                }
+            } catch (e) {
+                console.warn('[ensureComboioPartner updateVehicle]', e.message);
+            }
+        }
+        req.io.emit('server:sync', { targets: ['vehicles', 'partners'] });
         res.json({ message: 'Veículo atualizado com sucesso' });
     } catch (error) {
         console.error('Erro ao atualizar veículo:', error);
@@ -204,9 +244,14 @@ const deleteVehicle = async (req, res) => {
         await connection.execute('DELETE FROM checklists WHERE vehicle_id = ?', [req.params.id]);
 
         await connection.execute('DELETE FROM vehicles WHERE id = ?', [req.params.id]);
-        
+
+        // Desativa (mas não deleta) o partner-espelho do comboio, se houver,
+        // para preservar referências históricas em refuelings/comboio_transactions.
+        try { await deactivateComboioPartner(connection, req.params.id); }
+        catch (e) { console.warn('[deactivateComboioPartner deleteVehicle]', e.message); }
+
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['vehicles', 'revisions'] });
+        req.io.emit('server:sync', { targets: ['vehicles', 'revisions', 'partners'] });
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
@@ -304,7 +349,7 @@ const allocateToObra = async (req, res) => {
             id: randomUUID(),
             obraId: obraIdStr,
             veiculoId: vehicle.id,
-            tipo: vehicle.tipo || 'Desconhecido',
+            tipo: vehicle.tipo || 'Desconhecido', 
             registroInterno: vehicle.registroInterno || '',
             placa: vehicle.placa || '',
             modelo: `${vehicle.marca || ''} ${vehicle.modelo || ''}`.trim() || 'Modelo N/A',
@@ -312,10 +357,10 @@ const allocateToObra = async (req, res) => {
             employeeName: employee.nome || 'Funcionário',
             dataEntrada: new Date(dataEntrada || new Date()),
             dataSaida: null,
-            odometroEntrada: readingType === 'odometro' ? readingVal : null,
-            odometroSaida: null,
-            horimetroEntrada: readingType === 'horimetro' ? readingVal : null,
-            horimetroSaida: null,
+            odometroEntrada: readingType === 'odometro' ? readingVal : 0,
+            odometroSaida: 0, 
+            horimetroEntrada: readingType === 'horimetro' ? readingVal : 0,
+            horimetroSaida: 0, 
             observacoes: observacoes || ''
         };
         
@@ -327,6 +372,16 @@ const allocateToObra = async (req, res) => {
             `INSERT INTO obras_historico_veiculos (${obraHistoryFields.join(', ')}) VALUES (${obraHistoryPlaceholders})`, 
             obraHistoryValues
         );
+
+        // Fase 2.6 — Se for comboio, abre novo período de obra
+        // (fecha qualquer anterior automaticamente)
+        if (vehicle.isComboioVehicle == 1 || vehicle.isComboioVehicle === true) {
+            try {
+                await openComboioPeriod(connection, id, obraIdStr, new Date(dataEntrada || new Date()));
+            } catch (e) {
+                console.warn('[comboioPeriodo openPeriod allocateToObra]', e.message);
+            }
+        }
 
         await connection.commit();
         req.io.emit('server:sync', { targets: ['vehicles', 'obras'] });
@@ -447,6 +502,16 @@ const deallocateFromObra = async (req, res) => {
                 `UPDATE obras SET ${obraSetClause} WHERE id = ?`,
                 [...obraUpdateValues, targetObraId]
             );
+        }
+
+        // Fase 2.6 — Se for comboio, fecha o período de obra ativo
+        try {
+            const [[vRow]] = await connection.execute('SELECT isComboioVehicle FROM vehicles WHERE id = ?', [id]);
+            if (vRow && (vRow.isComboioVehicle == 1 || vRow.isComboioVehicle === true)) {
+                await closeComboioPeriod(connection, id, exitTimestamp);
+            }
+        } catch (e) {
+            console.warn('[comboioPeriodo closePeriod deallocateFromObra]', e.message);
         }
 
         await connection.commit();
