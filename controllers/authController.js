@@ -129,12 +129,6 @@ const register = async (req, res) => {
             req.io.emit('admin:notificacao', { tipo: 'nova_solicitacao_cadastro' });
         }
 
-        // Notifica administradores (pop-up + som) sobre a nova solicitação de cadastro.
-        if (req.io) {
-            req.io.emit('server:sync', { targets: ['admin_requests'] });
-            req.io.emit('admin:notificacao', { tipo: 'nova_solicitacao_cadastro' });
-        }
-
         res.status(201).json({ message: 'Solicitação de cadastro enviada. Aguarde a aprovação do administrador para acessar o sistema.' });
 
     } catch (error) {

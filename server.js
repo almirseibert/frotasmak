@@ -447,6 +447,91 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Requisições operacionais (sugestões de mudança de obra/operador)
+// Usuários da Central Operacional sugerem ao admin a real obra/operador de um
+// veículo. Sem fluxo de aprovação dedicado — admin visualiza em ADMIN → Frota.
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS operational_requests (
+                id                  INT AUTO_INCREMENT PRIMARY KEY,
+                tipo                VARCHAR(30)  NOT NULL,
+                veiculo_id          VARCHAR(36)  NOT NULL,
+                veiculo_registro    VARCHAR(100) DEFAULT NULL,
+                obra_atual_id       VARCHAR(36)  DEFAULT NULL,
+                obra_atual_nome     VARCHAR(200) DEFAULT NULL,
+                operador_atual_nome VARCHAR(200) DEFAULT NULL,
+                valor_sugerido_id   VARCHAR(36)  DEFAULT NULL,
+                valor_sugerido_nome VARCHAR(200) NOT NULL,
+                observacao          TEXT         DEFAULT NULL,
+                status              VARCHAR(20)  DEFAULT 'pendente',
+                solicitante_id      VARCHAR(36)  DEFAULT NULL,
+                solicitante_email   VARCHAR(200) DEFAULT NULL,
+                created_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_status (status),
+                INDEX idx_veiculo (veiculo_id)
+            )
+        `);
+        // Garante o tipo correto da coluna em bancos onde a tabela já existe com INT.
+        try {
+            await db.query('ALTER TABLE operational_requests MODIFY COLUMN solicitante_id VARCHAR(36) DEFAULT NULL');
+        } catch (alterErr) {
+            if (alterErr.code !== 'ER_DUP_FIELDNAME') {
+                console.warn('[migration] ALTER operational_requests.solicitante_id:', alterErr.message);
+            }
+        }
+        console.log('✅ Migração operational_requests concluída.');
+
+        // Seed do template de cobrança de horas, se ainda não existir.
+        // O admin pode editar o conteúdo na tela Comunicação > Templates.
+        // Variáveis: {{responsavel}}, {{primeiro_nome}}, {{veiculo}}, {{obra}}, {{dias}}
+        const TEMPLATE_COBRANCA_HORAS = 'Cobrança de Horas — Operacional';
+        const conteudoPadrao =
+            'Olá, {{primeiro_nome}}! Tudo bem? 😊\n\n' +
+            'Notamos que o lançamento de horas do equipamento *{{veiculo}}* na obra *{{obra}}* está pendente há *{{dias}} dia(s)*.\n\n' +
+            'Por gentileza, poderia regularizar o registro das horas assim que possível? Isso nos ajuda a manter o controle da obra em dia.\n\n' +
+            'Agradecemos a colaboração! 🙏\n— Equipe MAK Serviços';
+        // Garante que a tabela e a coluna event_key existam antes do seed —
+        // o ALTER em adminRoutes.js pode ainda não ter rodado nesta ordem de boot.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS message_templates (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                channel VARCHAR(20) NOT NULL DEFAULT 'whatsapp',
+                content TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        `);
+        try {
+            const [cols] = await db.query("SHOW COLUMNS FROM message_templates LIKE 'event_key'");
+            if (!cols || cols.length === 0) {
+                await db.query("ALTER TABLE message_templates ADD COLUMN event_key VARCHAR(60) NULL UNIQUE AFTER id");
+            }
+        } catch (e) {
+            console.warn('[migration] message_templates.event_key (server.js):', e.message);
+        }
+        await db.query(
+            "UPDATE message_templates SET event_key = 'cobranca_horas_operacional' WHERE event_key IS NULL AND name = ?",
+            [TEMPLATE_COBRANCA_HORAS]
+        );
+        const [existing] = await db.query(
+            "SELECT id FROM message_templates WHERE event_key = 'cobranca_horas_operacional' OR name = ? LIMIT 1",
+            [TEMPLATE_COBRANCA_HORAS]
+        );
+        if (!existing || existing.length === 0) {
+            await db.query(
+                'INSERT INTO message_templates (event_key, name, channel, content) VALUES (?, ?, ?, ?)',
+                ['cobranca_horas_operacional', TEMPLATE_COBRANCA_HORAS, 'whatsapp', conteudoPadrao]
+            );
+            console.log('✅ Template padrão de cobrança de horas inserido.');
+        }
+    } catch (e) {
+        console.warn('⚠️ [migration] operational_requests:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Fase 1.2: Tabela de médias de consumo de combustível
 // ====================================================================
 (async () => {
@@ -645,6 +730,7 @@ const orderRoutes = require('./routes/orderRoutes');
 const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
+const operationalRequestRoutes = require('./routes/operationalRequestRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const expensesRoutes = require('./routes/expenseRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -711,6 +797,7 @@ apiRouter.get('/', (req, res) => {
 // ⚠️ Rotas Públicas (SEM autenticação)
 apiRouter.use('/auth', authRoutes);
 apiRouter.use('/registrationRequests', registrationRequestRoutes);
+apiRouter.use('/operationalRequests', operationalRequestRoutes);
 
 // ====================================================================
 // MIDDLEWARE DE AUTENTICAÇÃO (Aplicado a partir daqui)
