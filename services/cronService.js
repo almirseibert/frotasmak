@@ -3,6 +3,8 @@ const db = require('../database');
 const whatsappService = require('./whatsappService');
 const { dispatchAsync } = require('./notificationDispatcher');
 const { syncJourneyEvents, syncPositions, syncDailySummary } = require('./sigasulSyncService');
+const { processYesterday: processConfrontoYesterday } = require('./confrontoService');
+const { processYesterday: processDiscrepanciaYesterday } = require('./discrepanciaService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -389,6 +391,8 @@ cron.schedule('* * * * *', async () => {
                 // TESTE, MAK SERVIÇOS etc.) e que estão assim há mais de 7 dias.
                 // Dispara um único evento agregando todos numa só mensagem para
                 // não inundar o destinatário (Plinio, configurado em notification_targets).
+                // Veículos de terceiros são ignorados: eles legitimamente ficam com
+                // operador fictício durante a obra, pois os operadores não são contratados nossos.
                 try {
                     const [placeholders] = await db.query(`
                         SELECT v.id, v.placa, v.registroInterno,
@@ -401,6 +405,7 @@ cron.schedule('* * * * *', async () => {
                           LEFT  JOIN obras     o ON o.id = h.obraId
                          WHERE h.dataSaida IS NULL
                            AND e.isPlaceholder = 1
+                           AND (v.isOutsourced IS NULL OR v.isOutsourced != 1)
                            AND h.dataEntrada <= DATE_SUB(NOW(), INTERVAL 7 DAY)
                          ORDER BY h.dataEntrada ASC
                     `);
@@ -600,6 +605,31 @@ cron.schedule('0 3 * * *', async () => {
         await db.query(`DELETE FROM whatsapp_logs WHERE data_envio < DATE_SUB(NOW(), INTERVAL 6 MONTH)`);
     } catch (e) {
         console.error('❌ [CRON] Erro na limpeza de logs WhatsApp:', e.message);
+    }
+});
+
+// ====================================================================
+// CRON DIÁRIO — Confronto Faturamento × Rastreador (03:30 BRT)
+// Roda após syncPositions (02:05) e syncDailySummary (00:00), processando D-1.
+// ====================================================================
+cron.schedule('30 6 * * *', async () => {
+    try {
+        await processConfrontoYesterday();
+    } catch (e) {
+        console.error('❌ [CRON] Erro processConfrontoYesterday:', e.message);
+    }
+});
+
+// ====================================================================
+// CRON DIÁRIO — Análise Gerencial / Discrepâncias Operacionais (03:45 BRT)
+// Roda 15min após o confronto antigo, em paralelo durante a transição
+// (PRs 4–6). Será o único após a remoção do confronto no PR 6.
+// ====================================================================
+cron.schedule('45 6 * * *', async () => {
+    try {
+        await processDiscrepanciaYesterday();
+    } catch (e) {
+        console.error('❌ [CRON] Erro processDiscrepanciaYesterday:', e.message);
     }
 });
 

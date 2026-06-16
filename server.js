@@ -400,6 +400,40 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Tokens de push do app mobile (Seção 11 do app)
+// Cada dispositivo logado registra seu Expo push token (POST /auth/push-token).
+// O notificationDispatcher usa o canal 'push' para resolver user/role → tokens
+// e enviar via Expo Push API. Também adiciona 'push' ao enum de canais.
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS user_push_tokens (
+                id         INT AUTO_INCREMENT PRIMARY KEY,
+                user_id    INT          NOT NULL,
+                token      VARCHAR(255) NOT NULL,
+                platform   VARCHAR(20)  DEFAULT NULL,
+                updated_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_token (token),
+                INDEX idx_user (user_id)
+            )
+        `);
+        // Adiciona 'push' ao enum de canais (idempotente: ignora se já tiver).
+        try {
+            await db.query(
+                "ALTER TABLE notification_targets MODIFY COLUMN channel ENUM('whatsapp','email','push') NOT NULL"
+            );
+        } catch (alterErr) {
+            console.warn('⚠️ [migration] enum push em notification_targets:', alterErr.message);
+        }
+        console.log('✅ user_push_tokens: tabela ok.');
+    } catch (e) {
+        console.warn('⚠️ [migration] user_push_tokens:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Garante partner-espelho para todo veículo-comboio existente
 // ====================================================================
 (async () => {
@@ -739,6 +773,8 @@ const tireRoutes = require('./routes/tireRoutes');
 const obraSupervisorRoutes = require('./routes/obraSupervisorRoutes');
 const solicitacaoRoutes = require('./routes/solicitacaoRoutes');
 const billingRoutes = require('./routes/billingRoutes');
+const confrontoRoutes = require('./routes/confrontoRoutes');
+const analiseGerencialRoutes = require('./routes/analiseGerencialRoutes');
 const maintenanceRoutes = require('./routes/maintenanceRoutes');
 const washingRoutes = require('./routes/washingRoutes');
 const inventoryRoutes = require('./routes/inventoryRoutes');
@@ -852,6 +888,8 @@ apiRouter.use('/updates', updateRoutes);
 apiRouter.use('/tires', tireRoutes);
 apiRouter.use('/supervisor', obraSupervisorRoutes);
 apiRouter.use('/billing', billingRoutes);
+apiRouter.use('/confronto', confrontoRoutes);
+apiRouter.use('/analise-gerencial', analiseGerencialRoutes);
 apiRouter.use('/solicitacoes', solicitacaoRoutes);
 apiRouter.use('/maintenances', maintenanceRoutes);
 apiRouter.use('/washings', washingRoutes);
