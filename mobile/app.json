@@ -1,0 +1,53 @@
+{
+  "expo": {
+    "name": "MAK Frotas",
+    "slug": "mak-frotas",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#f5f3ef",
+    "splash": {
+      "backgroundColor": "#1c1a17"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.makservicos.frotas"
+    },
+    "android": {
+      "package": "com.makservicos.frotas",
+      "adaptiveIcon": {
+        "backgroundColor": "#9E7A42",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "cameraPermission": "O app usa a câmera para fotografar o painel do veículo e o cupom fiscal do abastecimento."
+        }
+      ],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "A localização comprova onde a solicitação de abastecimento foi feita."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#9E7A42"
+        }
+      ]
+    ],
+    "extra": {
+      "apiUrl": "https://frotasmak-frotas-backend.oehpg2.easypanel.host/api"
+    }
+  }
+}
