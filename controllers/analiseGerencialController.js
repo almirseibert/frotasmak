@@ -507,8 +507,16 @@ const getProjecaoObra = async (req, res) => {
 
         const horasContratadasPorTipo = parseJson(obra.horasContratadasPorTipo, {});
         const valoresPorTipo         = parseJson(obra.valoresPorTipo, {});
-        const horasContratadas = Object.values(horasContratadasPorTipo)
+        const horasLegacy = Object.values(horasContratadasPorTipo)
             .reduce((a, b) => a + (parseFloat(b) || 0), 0);
+
+        // Prefere total_hours_contracted da tabela de contratos (mais atual)
+        const [[contract]] = await db.query(
+            'SELECT total_hours_contracted, total_value FROM obra_contracts WHERE obra_id = ? LIMIT 1',
+            [obraId]
+        );
+        const horasContratadas = parseFloat(contract?.total_hours_contracted || 0) || horasLegacy;
+        const valorContratadoRS = parseFloat(contract?.total_value || 0) || null;
 
         // Logs diários: horas por (data, tipo de veículo)
         const [logRows] = await db.query(`
@@ -604,18 +612,29 @@ const getProjecaoObra = async (req, res) => {
         const diasParaFinalizar = ritmoHorasPorDia > 0 ? Math.ceil(horasRestantes / ritmoHorasPorDia) : null;
         const percentConcluido  = horasContratadas > 0 ? (totalHoras / horasContratadas) * 100 : 0;
 
-        // Custo de combustível (diesel) vinculado à obra
+        // Litros consumidos vinculados à obra (posto + comboio)
         const [refuelRows] = await db.query(`
-            SELECT COALESCE(SUM(r.litrosLiberados), 0)              AS total_litros,
-                   COALESCE(SUM(r.litrosLiberados * r.pricePerLiter), 0) AS total_custo
+            SELECT COALESCE(SUM(r.litrosLiberados), 0) AS total_litros
               FROM refuelings r
              WHERE r.obraId = ?
                AND r.litrosLiberados IS NOT NULL
-               AND r.pricePerLiter  IS NOT NULL
         `, [obraId]);
 
-        const totalLitros       = parseFloat(refuelRows[0]?.total_litros  || 0);
-        const totalCustoCombust = parseFloat(refuelRows[0]?.total_custo   || 0);
+        // Custo de combustível: usa expenses (captura posto + comboio corretamente)
+        // Saídas do comboio têm pricePerLiter=0 na tabela refuelings, mas o custo
+        // real é registrado em expenses.category='Combustível' via manageSaidaExpense.
+        const [expenseFuelRows] = await db.query(`
+            SELECT COALESCE(SUM(CASE WHEN category = 'Combustível' THEN amount ELSE 0 END), 0) AS total_custo_combustivel,
+                   COALESCE(SUM(CASE WHEN category != 'Combustível' THEN amount ELSE 0 END), 0) AS total_outras_despesas,
+                   COALESCE(SUM(amount), 0) AS total_todas_despesas
+              FROM expenses
+             WHERE obraId = ?
+        `, [obraId]);
+
+        const totalLitros       = parseFloat(refuelRows[0]?.total_litros || 0);
+        const totalCustoCombust = parseFloat(expenseFuelRows[0]?.total_custo_combustivel || 0);
+        const totalOutrasDespesas = parseFloat(expenseFuelRows[0]?.total_outras_despesas || 0);
+        const totalCustoObra    = parseFloat(expenseFuelRows[0]?.total_todas_despesas || 0);
 
         // % combustível sobre faturamento já realizado
         const percentCombust = totalFaturamentoRS > 0
@@ -634,6 +653,7 @@ const getProjecaoObra = async (req, res) => {
                 nome:             obra.nome,
                 contractType:     obra.contractType || 'horas',
                 horasContratadas,
+                valorContratadoRS,
                 temValoresPorTipo: temValores,
                 dataInicio,
             },
@@ -653,6 +673,11 @@ const getProjecaoObra = async (req, res) => {
                 projecaoFinalPercent:  Math.round(projecaoFinalPercent * 10) / 10,
                 alertaCritico:         projecaoFinalPercent > 20,
                 semDados:              totalLitros === 0,
+            },
+            custos: {
+                totalCustoObra:    Math.round(totalCustoObra    * 100) / 100,
+                totalCombustivel:  Math.round(totalCustoCombust * 100) / 100,
+                totalOutras:       Math.round(totalOutrasDespesas * 100) / 100,
             },
         });
     } catch (e) {
