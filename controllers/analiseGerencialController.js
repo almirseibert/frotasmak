@@ -1,5 +1,21 @@
 const db = require('../database');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
+const crypto = require('crypto');
+
+// ── Job store em memória para reprocessamento assíncrono ──────────────────────
+// Cada job tem: { status, startDate, endDate, processed, total, discrepancias, error, startedAt }
+// 'status' pode ser: 'running' | 'done' | 'error'
+const reprocessJobs = new Map();
+let activeJobId = null; // mutex: apenas 1 job por vez
+
+const MAX_DIAS_REPROCESSAR = 90;
+
+const cleanupOldJobs = () => {
+    const cutoff = Date.now() - 2 * 60 * 60 * 1000; // mantém 2h
+    for (const [id, job] of reprocessJobs.entries()) {
+        if (job.startedAt < cutoff && job.status !== 'running') reprocessJobs.delete(id);
+    }
+};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -405,43 +421,80 @@ const jornadasOperador = async (req, res) => {
 
 // ── POST /api/analise-gerencial/discrepancias/reprocessar ────────────────────
 
-const reprocessar = async (req, res) => {
-    const { startDate, endDate, placa } = req.body || {};
+const reprocessar = (req, res) => {
+    const { startDate, endDate } = req.body || {};
     if (!startDate || !endDate) {
         return res.status(400).json({ error: 'startDate e endDate são obrigatórios.' });
     }
-    try {
-        if (placa) {
-            await db.query(
-                'DELETE FROM analise_dia_maquina WHERE data BETWEEN ? AND ? AND justificado_em IS NULL AND vehicle_id IN (SELECT id FROM vehicles WHERE REPLACE(REPLACE(UPPER(placa),"-",""),(" "),"") = REPLACE(REPLACE(UPPER(?),"-",""),(" "),""))',
-                [startDate, endDate, placa]
-            );
-            const result = { processed: 0, discrepancias: 0 };
-            const cur = new Date(startDate);
-            const end = new Date(endDate);
-            while (cur <= end) {
-                const d = cur.toISOString().slice(0, 10);
-                const r = await processPlacaDay(placa, d);
-                if (!r.skipped) {
-                    result.processed++;
-                    result.discrepancias += r.discrepancias || 0;
-                }
-                cur.setDate(cur.getDate() + 1);
-            }
-            return res.json(result);
-        }
 
-        await db.query(
-            'DELETE FROM analise_dia_maquina WHERE data BETWEEN ? AND ? AND justificado_em IS NULL',
-            [startDate, endDate]
-        );
-        const result = await processRange(startDate, endDate);
-        if (req.io) req.io.emit('server:sync', { targets: ['analise-gerencial'] });
-        res.json(result);
-    } catch (e) {
-        console.error('Erro reprocessar análise:', e);
-        res.status(500).json({ error: 'Erro ao reprocessar.' });
+    const diffDias = Math.round((new Date(endDate) - new Date(startDate)) / 86400000) + 1;
+    if (diffDias > MAX_DIAS_REPROCESSAR) {
+        return res.status(400).json({
+            error: `Período máximo para reprocessamento manual é ${MAX_DIAS_REPROCESSAR} dias. Selecione um intervalo menor.`,
+        });
     }
+    if (diffDias < 1) {
+        return res.status(400).json({ error: 'Data inicial deve ser anterior ou igual à data final.' });
+    }
+
+    if (activeJobId && reprocessJobs.get(activeJobId)?.status === 'running') {
+        const job = reprocessJobs.get(activeJobId);
+        return res.status(409).json({
+            error: 'Já existe um reprocessamento em andamento.',
+            jobId: activeJobId,
+            job,
+        });
+    }
+
+    cleanupOldJobs();
+    const jobId = crypto.randomBytes(8).toString('hex');
+    const job = { status: 'running', startDate, endDate, processed: 0, total: 0, discrepancias: 0, error: null, startedAt: Date.now() };
+    reprocessJobs.set(jobId, job);
+    activeJobId = jobId;
+    res.json({ jobId });
+
+    // Executa em background — não bloqueia a resposta HTTP
+    const io = req.io || global.io;
+    const emitProgress = () => {
+        if (io) io.emit('reprocessar:progresso', { jobId, ...job });
+    };
+
+    setImmediate(async () => {
+        try {
+            await db.query(
+                'DELETE FROM analise_dia_maquina WHERE data BETWEEN ? AND ? AND justificado_em IS NULL',
+                [startDate, endDate]
+            );
+            const result = await processRange(startDate, endDate, {
+                onProgress: (done, total) => {
+                    job.processed = done;
+                    job.total = total;
+                    emitProgress();
+                },
+            });
+            job.status = 'done';
+            job.processed = result.processed;
+            job.total = result.total;
+            job.discrepancias = result.discrepancias;
+            if (io) io.emit('reprocessar:progresso', { jobId, ...job });
+            if (io) io.emit('server:sync', { targets: ['analise-gerencial'] });
+        } catch (e) {
+            console.error('Erro reprocessar análise:', e);
+            job.status = 'error';
+            job.error = e.message;
+            emitProgress();
+        } finally {
+            if (activeJobId === jobId) activeJobId = null;
+        }
+    });
+};
+
+// ── GET /api/analise-gerencial/discrepancias/reprocessar/status/:jobId ────────
+
+const getReprocessarStatus = (req, res) => {
+    const job = reprocessJobs.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job não encontrado.' });
+    res.json(job);
 };
 
 // ── GET /api/analise-gerencial/projecao/:obraId ──────────────────────────────
@@ -614,6 +667,7 @@ module.exports = {
     discrepanciaDrill,
     justificar,
     reprocessar,
+    getReprocessarStatus,
     jornadasOperador,
     getProjecaoObra,
 };
