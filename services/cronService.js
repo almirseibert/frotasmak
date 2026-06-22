@@ -4,7 +4,7 @@ const whatsappService = require('./whatsappService');
 const { dispatchAsync } = require('./notificationDispatcher');
 const { syncJourneyEvents, syncPositions, syncDailySummary } = require('./sigasulSyncService');
 const { processYesterday: processConfrontoYesterday } = require('./confrontoService');
-const { processYesterday: processDiscrepanciaYesterday } = require('./discrepanciaService');
+const { processRecentDays: processDiscrepanciaRecentDays } = require('./discrepanciaService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -627,7 +627,7 @@ cron.schedule('30 6 * * *', async () => {
 // ====================================================================
 cron.schedule('45 6 * * *', async () => {
     try {
-        await processDiscrepanciaYesterday();
+        await processDiscrepanciaRecentDays(60);
     } catch (e) {
         console.error('❌ [CRON] Erro processDiscrepanciaYesterday:', e.message);
     }
