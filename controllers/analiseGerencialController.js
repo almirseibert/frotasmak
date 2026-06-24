@@ -1,21 +1,5 @@
 const db = require('../database');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
-const crypto = require('crypto');
-
-// ── Job store em memória para reprocessamento assíncrono ──────────────────────
-// Cada job tem: { status, startDate, endDate, processed, total, discrepancias, error, startedAt }
-// 'status' pode ser: 'running' | 'done' | 'error'
-const reprocessJobs = new Map();
-let activeJobId = null; // mutex: apenas 1 job por vez
-
-const MAX_DIAS_REPROCESSAR = 90;
-
-const cleanupOldJobs = () => {
-    const cutoff = Date.now() - 2 * 60 * 60 * 1000; // mantém 2h
-    for (const [id, job] of reprocessJobs.entries()) {
-        if (job.startedAt < cutoff && job.status !== 'running') reprocessJobs.delete(id);
-    }
-};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -421,80 +405,43 @@ const jornadasOperador = async (req, res) => {
 
 // ── POST /api/analise-gerencial/discrepancias/reprocessar ────────────────────
 
-const reprocessar = (req, res) => {
-    const { startDate, endDate } = req.body || {};
+const reprocessar = async (req, res) => {
+    const { startDate, endDate, placa } = req.body || {};
     if (!startDate || !endDate) {
         return res.status(400).json({ error: 'startDate e endDate são obrigatórios.' });
     }
-
-    const diffDias = Math.round((new Date(endDate) - new Date(startDate)) / 86400000) + 1;
-    if (diffDias > MAX_DIAS_REPROCESSAR) {
-        return res.status(400).json({
-            error: `Período máximo para reprocessamento manual é ${MAX_DIAS_REPROCESSAR} dias. Selecione um intervalo menor.`,
-        });
-    }
-    if (diffDias < 1) {
-        return res.status(400).json({ error: 'Data inicial deve ser anterior ou igual à data final.' });
-    }
-
-    if (activeJobId && reprocessJobs.get(activeJobId)?.status === 'running') {
-        const job = reprocessJobs.get(activeJobId);
-        return res.status(409).json({
-            error: 'Já existe um reprocessamento em andamento.',
-            jobId: activeJobId,
-            job,
-        });
-    }
-
-    cleanupOldJobs();
-    const jobId = crypto.randomBytes(8).toString('hex');
-    const job = { status: 'running', startDate, endDate, processed: 0, total: 0, discrepancias: 0, error: null, startedAt: Date.now() };
-    reprocessJobs.set(jobId, job);
-    activeJobId = jobId;
-    res.json({ jobId });
-
-    // Executa em background — não bloqueia a resposta HTTP
-    const io = req.io || global.io;
-    const emitProgress = () => {
-        if (io) io.emit('reprocessar:progresso', { jobId, ...job });
-    };
-
-    setImmediate(async () => {
-        try {
+    try {
+        if (placa) {
             await db.query(
-                'DELETE FROM analise_dia_maquina WHERE data BETWEEN ? AND ? AND justificado_em IS NULL',
-                [startDate, endDate]
+                'DELETE FROM analise_dia_maquina WHERE data BETWEEN ? AND ? AND justificado_em IS NULL AND vehicle_id IN (SELECT id FROM vehicles WHERE REPLACE(REPLACE(UPPER(placa),"-",""),(" "),"") = REPLACE(REPLACE(UPPER(?),"-",""),(" "),""))',
+                [startDate, endDate, placa]
             );
-            const result = await processRange(startDate, endDate, {
-                onProgress: (done, total) => {
-                    job.processed = done;
-                    job.total = total;
-                    emitProgress();
-                },
-            });
-            job.status = 'done';
-            job.processed = result.processed;
-            job.total = result.total;
-            job.discrepancias = result.discrepancias;
-            if (io) io.emit('reprocessar:progresso', { jobId, ...job });
-            if (io) io.emit('server:sync', { targets: ['analise-gerencial'] });
-        } catch (e) {
-            console.error('Erro reprocessar análise:', e);
-            job.status = 'error';
-            job.error = e.message;
-            emitProgress();
-        } finally {
-            if (activeJobId === jobId) activeJobId = null;
+            const result = { processed: 0, discrepancias: 0 };
+            const cur = new Date(startDate);
+            const end = new Date(endDate);
+            while (cur <= end) {
+                const d = cur.toISOString().slice(0, 10);
+                const r = await processPlacaDay(placa, d);
+                if (!r.skipped) {
+                    result.processed++;
+                    result.discrepancias += r.discrepancias || 0;
+                }
+                cur.setDate(cur.getDate() + 1);
+            }
+            return res.json(result);
         }
-    });
-};
 
-// ── GET /api/analise-gerencial/discrepancias/reprocessar/status/:jobId ────────
-
-const getReprocessarStatus = (req, res) => {
-    const job = reprocessJobs.get(req.params.jobId);
-    if (!job) return res.status(404).json({ error: 'Job não encontrado.' });
-    res.json(job);
+        await db.query(
+            'DELETE FROM analise_dia_maquina WHERE data BETWEEN ? AND ? AND justificado_em IS NULL',
+            [startDate, endDate]
+        );
+        const result = await processRange(startDate, endDate);
+        if (req.io) req.io.emit('server:sync', { targets: ['analise-gerencial'] });
+        res.json(result);
+    } catch (e) {
+        console.error('Erro reprocessar análise:', e);
+        res.status(500).json({ error: 'Erro ao reprocessar.' });
+    }
 };
 
 // ── GET /api/analise-gerencial/projecao/:obraId ──────────────────────────────
@@ -507,16 +454,8 @@ const getProjecaoObra = async (req, res) => {
 
         const horasContratadasPorTipo = parseJson(obra.horasContratadasPorTipo, {});
         const valoresPorTipo         = parseJson(obra.valoresPorTipo, {});
-        const horasLegacy = Object.values(horasContratadasPorTipo)
+        const horasContratadas = Object.values(horasContratadasPorTipo)
             .reduce((a, b) => a + (parseFloat(b) || 0), 0);
-
-        // Prefere total_hours_contracted da tabela de contratos (mais atual)
-        const [[contract]] = await db.query(
-            'SELECT total_hours_contracted, total_value FROM obra_contracts WHERE obra_id = ? LIMIT 1',
-            [obraId]
-        );
-        const horasContratadas = parseFloat(contract?.total_hours_contracted || 0) || horasLegacy;
-        const valorContratadoRS = parseFloat(contract?.total_value || 0) || null;
 
         // Logs diários: horas por (data, tipo de veículo)
         const [logRows] = await db.query(`
@@ -561,7 +500,14 @@ const getProjecaoObra = async (req, res) => {
             let horasAcum = 0;
             let faturAcum = 0;
 
-            for (let q = 0; q < 10; q++) {
+            const inicioMs = new Date(dataInicio + 'T12:00:00').getTime();
+            const hojeMs   = new Date(today + 'T12:00:00').getTime();
+            const maxQuinzenas = Math.min(
+                60,
+                Math.max(1, Math.floor((hojeMs - inicioMs) / (15 * 24 * 60 * 60 * 1000)) + 1)
+            );
+
+            for (let q = 0; q < maxQuinzenas; q++) {
                 const ini = new Date(dataInicio + 'T12:00:00');
                 ini.setDate(ini.getDate() + q * 15);
                 const fim = new Date(ini);
@@ -599,9 +545,8 @@ const getProjecaoObra = async (req, res) => {
                     deltaPercent:      Math.round(deltaPercent * 10) / 10,
                     atingiuMeta:       deltaPercent >= 30,
                     encerrada:         fimStr < today,
+                    excedeuContratado: horasContratadas > 0 && horasAcum > horasContratadas,
                 });
-
-                if (horasAcum >= horasContratadas) break;
             }
         }
 
@@ -612,29 +557,18 @@ const getProjecaoObra = async (req, res) => {
         const diasParaFinalizar = ritmoHorasPorDia > 0 ? Math.ceil(horasRestantes / ritmoHorasPorDia) : null;
         const percentConcluido  = horasContratadas > 0 ? (totalHoras / horasContratadas) * 100 : 0;
 
-        // Litros consumidos vinculados à obra (posto + comboio)
+        // Custo de combustível (diesel) vinculado à obra
         const [refuelRows] = await db.query(`
-            SELECT COALESCE(SUM(r.litrosLiberados), 0) AS total_litros
+            SELECT COALESCE(SUM(r.litrosLiberados), 0)              AS total_litros,
+                   COALESCE(SUM(r.litrosLiberados * r.pricePerLiter), 0) AS total_custo
               FROM refuelings r
              WHERE r.obraId = ?
                AND r.litrosLiberados IS NOT NULL
+               AND r.pricePerLiter  IS NOT NULL
         `, [obraId]);
 
-        // Custo de combustível: usa expenses (captura posto + comboio corretamente)
-        // Saídas do comboio têm pricePerLiter=0 na tabela refuelings, mas o custo
-        // real é registrado em expenses.category='Combustível' via manageSaidaExpense.
-        const [expenseFuelRows] = await db.query(`
-            SELECT COALESCE(SUM(CASE WHEN category = 'Combustível' THEN amount ELSE 0 END), 0) AS total_custo_combustivel,
-                   COALESCE(SUM(CASE WHEN category != 'Combustível' THEN amount ELSE 0 END), 0) AS total_outras_despesas,
-                   COALESCE(SUM(amount), 0) AS total_todas_despesas
-              FROM expenses
-             WHERE obraId = ?
-        `, [obraId]);
-
-        const totalLitros       = parseFloat(refuelRows[0]?.total_litros || 0);
-        const totalCustoCombust = parseFloat(expenseFuelRows[0]?.total_custo_combustivel || 0);
-        const totalOutrasDespesas = parseFloat(expenseFuelRows[0]?.total_outras_despesas || 0);
-        const totalCustoObra    = parseFloat(expenseFuelRows[0]?.total_todas_despesas || 0);
+        const totalLitros       = parseFloat(refuelRows[0]?.total_litros  || 0);
+        const totalCustoCombust = parseFloat(refuelRows[0]?.total_custo   || 0);
 
         // % combustível sobre faturamento já realizado
         const percentCombust = totalFaturamentoRS > 0
@@ -653,7 +587,6 @@ const getProjecaoObra = async (req, res) => {
                 nome:             obra.nome,
                 contractType:     obra.contractType || 'horas',
                 horasContratadas,
-                valorContratadoRS,
                 temValoresPorTipo: temValores,
                 dataInicio,
             },
@@ -674,11 +607,6 @@ const getProjecaoObra = async (req, res) => {
                 alertaCritico:         projecaoFinalPercent > 20,
                 semDados:              totalLitros === 0,
             },
-            custos: {
-                totalCustoObra:    Math.round(totalCustoObra    * 100) / 100,
-                totalCombustivel:  Math.round(totalCustoCombust * 100) / 100,
-                totalOutras:       Math.round(totalOutrasDespesas * 100) / 100,
-            },
         });
     } catch (e) {
         console.error('[projecaoObra]', e);
@@ -692,7 +620,6 @@ module.exports = {
     discrepanciaDrill,
     justificar,
     reprocessar,
-    getReprocessarStatus,
     jornadasOperador,
     getProjecaoObra,
 };

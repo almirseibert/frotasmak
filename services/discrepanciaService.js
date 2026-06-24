@@ -287,29 +287,22 @@ const processRange = async (startDate, endDate, { onProgress } = {}) => {
     return results;
 };
 
-const processRecentDays = async (diasAtras = 60) => {
+const processYesterday = async () => {
     const pad = (n) => String(n).padStart(2, '0');
-    const fmt = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    const end = new Date();
-    end.setDate(end.getDate() - 1);
-    const start = new Date(end);
-    start.setDate(start.getDate() - (diasAtras - 1));
-    const startDate = fmt(start);
-    const endDate = fmt(end);
-    console.log(`⏳ [Discrepancia] Reprocessando ${startDate} → ${endDate} (últimos ${diasAtras} dias)...`);
-    await db.query(
-        'DELETE FROM analise_dia_maquina WHERE data BETWEEN ? AND ? AND justificado_em IS NULL',
-        [startDate, endDate]
-    );
-    const res = await processRange(startDate, endDate);
-    console.log(`✅ [Discrepancia] ${startDate}→${endDate}: ${res.processed} linhas, ${res.discrepancias} discrepâncias, ${res.skipped} ignoradas.`);
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    const dateStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    console.log(`⏳ [Discrepancia] Processando ${dateStr}...`);
+    await db.query('DELETE FROM analise_dia_maquina WHERE data = ? AND justificado_em IS NULL', [dateStr]);
+    const res = await processRange(dateStr, dateStr);
+    console.log(`✅ [Discrepancia] ${dateStr}: ${res.processed} linhas, ${res.discrepancias} discrepâncias, ${res.skipped} ignoradas.`);
     return res;
 };
 
 module.exports = {
     processPlacaDay,
     processRange,
-    processRecentDays,
+    processYesterday,
     _internal: {
         detectMaquinaAlemDoFaturado,
         detectFaturadoAlemDaMaquina,

@@ -16,10 +16,9 @@ router.use(requireAnaliseAccess);
 
 router.get('/discrepancias/obras', ctrl.obrasOverview);
 router.get('/discrepancias/obra/:obraId', ctrl.obraDetalhe);
-router.post('/discrepancias/reprocessar', ctrl.reprocessar);
-router.get('/discrepancias/reprocessar/status/:jobId', ctrl.getReprocessarStatus);
 router.get('/discrepancias/:id', ctrl.discrepanciaDrill);
 router.post('/discrepancias/:id/justificar', ctrl.justificar);
+router.post('/discrepancias/reprocessar', ctrl.reprocessar);
 router.get('/jornadas/operador/:employeeId', ctrl.jornadasOperador);
 router.get('/projecao/:obraId', ctrl.getProjecaoObra);
 
