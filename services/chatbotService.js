@@ -1080,6 +1080,19 @@ async function processarMensagem({ from, phoneNumber, body, hasMedia, mediaBase6
     processingPhones.add(from);
     try {
         await _processarMensagem({ from, phoneNumber, body, hasMedia, mediaBase64, mediaMimetype });
+    } catch (err) {
+        // Evita que qualquer exceção deixe o bot "mudo" para o usuário.
+        console.error('[CHATBOT] Exceção não tratada para', maskPhone(from), ':', err);
+        try {
+            await responder(from, `❌ Ocorreu um erro interno. Tente novamente em instantes ou envie *cancelar* para reiniciar.`);
+        } catch (_) { /* já logado em responder() */ }
+        if (global.io) {
+            global.io.emit('admin:notificacao', {
+                tipo: 'chatbot_excecao',
+                phone: maskPhone(from),
+                erro: err.message,
+            });
+        }
     } finally {
         processingPhones.delete(from);
     }
