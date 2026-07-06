@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const vehicleController = require('../controllers/vehicleController');
+const vehicleDocumentsController = require('../controllers/vehicleDocumentsController');
 const authMiddleware = require('../middlewares/authMiddleware');
 const multer = require('multer');
 const fs = require('fs');
@@ -36,14 +37,41 @@ const fileFilter = (req, file, cb) => {
     }
 };
 
-const upload = multer({ 
-    storage: storage, 
-    fileFilter: fileFilter, 
-    limits: { fileSize: 5 * 1024 * 1024 } 
+const upload = multer({
+    storage: storage,
+    fileFilter: fileFilter,
+    limits: { fileSize: 5 * 1024 * 1024 }
+});
+
+// Multer para documentos PDF
+const docStorage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, absoluteUploadDir),
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        const ext = path.extname(file.originalname);
+        cb(null, 'doc-' + uniqueSuffix + ext);
+    }
+});
+
+const docFileFilter = (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+        cb(null, true);
+    } else {
+        cb(new Error('Apenas arquivos PDF são permitidos.'), false);
+    }
+};
+
+const uploadDoc = multer({
+    storage: docStorage,
+    fileFilter: docFileFilter,
+    limits: { fileSize: 20 * 1024 * 1024 }
 });
 
 // --- Rotas ---
 router.use(authMiddleware);
+
+// Documentos das obras do operador logado (deve vir ANTES de '/:id' para não ser capturada por ele)
+router.get('/meus-documentos', vehicleDocumentsController.listMyObraDocuments);
 
 // Rotas CRUD padrão
 router.get('/', vehicleController.getAllVehicles);
@@ -69,5 +97,10 @@ router.post('/:id/unassign-operational', vehicleController.unassignFromOperation
 router.post('/:id/start-maintenance', vehicleController.startMaintenance);
 router.post('/:id/end-maintenance', vehicleController.endMaintenance);
 
+
+// --- Rotas de Documentos do Veículo ---
+router.get('/:id/documents', vehicleDocumentsController.listDocuments);
+router.post('/:id/documents', uploadDoc.single('documentFile'), vehicleDocumentsController.uploadDocument);
+router.delete('/:id/documents/:docId', vehicleDocumentsController.deleteDocument);
 
 module.exports = router;
