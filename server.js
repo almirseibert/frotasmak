@@ -778,6 +778,27 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — responsavel_whatsapp em obras (responsável = contato interno)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS responsavel_whatsapp VARCHAR(30) DEFAULT NULL`);
+        console.log('✅ Migração obras.responsavel_whatsapp concluída.');
+    } catch (e) {
+        if (e.code === 'ER_PARSE_ERROR') {
+            try {
+                await db.query(`ALTER TABLE obras ADD COLUMN responsavel_whatsapp VARCHAR(30) DEFAULT NULL`);
+                console.log('✅ Migração obras.responsavel_whatsapp concluída (fallback).');
+            } catch (e2) {
+                if (e2.code !== 'ER_DUP_FIELDNAME') console.warn('⚠️ [migration] obras.responsavel_whatsapp:', e2.message);
+            }
+        } else if (e.code !== 'ER_DUP_FIELDNAME') {
+            console.warn('⚠️ [migration] obras.responsavel_whatsapp:', e.message);
+        }
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — notification_log (Item 3: histórico de notificações enviadas)
 // ====================================================================
 (async () => {
@@ -1126,6 +1147,23 @@ apiRouter.post('/upload', upload.single('file'), (req, res) => {
       details: error.message
     });
   }
+});
+
+// ✅ Contatos internos ativos (leitura) — usado no seletor de Responsável da Obra.
+// A gestão completa (CRUD) continua restrita a admin em /admin/internal-contacts.
+apiRouter.get('/internal-contacts', async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            `SELECT id, nome, cargo, setor, whatsapp, email
+             FROM internal_contacts
+             WHERE ativo = 1
+             ORDER BY nome ASC`
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('❌ Erro ao listar contatos internos:', error);
+        res.status(500).json({ error: 'Erro ao listar contatos internos.' });
+    }
 });
 
 // ✅ Rotas Protegidas
