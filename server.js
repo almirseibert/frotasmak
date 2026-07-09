@@ -16,6 +16,7 @@ const http = require('http');
         { table: 'users',                  column: 'tentativas_falhas_abastecimento', def: 'INT DEFAULT 0' },
         { table: 'users',                  column: 'bloqueado_abastecimento',         def: 'TINYINT(1) DEFAULT 0' },
         { table: 'users',                  column: 'page_permissions',                def: 'JSON DEFAULT NULL' },
+        { table: 'users',                  column: 'canAccessAnaliseGerencial',       def: 'TINYINT(1) NOT NULL DEFAULT 0' },
         { table: 'comboio_transactions',   column: 'authNumber',                      def: 'INT UNSIGNED DEFAULT NULL' },
         { table: 'obras',                  column: 'tipo_registro',                   def: "ENUM('obra','centro_custo') DEFAULT 'obra'" },
         // FASE 1.3 — Campos adicionais em obras
@@ -55,6 +56,17 @@ const http = require('http');
         { table: 'refuelings',             column: 'reserved_amount',                  def: 'DECIMAL(12,2) DEFAULT NULL' },
         { table: 'refuelings',             column: 'reserved_price',                   def: 'DECIMAL(8,3) DEFAULT NULL' },
         { table: 'refuelings',             column: 'is_full_tank',                     def: 'TINYINT(1) DEFAULT 0' },
+        // ── Módulo de Planejamento de Obras (pré-obra) ──
+        // Ciclo de vida: radar → planejada → mobilizacao → ativa → finalizada.
+        // 'dataFimPrevisto' já existia no schema (órfã) e foi adotada; aqui só o par de início.
+        { table: 'obras',                  column: 'dataInicioPrevisto',               def: 'DATE DEFAULT NULL' },
+        { table: 'obras',                  column: 'origemInfo',                       def: 'VARCHAR(255) DEFAULT NULL' },
+        { table: 'obras',                  column: 'confiancaInfo',                    def: "ENUM('rumor','plano_oficial','contrato_assinado') DEFAULT NULL" },
+        { table: 'obras',                  column: 'obsPlanejamento',                  def: 'TEXT DEFAULT NULL' },
+        // Plano de trabalho por SUBGRUPO (vehicles.sub_tipo) — contratos diferenciam
+        // ex. Escavadeira 13t vs 26t. Campos antigos (…PorTipo) seguem como fallback.
+        { table: 'obras',                  column: 'horasContratadasPorSubTipo',       def: 'JSON DEFAULT NULL' },
+        { table: 'obras',                  column: 'valoresPorSubTipo',                def: 'JSON DEFAULT NULL' },
     ];
 
     for (const { table, column, def } of migrations) {
@@ -81,14 +93,16 @@ const http = require('http');
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_authNumber:', e.message);
     }
 
-    // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' ─────
+    // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' e 'locador' ─────
     // Causa do erro: "Data truncated for column 'tipo_parceiro' at row 1"
     // ao distribuir combustível de comboio (qualquer gravação que tentasse
     // 'comboio' falhava porque o ENUM só tinha 'posto' e 'fornecedor').
+    // 'locador' (Equip. Terceirizados) foi adicionado depois: sem ele no ENUM,
+    // o cadastro de Locador caía no fallback 'posto' e aparecia na aba errada.
     try {
         await db.query(`
             ALTER TABLE \`partners\`
-            MODIFY COLUMN \`tipo_parceiro\` ENUM('posto','fornecedor','comboio') DEFAULT 'posto'
+            MODIFY COLUMN \`tipo_parceiro\` ENUM('posto','fornecedor','comboio','locador') DEFAULT 'posto'
         `);
         // Garante que nenhum registro fique com tipo nulo/vazio
         await db.query(`UPDATE partners SET tipo_parceiro = 'posto' WHERE tipo_parceiro IS NULL OR tipo_parceiro = ''`);
@@ -680,6 +694,44 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Terceirizados: contrato de locação nos veículos + pagamentos
+// ====================================================================
+(async () => {
+    const addColumn = async (sql, label) => {
+        try {
+            await db.query(sql);
+        } catch (e) {
+            if (e.code !== 'ER_DUP_FIELDNAME') console.warn(`⚠️ [migration] ${label}:`, e.message);
+        }
+    };
+    try {
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locadorId VARCHAR(36) DEFAULT NULL`, 'vehicles.locadorId');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoHorasContratadas DECIMAL(12,2) DEFAULT NULL`, 'vehicles.locacaoHorasContratadas');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoValorTotal DECIMAL(14,2) DEFAULT NULL`, 'vehicles.locacaoValorTotal');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoVigenciaInicio DATE DEFAULT NULL`, 'vehicles.locacaoVigenciaInicio');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoVigenciaFim DATE DEFAULT NULL`, 'vehicles.locacaoVigenciaFim');
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceirizado_pagamentos (
+                id               VARCHAR(36)  PRIMARY KEY,
+                locadorId        VARCHAR(36)  NOT NULL,
+                vehicleId        VARCHAR(36)  DEFAULT NULL,
+                data             DATE         DEFAULT NULL,
+                valor            DECIMAL(14,2) NOT NULL DEFAULT 0,
+                descricao        VARCHAR(500) DEFAULT NULL,
+                created_by_email VARCHAR(255) DEFAULT NULL,
+                created_at       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_tercpag_locador (locadorId),
+                INDEX idx_tercpag_vehicle (vehicleId)
+            )
+        `);
+        console.log('✅ Migração terceirizado_pagamentos concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] terceirizado_pagamentos:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Log de e-mails enviados pelo sistema (auditoria de envios)
 // ====================================================================
 (async () => {
@@ -773,27 +825,6 @@ const http = require('http');
             }
         } else if (e.code !== 'ER_DUP_FIELDNAME') {
             console.warn('⚠️ [migration] obras.responsavel_email:', e.message);
-        }
-    }
-})();
-
-// ====================================================================
-// MIGRAÇÃO — responsavel_whatsapp em obras (responsável = contato interno)
-// ====================================================================
-(async () => {
-    try {
-        await db.query(`ALTER TABLE obras ADD COLUMN IF NOT EXISTS responsavel_whatsapp VARCHAR(30) DEFAULT NULL`);
-        console.log('✅ Migração obras.responsavel_whatsapp concluída.');
-    } catch (e) {
-        if (e.code === 'ER_PARSE_ERROR') {
-            try {
-                await db.query(`ALTER TABLE obras ADD COLUMN responsavel_whatsapp VARCHAR(30) DEFAULT NULL`);
-                console.log('✅ Migração obras.responsavel_whatsapp concluída (fallback).');
-            } catch (e2) {
-                if (e2.code !== 'ER_DUP_FIELDNAME') console.warn('⚠️ [migration] obras.responsavel_whatsapp:', e2.message);
-            }
-        } else if (e.code !== 'ER_DUP_FIELDNAME') {
-            console.warn('⚠️ [migration] obras.responsavel_whatsapp:', e.message);
         }
     }
 })();
@@ -1064,6 +1095,7 @@ const notificationLogRoutes    = require('./routes/notificationLogRoutes');
 const suggestionRoutes         = require('./routes/suggestionRoutes');
 const vehicleLinkRoutes        = require('./routes/vehicleLinkRoutes');
 const comboioReportRoutes      = require('./routes/comboioReportRoutes');
+const terceirizadoPagamentoRoutes = require('./routes/terceirizadoPagamentoRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -1204,6 +1236,7 @@ apiRouter.use('/notification-log', notificationLogRoutes);
 apiRouter.use('/suggestions', suggestionRoutes);
 apiRouter.use('/vehicle-links', vehicleLinkRoutes);
 apiRouter.use('/comboio-report', comboioReportRoutes);
+apiRouter.use('/terceirizadoPagamentos', terceirizadoPagamentoRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware

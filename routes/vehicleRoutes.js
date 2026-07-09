@@ -18,7 +18,7 @@ if (!fs.existsSync(absoluteUploadDir)) {
 
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        cb(null, absoluteUploadDir); 
+        cb(null, absoluteUploadDir);
     },
     filename: function (req, file, cb) {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -43,7 +43,7 @@ const upload = multer({
     limits: { fileSize: 5 * 1024 * 1024 }
 });
 
-// Multer para documentos PDF
+// Multer para documentos (PDF + imagens)
 const docStorage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, absoluteUploadDir),
     filename: (req, file, cb) => {
@@ -54,10 +54,11 @@ const docStorage = multer.diskStorage({
 });
 
 const docFileFilter = (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') {
+    const allowed = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype)) {
         cb(null, true);
     } else {
-        cb(new Error('Apenas arquivos PDF são permitidos.'), false);
+        cb(new Error('Apenas PDF e imagens são permitidos.'), false);
     }
 };
 
@@ -83,7 +84,7 @@ router.delete('/:id', vehicleController.deleteVehicle);
 // --- Rota de Upload de Imagem ---
 // O frontend chamará esta rota *após* criar/salvar o veículo
 router.post(
-    '/:id/upload-image', 
+    '/:id/upload-image',
     upload.single('fotoFile'), // 'fotoFile' deve ser o nome do campo no FormData
     vehicleController.uploadVehicleImage
 );
@@ -92,6 +93,7 @@ router.post(
 // --- Rotas de Alocação (sem mudança) ---
 router.post('/:id/allocate-obra', vehicleController.allocateToObra);
 router.post('/:id/deallocate-obra', vehicleController.deallocateFromObra);
+router.post('/:id/estadia-retroativa', vehicleController.registrarEstadiaRetroativa);
 router.post('/:id/assign-operational', vehicleController.assignToOperational);
 router.post('/:id/unassign-operational', vehicleController.unassignFromOperational);
 router.post('/:id/start-maintenance', vehicleController.startMaintenance);
