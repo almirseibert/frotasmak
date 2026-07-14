@@ -46,6 +46,10 @@ const http = require('http');
         // Fotos das distribuições feitas pelo operador do comboio direto na obra
         // (horímetro, RE/placa, medidor zerado, medidor com litragem). JSON com URLs.
         { table: 'comboio_transactions',   column: 'fotos',                            def: 'JSON DEFAULT NULL' },
+        // Drenagem: destino do combustível retirado do veículo de origem.
+        // 'comboio' (devolve ao tanque do comboio), 'transfusao' (abastece outro
+        // equipamento) ou 'eliminado' (combustível contaminado, descartado).
+        { table: 'comboio_transactions',   column: 'destino',                          def: "VARCHAR(20) DEFAULT NULL" },
         { table: 'partners',               column: 'vehicle_id',                       def: 'VARCHAR(36) DEFAULT NULL' },
         // Campo KM/Hr atual no modal de OS/OC
         { table: 'orders',                 column: 'kmHrAtual',                        def: 'DECIMAL(12,1) DEFAULT NULL' },
@@ -57,6 +61,10 @@ const http = require('http');
         { table: 'refuelings',             column: 'reserved_amount',                  def: 'DECIMAL(12,2) DEFAULT NULL' },
         { table: 'refuelings',             column: 'reserved_price',                   def: 'DECIMAL(8,3) DEFAULT NULL' },
         { table: 'refuelings',             column: 'is_full_tank',                     def: 'TINYINT(1) DEFAULT 0' },
+        // Liga o refueling-espelho (ajuste negativo da origem / abastecimento do
+        // receptor) à transação de drenagem que o gerou, para permitir reversão
+        // na exclusão e o desconto de litragem no cálculo de médias.
+        { table: 'refuelings',             column: 'drenagemTransactionId',            def: 'VARCHAR(36) DEFAULT NULL' },
         // ── Módulo de Planejamento de Obras (pré-obra) ──
         // Ciclo de vida: radar → planejada → mobilizacao → ativa → finalizada.
         // 'dataFimPrevisto' já existia no schema (órfã) e foi adotada; aqui só o par de início.
@@ -92,6 +100,15 @@ const http = require('http');
         await db.query('ALTER TABLE `comboio_transactions` ADD INDEX `idx_authNumber` (`authNumber`)');
     } catch (e) {
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_authNumber:', e.message);
+    }
+
+    // Backfill idempotente: drenagens antigas eram sempre "para o comboio".
+    try {
+        await db.query(
+            "UPDATE comboio_transactions SET destino = 'comboio' WHERE type = 'drenagem' AND (destino IS NULL OR destino = '')"
+        );
+    } catch (e) {
+        console.warn('[migration] backfill comboio_transactions.destino:', e.message);
     }
 
     // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' e 'locador' ─────
@@ -478,6 +495,30 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Tabela de refresh tokens (renovação silenciosa de sessão)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id         VARCHAR(36)  NOT NULL PRIMARY KEY,
+                user_id    VARCHAR(64)  NOT NULL,
+                token_hash CHAR(64)     NOT NULL,
+                expires_at DATETIME     NOT NULL,
+                revoked    TINYINT(1)   NOT NULL DEFAULT 0,
+                created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_token_hash (token_hash),
+                INDEX idx_user (user_id),
+                INDEX idx_expires (expires_at)
+            )
+        `);
+        console.log('✅ refresh_tokens: tabela ok.');
+    } catch (e) {
+        console.warn('⚠️ [migration] refresh_tokens:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Garante partner-espelho para todo veículo-comboio existente
 // ====================================================================
 (async () => {
@@ -729,6 +770,52 @@ const http = require('http');
         console.log('✅ Migração terceirizado_pagamentos concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] terceirizado_pagamentos:', e.message);
+    }
+})();
+
+// ── Contratos de terceirizados (1 contrato = 1 terceiro/locador + 1 obra) ─────
+// Valor FECHADO. Horas executadas = acompanhamento físico (não viram débito).
+// Saldo a pagar = valorTotal − diesel abatido − adiantamentos.
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceiro_contratos (
+                id                VARCHAR(36)   PRIMARY KEY,
+                numero            VARCHAR(30)   NOT NULL,
+                locadorId         VARCHAR(36)   NOT NULL,
+                obraId            VARCHAR(36)   NOT NULL,
+                tipoMaquina       VARCHAR(120)  DEFAULT NULL,
+                horasContratadas  DECIMAL(12,2) NOT NULL DEFAULT 0,
+                valorHora         DECIMAL(14,2) NOT NULL DEFAULT 0,
+                valorTotal        DECIMAL(14,2) NOT NULL DEFAULT 0,
+                vigenciaInicio    DATE          DEFAULT NULL,
+                vigenciaFim       DATE          DEFAULT NULL,
+                status            VARCHAR(20)   NOT NULL DEFAULT 'ativo',
+                observacoes       VARCHAR(1000) DEFAULT NULL,
+                maquinas          JSON          DEFAULT NULL,
+                pdfUrl            VARCHAR(500)  DEFAULT NULL,
+                created_by_email  VARCHAR(255)  DEFAULT NULL,
+                created_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_terccontrato_numero (numero),
+                INDEX idx_terccontrato_locador (locadorId),
+                INDEX idx_terccontrato_obra (obraId)
+            )
+        `);
+        // Adiantamentos passam a poder apontar para um contrato específico.
+        try {
+            await db.query(`ALTER TABLE terceirizado_pagamentos ADD COLUMN contratoId VARCHAR(36) DEFAULT NULL`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        // Máquinas vinculadas ao contrato (JSON array de vehicleId). 1 máquina : 1 contrato.
+        try {
+            await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN maquinas JSON DEFAULT NULL`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        console.log('✅ Migração terceiro_contratos concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] terceiro_contratos:', e.message);
     }
 })();
 
@@ -1121,6 +1208,7 @@ const suggestionRoutes         = require('./routes/suggestionRoutes');
 const vehicleLinkRoutes        = require('./routes/vehicleLinkRoutes');
 const comboioReportRoutes      = require('./routes/comboioReportRoutes');
 const terceirizadoPagamentoRoutes = require('./routes/terceirizadoPagamentoRoutes');
+const terceiroContratoRoutes      = require('./routes/terceiroContratoRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -1262,6 +1350,7 @@ apiRouter.use('/suggestions', suggestionRoutes);
 apiRouter.use('/vehicle-links', vehicleLinkRoutes);
 apiRouter.use('/comboio-report', comboioReportRoutes);
 apiRouter.use('/terceirizadoPagamentos', terceirizadoPagamentoRoutes);
+apiRouter.use('/terceiroContratos', terceiroContratoRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware
