@@ -962,6 +962,39 @@ const http = require('http');
     } catch (e) {
         console.warn('⚠️ [migration] message_reactions:', e.message);
     }
+
+    // ── Fase 5: governança ──
+    // Auditoria de ações do chat (não é apagada pela retenção).
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS chat_audit_log (
+                id         VARCHAR(36) PRIMARY KEY,
+                actor_id   VARCHAR(64) NOT NULL,
+                peer_id    VARCHAR(64) DEFAULT NULL,
+                action     VARCHAR(24) NOT NULL,
+                message_id VARCHAR(36) DEFAULT NULL,
+                at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_audit_actor (actor_id, at),
+                INDEX idx_audit_peer  (peer_id, at)
+            )
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] chat_audit_log:', e.message);
+    }
+    // Bloqueios entre usuários (user_id bloqueou blocked_id).
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS chat_blocks (
+                user_id    VARCHAR(64) NOT NULL,
+                blocked_id VARCHAR(64) NOT NULL,
+                created_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, blocked_id),
+                INDEX idx_block_blocked (blocked_id)
+            )
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] chat_blocks:', e.message);
+    }
 })();
 
 // ====================================================================

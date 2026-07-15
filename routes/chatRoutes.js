@@ -8,6 +8,10 @@ router.use(authMiddleware);
 
 router.get('/contacts', chatController.getContacts);
 router.get('/search', chatController.searchMessages);
+router.get('/export/:userId', chatController.exportConversation);
+router.post('/block', chatController.blockUser);
+router.post('/unblock', chatController.unblockUser);
+router.post('/report', chatController.reportUser);
 router.get('/messages/:userId', chatController.getMessages);
 router.post('/messages', chatController.postMessage);
 router.put('/messages/:id', chatController.editMessage);

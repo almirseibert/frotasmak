@@ -593,6 +593,29 @@ cron.schedule('0 2 * * 0', () => {
 });
 
 // ====================================================================
+// CRON DIÁRIO — Retenção de mensagens do chat
+// Remove mensagens mais antigas que N meses (system_settings.chat_retention_months).
+// N ausente ou <= 0 desativa a limpeza. Reações órfãs são removidas junto.
+// A auditoria (chat_audit_log) NÃO é afetada.
+// ====================================================================
+cron.schedule('0 4 * * *', async () => {
+    try {
+        const [rows] = await db.query("SELECT value FROM system_settings WHERE `key` = 'chat_retention_months'");
+        const months = rows.length ? parseInt(rows[0].value, 10) : 0;
+        if (!Number.isFinite(months) || months <= 0) return; // desativado
+        const [del] = await db.query(
+            'DELETE FROM messages WHERE created_at < DATE_SUB(NOW(), INTERVAL ? MONTH)',
+            [months]
+        );
+        // Limpa reações que apontam para mensagens que não existem mais.
+        await db.query('DELETE r FROM message_reactions r LEFT JOIN messages m ON m.id = r.message_id WHERE m.id IS NULL');
+        if (del.affectedRows) console.log(`🧹 [cron] Retenção chat: ${del.affectedRows} mensagens > ${months} meses removidas.`);
+    } catch (e) {
+        console.error('❌ [CRON] Erro na retenção do chat:', e.message);
+    }
+});
+
+// ====================================================================
 // CRON DIÁRIO — Sync resumo diário Siga Sul + Rotação de logs WhatsApp
 // ====================================================================
 cron.schedule('0 3 * * *', async () => {

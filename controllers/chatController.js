@@ -14,6 +14,23 @@ const OFFICE_FILTER = `LOWER(COALESCE(u.user_type, u.role, '')) <> 'operador'
 
 const MAX_BODY = 4000;
 
+// Registro de auditoria (fire-and-forget) — não bloqueia a resposta.
+const logAudit = (actorId, peerId, action, messageId = null) => {
+    db.query(
+        'INSERT INTO chat_audit_log (id, actor_id, peer_id, action, message_id) VALUES (?, ?, ?, ?, ?)',
+        [randomUUID(), actorId, peerId || null, action, messageId]
+    ).catch(() => { /* auditoria nunca derruba o fluxo principal */ });
+};
+
+// Verifica se há bloqueio em qualquer direção entre dois usuários.
+const isBlockedBetween = async (a, b) => {
+    const [rows] = await db.query(
+        'SELECT 1 FROM chat_blocks WHERE (user_id = ? AND blocked_id = ?) OR (user_id = ? AND blocked_id = ?) LIMIT 1',
+        [a, b, b, a]
+    );
+    return rows.length > 0;
+};
+
 // GET /api/chat/contacts — lista de contatos (usuários de escritório) com
 // nome de exibição, status atual (presença em memória), última mensagem trocada
 // e contagem de não-lidas.
@@ -50,6 +67,10 @@ const getContacts = async (req, res) => {
         );
         const unreadByOther = new Map(unreads.map(r => [String(r.other_id), Number(r.n)]));
 
+        // Contatos que eu bloqueei.
+        const [blocks] = await db.query('SELECT blocked_id FROM chat_blocks WHERE user_id = ?', [me]);
+        const blockedSet = new Set(blocks.map(b => String(b.blocked_id)));
+
         const contacts = users.map(u => {
             const connected = presence.isConnected(u.id);
             return {
@@ -63,6 +84,7 @@ const getContacts = async (req, res) => {
                 lastSeen: u.chat_last_seen,
                 lastMessageAt: lastByOther.get(String(u.id)) || null,
                 unread: unreadByOther.get(String(u.id)) || 0,
+                blocked: blockedSet.has(String(u.id)),
             };
         });
 
@@ -196,6 +218,11 @@ const postMessage = async (req, res) => {
         );
         if (urows.length === 0) return res.status(404).json({ error: 'Destinatário não encontrado.' });
 
+        // Bloqueio em qualquer direção impede o envio.
+        if (await isBlockedBetween(me, recipientId)) {
+            return res.status(403).json({ error: 'Não é possível enviar: conversa bloqueada.' });
+        }
+
         // Nome de exibição do remetente (para o payload).
         const [srows] = await db.query('SELECT name, display_name FROM users WHERE id = ?', [me]);
         const senderName = (srows[0] && (srows[0].display_name || srows[0].name)) || req.user.email || 'Usuário';
@@ -255,6 +282,8 @@ const postMessage = async (req, res) => {
             if (online) req.io.to('user:' + me).emit('chat:delivered', { id, to: recipientId });
         }
 
+        logAudit(me, recipientId, 'send', id);
+
         // Offline → push mobile (infra já existente).
         if (!online && pushService) {
             pushService.pushToUsers([recipientId], {
@@ -307,6 +336,7 @@ const editMessage = async (req, res) => {
         if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
 
         await db.query('UPDATE messages SET body = ?, edited_at = NOW() WHERE id = ?', [body, m.id]);
+        logAudit(me, m.other, 'edit', m.id);
         const payload = { id: m.id, body, edited_at: new Date() };
         if (req.io) {
             req.io.to('user:' + m.other).emit('chat:edited', payload);
@@ -329,6 +359,7 @@ const deleteMessage = async (req, res) => {
         if (m.deleted_at) return res.json({ id: m.id, deleted_at: m.deleted_at });
 
         await db.query('UPDATE messages SET deleted_at = NOW() WHERE id = ?', [m.id]);
+        logAudit(me, m.other, 'delete', m.id);
         const payload = { id: m.id, deleted_at: new Date() };
         if (req.io) {
             req.io.to('user:' + m.other).emit('chat:deleted', payload);
@@ -435,6 +466,114 @@ const searchMessages = async (req, res) => {
     }
 };
 
+// POST /api/chat/block { userId } — bloqueia um contato.
+const blockUser = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const other = (req.body.userId ?? '').toString();
+        if (!other || other === String(me)) return res.status(400).json({ error: 'Contato inválido.' });
+        await db.query(
+            'INSERT IGNORE INTO chat_blocks (user_id, blocked_id) VALUES (?, ?)',
+            [me, other]
+        );
+        logAudit(me, other, 'block');
+        res.json({ ok: true, blocked: true });
+    } catch (error) {
+        console.error('❌ Erro ao bloquear:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao bloquear.' });
+    }
+};
+
+// POST /api/chat/unblock { userId } — desbloqueia.
+const unblockUser = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const other = (req.body.userId ?? '').toString();
+        if (!other) return res.status(400).json({ error: 'Contato inválido.' });
+        await db.query('DELETE FROM chat_blocks WHERE user_id = ? AND blocked_id = ?', [me, other]);
+        logAudit(me, other, 'unblock');
+        res.json({ ok: true, blocked: false });
+    } catch (error) {
+        console.error('❌ Erro ao desbloquear:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao desbloquear.' });
+    }
+};
+
+// POST /api/chat/report { userId, reason? } — registra uma denúncia (auditoria).
+const reportUser = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const other = (req.body.userId ?? '').toString();
+        if (!other || other === String(me)) return res.status(400).json({ error: 'Contato inválido.' });
+        logAudit(me, other, 'report');
+        console.warn(`🚨 [chat] Denúncia: ${me} → ${other} | motivo: ${(req.body.reason || '').toString().slice(0, 200)}`);
+        res.json({ ok: true });
+    } catch (error) {
+        console.error('❌ Erro ao reportar:', error.message);
+        res.status(500).json({ error: 'Erro ao reportar.' });
+    }
+};
+
+// GET /api/chat/export/:userId — exporta o histórico da conversa em PDF.
+const exportConversation = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const other = req.params.userId;
+        if (!other || String(other) === String(me)) return res.status(400).json({ error: 'Contato inválido.' });
+
+        const [meRows] = await db.query('SELECT name, display_name FROM users WHERE id = ?', [me]);
+        const [otherRows] = await db.query('SELECT name, display_name FROM users WHERE id = ?', [other]);
+        const meName = (meRows[0] && (meRows[0].display_name || meRows[0].name)) || 'Eu';
+        const otherName = (otherRows[0] && (otherRows[0].display_name || otherRows[0].name)) || 'Contato';
+
+        const [rows] = await db.query(
+            `SELECT sender_id, body, type, deleted_at, created_at,
+                    attachment_name
+               FROM messages
+              WHERE (sender_id = ? AND recipient_id = ?) OR (sender_id = ? AND recipient_id = ?)
+              ORDER BY created_at ASC
+              LIMIT 5000`,
+            [me, other, other, me]
+        );
+
+        const PDFDocument = require('pdfkit');
+        const doc = new PDFDocument({ size: 'A4', margin: 40 });
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="conversa-${String(otherName).replace(/[^a-z0-9]+/gi, '_')}.pdf"`);
+        doc.pipe(res);
+
+        doc.fontSize(16).text(`Conversa: ${meName} × ${otherName}`, { align: 'center' });
+        doc.moveDown(0.3);
+        doc.fontSize(9).fillColor('#888').text(`Exportado em ${new Date().toLocaleString('pt-BR')} · ${rows.length} mensagens`, { align: 'center' });
+        doc.moveDown(1).fillColor('#000');
+
+        let lastDay = '';
+        rows.forEach(m => {
+            const dt = new Date(m.created_at);
+            const day = dt.toLocaleDateString('pt-BR');
+            if (day !== lastDay) {
+                lastDay = day;
+                doc.moveDown(0.5).fontSize(9).fillColor('#0846b8').text(day, { align: 'center' }).fillColor('#000');
+            }
+            const who = String(m.sender_id) === String(me) ? meName : otherName;
+            const time = dt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            let text;
+            if (m.deleted_at) text = '(mensagem apagada)';
+            else if (m.type === 'nudge') text = '(chamou a atenção)';
+            else if (m.type === 'card') text = '(cartão de contexto)';
+            else text = m.body || (m.attachment_name ? `(anexo: ${m.attachment_name})` : '');
+            doc.fontSize(10).fillColor('#333').text(`[${time}] `, { continued: true })
+               .fillColor('#0a6cff').text(`${who}: `, { continued: true })
+               .fillColor('#000').text(text);
+        });
+
+        doc.end();
+    } catch (error) {
+        console.error('❌ Erro ao exportar conversa:', error.code, '|', error.sqlMessage || error.message);
+        if (!res.headersSent) res.status(500).json({ error: 'Erro ao exportar conversa.' });
+    }
+};
+
 // POST /api/chat/read { fromUserId } — marca como lidas as mensagens recebidas
 // de `fromUserId` (endpoint dedicado; getMessages ainda marca por conveniência).
 const markRead = async (req, res) => {
@@ -461,4 +600,5 @@ const markRead = async (req, res) => {
 module.exports = {
     getContacts, getMessages, postMessage, markRead,
     editMessage, deleteMessage, toggleReaction, togglePin, searchMessages,
+    blockUser, unblockUser, reportUser, exportConversation,
 };
