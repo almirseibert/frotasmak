@@ -7,8 +7,13 @@ const chatController = require('../controllers/chatController');
 router.use(authMiddleware);
 
 router.get('/contacts', chatController.getContacts);
+router.get('/search', chatController.searchMessages);
 router.get('/messages/:userId', chatController.getMessages);
 router.post('/messages', chatController.postMessage);
+router.put('/messages/:id', chatController.editMessage);
+router.delete('/messages/:id', chatController.deleteMessage);
+router.post('/messages/:id/reaction', chatController.toggleReaction);
+router.post('/messages/:id/pin', chatController.togglePin);
 router.post('/read', chatController.markRead);
 
 module.exports = router;

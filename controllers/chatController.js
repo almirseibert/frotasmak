@@ -93,8 +93,9 @@ const getMessages = async (req, res) => {
         }
         params.push(limit);
         const [rows] = await db.query(
-            `SELECT id, sender_id, recipient_id, body, type,
-                    read_at, delivered_at, edited_at, deleted_at, client_msg_id, created_at
+            `SELECT id, sender_id, recipient_id, body, type, reply_to,
+                    read_at, delivered_at, edited_at, deleted_at,
+                    pinned_at, pinned_by, client_msg_id, created_at
                FROM messages
               WHERE ((sender_id = ? AND recipient_id = ?)
                  OR (sender_id = ? AND recipient_id = ?))${beforeClause}
@@ -102,6 +103,26 @@ const getMessages = async (req, res) => {
               LIMIT ?`,
             params
         );
+
+        // Reações de todas as mensagens carregadas.
+        const ids = rows.map(r => r.id);
+        let reactionsByMsg = {};
+        if (ids.length) {
+            const [reacts] = await db.query(
+                `SELECT message_id, user_id, emoji FROM message_reactions
+                  WHERE message_id IN (${ids.map(() => '?').join(',')})`,
+                ids
+            );
+            reactionsByMsg = reacts.reduce((acc, r) => {
+                (acc[r.message_id] = acc[r.message_id] || []).push({ userId: r.user_id, emoji: r.emoji });
+                return acc;
+            }, {});
+        }
+        const enriched = rows.map(r => ({
+            ...r,
+            body: r.deleted_at ? null : r.body,
+            reactions: reactionsByMsg[r.id] || [],
+        }));
 
         // Marca como lidas as que ele me enviou.
         const [upd] = await db.query(
@@ -113,7 +134,7 @@ const getMessages = async (req, res) => {
             req.io.to('user:' + other).emit('chat:read', { by: me });
         }
 
-        res.json(rows.reverse()); // ordem cronológica ascendente
+        res.json(enriched.reverse()); // ordem cronológica ascendente
     } catch (error) {
         console.error('❌ Erro ao carregar mensagens:', error.code, '|', error.sqlMessage || error.message);
         res.status(500).json({ error: 'Erro ao carregar mensagens.' });
@@ -129,6 +150,7 @@ const postMessage = async (req, res) => {
         const recipientId = (req.body.recipientId ?? '').toString();
         const type = req.body.type === 'nudge' ? 'nudge' : 'text';
         const clientMsgId = req.body.clientMsgId ? String(req.body.clientMsgId).slice(0, 64) : null;
+        const replyTo = req.body.replyTo ? String(req.body.replyTo).slice(0, 36) : null;
         let body = (req.body.body || '').toString().trim();
 
         if (!recipientId || recipientId === String(me)) return res.status(400).json({ error: 'Destinatário inválido.' });
@@ -169,9 +191,9 @@ const postMessage = async (req, res) => {
         const deliveredAt = online ? createdAt : null;
         try {
             await db.query(
-                `INSERT INTO messages (id, sender_id, recipient_id, body, type, client_msg_id, delivered_at, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-                [id, me, recipientId, body, type, clientMsgId, deliveredAt, createdAt]
+                `INSERT INTO messages (id, sender_id, recipient_id, body, type, reply_to, client_msg_id, delivered_at, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [id, me, recipientId, body, type, replyTo, clientMsgId, deliveredAt, createdAt]
             );
         } catch (insErr) {
             // Corrida: dois reenvios simultâneos com o mesmo clientMsgId.
@@ -193,6 +215,8 @@ const postMessage = async (req, res) => {
             senderName,
             body,
             type,
+            reply_to: replyTo,
+            reactions: [],
             client_msg_id: clientMsgId,
             read_at: null,
             delivered_at: deliveredAt,
@@ -225,6 +249,169 @@ const postMessage = async (req, res) => {
     }
 };
 
+// Helper: carrega a mensagem e valida participação do usuário. Retorna a linha
+// ou null. `other` é o outro participante da conversa 1:1.
+const loadOwnedMessage = async (id, me) => {
+    const [rows] = await db.query(
+        'SELECT id, sender_id, recipient_id, deleted_at, created_at FROM messages WHERE id = ? LIMIT 1',
+        [id]
+    );
+    if (!rows.length) return null;
+    const m = rows[0];
+    const isSender = String(m.sender_id) === String(me);
+    const isRecipient = String(m.recipient_id) === String(me);
+    if (!isSender && !isRecipient) return null;
+    m.other = isSender ? m.recipient_id : m.sender_id;
+    m.isSender = isSender;
+    return m;
+};
+
+const EDIT_WINDOW_MS = 15 * 60 * 1000; // 15 min para editar/apagar
+
+// PUT /api/chat/messages/:id { body } — edita (só o autor, dentro da janela).
+const editMessage = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const m = await loadOwnedMessage(req.params.id, me);
+        if (!m) return res.status(404).json({ error: 'Mensagem não encontrada.' });
+        if (!m.isSender) return res.status(403).json({ error: 'Só o autor pode editar.' });
+        if (m.deleted_at) return res.status(400).json({ error: 'Mensagem apagada.' });
+        if (Date.now() - new Date(m.created_at).getTime() > EDIT_WINDOW_MS) {
+            return res.status(400).json({ error: 'Janela de edição expirada.' });
+        }
+        let body = (req.body.body || '').toString().trim();
+        if (!body) return res.status(400).json({ error: 'Mensagem vazia.' });
+        if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
+
+        await db.query('UPDATE messages SET body = ?, edited_at = NOW() WHERE id = ?', [body, m.id]);
+        const payload = { id: m.id, body, edited_at: new Date() };
+        if (req.io) {
+            req.io.to('user:' + m.other).emit('chat:edited', payload);
+            req.io.to('user:' + me).emit('chat:edited', payload);
+        }
+        res.json(payload);
+    } catch (error) {
+        console.error('❌ Erro ao editar mensagem:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao editar mensagem.' });
+    }
+};
+
+// DELETE /api/chat/messages/:id — soft delete (mantém no banco p/ auditoria).
+const deleteMessage = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const m = await loadOwnedMessage(req.params.id, me);
+        if (!m) return res.status(404).json({ error: 'Mensagem não encontrada.' });
+        if (!m.isSender) return res.status(403).json({ error: 'Só o autor pode apagar.' });
+        if (m.deleted_at) return res.json({ id: m.id, deleted_at: m.deleted_at });
+
+        await db.query('UPDATE messages SET deleted_at = NOW() WHERE id = ?', [m.id]);
+        const payload = { id: m.id, deleted_at: new Date() };
+        if (req.io) {
+            req.io.to('user:' + m.other).emit('chat:deleted', payload);
+            req.io.to('user:' + me).emit('chat:deleted', payload);
+        }
+        res.json(payload);
+    } catch (error) {
+        console.error('❌ Erro ao apagar mensagem:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao apagar mensagem.' });
+    }
+};
+
+// POST /api/chat/messages/:id/reaction { emoji } — alterna a reação do usuário.
+const toggleReaction = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const emoji = (req.body.emoji || '').toString().slice(0, 16);
+        if (!emoji) return res.status(400).json({ error: 'Emoji inválido.' });
+        const m = await loadOwnedMessage(req.params.id, me);
+        if (!m) return res.status(404).json({ error: 'Mensagem não encontrada.' });
+
+        const [existing] = await db.query(
+            'SELECT id FROM message_reactions WHERE message_id = ? AND user_id = ? AND emoji = ? LIMIT 1',
+            [m.id, me, emoji]
+        );
+        let action;
+        if (existing.length) {
+            await db.query('DELETE FROM message_reactions WHERE id = ?', [existing[0].id]);
+            action = 'remove';
+        } else {
+            await db.query(
+                'INSERT INTO message_reactions (id, message_id, user_id, emoji) VALUES (?, ?, ?, ?)',
+                [randomUUID(), m.id, me, emoji]
+            );
+            action = 'add';
+        }
+        const payload = { messageId: m.id, userId: me, emoji, action };
+        if (req.io) {
+            req.io.to('user:' + m.other).emit('chat:reaction', payload);
+            req.io.to('user:' + me).emit('chat:reaction', payload);
+        }
+        res.json(payload);
+    } catch (error) {
+        console.error('❌ Erro na reação:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao reagir.' });
+    }
+};
+
+// POST /api/chat/messages/:id/pin — alterna fixação (qualquer participante).
+const togglePin = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const [rows] = await db.query('SELECT id, sender_id, recipient_id, pinned_at FROM messages WHERE id = ? LIMIT 1', [req.params.id]);
+        if (!rows.length) return res.status(404).json({ error: 'Mensagem não encontrada.' });
+        const m = rows[0];
+        const other = String(m.sender_id) === String(me) ? m.recipient_id
+            : (String(m.recipient_id) === String(me) ? m.sender_id : null);
+        if (other === null) return res.status(403).json({ error: 'Sem acesso.' });
+
+        const pin = !m.pinned_at;
+        await db.query(
+            'UPDATE messages SET pinned_at = ?, pinned_by = ? WHERE id = ?',
+            [pin ? new Date() : null, pin ? me : null, m.id]
+        );
+        const payload = { id: m.id, pinned: pin, pinned_by: pin ? me : null };
+        if (req.io) {
+            req.io.to('user:' + other).emit('chat:pin', payload);
+            req.io.to('user:' + me).emit('chat:pin', payload);
+        }
+        res.json(payload);
+    } catch (error) {
+        console.error('❌ Erro ao fixar:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao fixar mensagem.' });
+    }
+};
+
+// GET /api/chat/search?q=&with= — busca no histórico (opcionalmente com um contato).
+const searchMessages = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const q = (req.query.q || '').toString().trim();
+        if (q.length < 2) return res.json([]);
+        const withUser = req.query.with ? String(req.query.with) : null;
+        const like = `%${q}%`;
+        const params = [me, me, like];
+        let scope = '';
+        if (withUser) {
+            scope = ' AND (sender_id = ? OR recipient_id = ?)';
+            params.push(withUser, withUser);
+        }
+        const [rows] = await db.query(
+            `SELECT id, sender_id, recipient_id, body, type, created_at
+               FROM messages
+              WHERE (sender_id = ? OR recipient_id = ?)
+                AND deleted_at IS NULL AND type = 'text' AND body LIKE ?${scope}
+              ORDER BY created_at DESC
+              LIMIT 50`,
+            params
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('❌ Erro na busca:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro na busca.' });
+    }
+};
+
 // POST /api/chat/read { fromUserId } — marca como lidas as mensagens recebidas
 // de `fromUserId` (endpoint dedicado; getMessages ainda marca por conveniência).
 const markRead = async (req, res) => {
@@ -248,4 +435,7 @@ const markRead = async (req, res) => {
     }
 };
 
-module.exports = { getContacts, getMessages, postMessage, markRead };
+module.exports = {
+    getContacts, getMessages, postMessage, markRead,
+    editMessage, deleteMessage, toggleReaction, togglePin, searchMessages,
+};

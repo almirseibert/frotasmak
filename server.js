@@ -912,6 +912,12 @@ const http = require('http');
         { column: 'client_msg_id', def: 'VARCHAR(64) DEFAULT NULL' },
         { column: 'edited_at',     def: 'DATETIME DEFAULT NULL' },
         { column: 'deleted_at',    def: 'DATETIME DEFAULT NULL' },
+        // ── Fase 2: produtividade ──
+        // reply_to  : id da mensagem citada (reply/quote)
+        // pinned_at/by: mensagem fixada na conversa (por par)
+        { column: 'reply_to',      def: 'VARCHAR(36) DEFAULT NULL' },
+        { column: 'pinned_at',     def: 'DATETIME DEFAULT NULL' },
+        { column: 'pinned_by',     def: 'VARCHAR(64) DEFAULT NULL' },
     ];
     for (const { column, def } of msgCols) {
         try {
@@ -930,6 +936,23 @@ const http = require('http');
         await db.query('ALTER TABLE `messages` ADD UNIQUE INDEX `uniq_sender_clientmsg` (`sender_id`, `client_msg_id`)');
     } catch (e) {
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] uniq_sender_clientmsg:', e.message);
+    }
+
+    // ── Fase 2: reações às mensagens (uma por usuário+emoji+mensagem) ──
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS message_reactions (
+                id          VARCHAR(36) PRIMARY KEY,
+                message_id  VARCHAR(36) NOT NULL,
+                user_id     VARCHAR(64) NOT NULL,
+                emoji       VARCHAR(16) NOT NULL,
+                created_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_reaction (message_id, user_id, emoji),
+                INDEX idx_reaction_msg (message_id)
+            )
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] message_reactions:', e.message);
     }
 })();
 
