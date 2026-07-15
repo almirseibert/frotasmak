@@ -17,6 +17,15 @@ const http = require('http');
         { table: 'users',                  column: 'bloqueado_abastecimento',         def: 'TINYINT(1) DEFAULT 0' },
         { table: 'users',                  column: 'page_permissions',                def: 'JSON DEFAULT NULL' },
         { table: 'users',                  column: 'canAccessAnaliseGerencial',       def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        // ── Mensageiro interno (chat estilo MSN) ──
+        // display_name: nome exibido no chat (fallback para users.name)
+        // chat_status: status MSN persistido (disponivel|ausente|ocupado|volto_logo|invisivel|offline)
+        // chat_status_msg: recado pessoal de texto livre
+        // chat_last_seen: último momento online (para "visto por último")
+        { table: 'users',                  column: 'display_name',                    def: 'VARCHAR(120) DEFAULT NULL' },
+        { table: 'users',                  column: 'chat_status',                     def: "VARCHAR(20) NOT NULL DEFAULT 'offline'" },
+        { table: 'users',                  column: 'chat_status_msg',                 def: 'VARCHAR(140) DEFAULT NULL' },
+        { table: 'users',                  column: 'chat_last_seen',                  def: 'DATETIME DEFAULT NULL' },
         { table: 'comboio_transactions',   column: 'authNumber',                      def: 'INT UNSIGNED DEFAULT NULL' },
         { table: 'obras',                  column: 'tipo_registro',                   def: "ENUM('obra','centro_custo') DEFAULT 'obra'" },
         // FASE 1.3 — Campos adicionais em obras
@@ -871,6 +880,30 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Mensageiro interno (chat direto estilo MSN)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS messages (
+                id            VARCHAR(36)  PRIMARY KEY,
+                sender_id     VARCHAR(64)  NOT NULL,
+                recipient_id  VARCHAR(64)  NOT NULL,
+                body          TEXT         NOT NULL,
+                type          VARCHAR(16)  NOT NULL DEFAULT 'text',
+                read_at       DATETIME     DEFAULT NULL,
+                created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_messages_pair    (sender_id, recipient_id, created_at),
+                INDEX idx_messages_unread  (recipient_id, read_at)
+            )
+        `);
+        console.log('✅ Migração messages (chat) concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] messages:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Vínculos entre veículos (cavalo↔reboque, máquina↔acessório)
 // ====================================================================
 (async () => {
@@ -1209,6 +1242,7 @@ const vehicleLinkRoutes        = require('./routes/vehicleLinkRoutes');
 const comboioReportRoutes      = require('./routes/comboioReportRoutes');
 const terceirizadoPagamentoRoutes = require('./routes/terceirizadoPagamentoRoutes');
 const terceiroContratoRoutes      = require('./routes/terceiroContratoRoutes');
+const chatRoutes                  = require('./routes/chatRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -1351,6 +1385,7 @@ apiRouter.use('/vehicle-links', vehicleLinkRoutes);
 apiRouter.use('/comboio-report', comboioReportRoutes);
 apiRouter.use('/terceirizadoPagamentos', terceirizadoPagamentoRoutes);
 apiRouter.use('/terceiroContratos', terceiroContratoRoutes);
+apiRouter.use('/chat', chatRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware
@@ -1392,17 +1427,88 @@ app.use((err, req, res, next) => {
 // ====================================================================
 // SOCKET.IO - EVENTOS E CONEXÕES
 // ====================================================================
-io.on('connection', (socket) => {
-  console.log(`🔌 Cliente Socket.io conectado: ${socket.id} | IP: ${socket.handshake.address}`);
+const jwt = require('jsonwebtoken');
+const presence = require('./services/presenceService');
 
-  socket.on('disconnect', () => {
-    console.log(`❌ Cliente Socket.io desconectado: ${socket.id}`);
-  });
+// Handshake opcional com JWT: se o cliente enviar um token válido em
+// `auth.token` (ou query.token), associa o socket ao usuário e entra na sala
+// `user:<id>` — necessário para o mensageiro interno (mensagens direcionadas e
+// presença). Clientes sem token continuam conectando (só recebem broadcasts).
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      socket.userId = decoded.id;
+    }
+  } catch (e) {
+    // Token inválido/expirado — não bloqueia a conexão, apenas não autentica.
+    console.warn('⚠️ Socket handshake sem auth válido:', e.message);
+  }
+  next();
+});
+
+io.on('connection', (socket) => {
+  console.log(`🔌 Cliente Socket.io conectado: ${socket.id}${socket.userId ? ` | user:${socket.userId}` : ''}`);
+
+  // ── Presença / mensageiro ──
+  if (socket.userId) {
+    const uid = socket.userId;
+    socket.join('user:' + uid);
+
+    // Status inicial: usa o último status salvo do usuário (fallback disponível).
+    db.query('SELECT chat_status, chat_status_msg FROM users WHERE id = ?', [uid])
+      .then(([rows]) => {
+        const saved = rows[0] || {};
+        const initialStatus = saved.chat_status && saved.chat_status !== 'offline'
+          ? saved.chat_status : 'disponivel';
+        const { wasOffline, entry } = presence.addSocket(uid, socket.id, initialStatus);
+        if (entry) entry.statusMsg = saved.chat_status_msg || null;
+
+        // Envia ao recém-conectado a lista de quem já está online.
+        socket.emit('presence:sync', presence.snapshot());
+
+        // Avisa os demais que este usuário ficou online (se transição).
+        if (wasOffline) {
+          socket.broadcast.emit('presence:update', {
+            userId: uid,
+            status: presence.publicStatus(uid),
+            statusMsg: presence.publicStatusMsg(uid),
+          });
+        }
+      })
+      .catch(err => console.warn('⚠️ presença connect:', err.message));
+
+    // Usuário troca o próprio status/recado.
+    socket.on('chat:setStatus', ({ status, statusMsg } = {}) => {
+      presence.setStatus(uid, status, statusMsg);
+      // Persiste a escolha para próximas sessões.
+      db.query('UPDATE users SET chat_status = ?, chat_status_msg = ? WHERE id = ?',
+        [status || 'disponivel', statusMsg || null, uid]).catch(() => {});
+      io.emit('presence:update', {
+        userId: uid,
+        status: presence.publicStatus(uid),
+        statusMsg: presence.publicStatusMsg(uid),
+      });
+    });
+
+    socket.on('disconnect', () => {
+      const { nowOffline } = presence.removeSocket(uid, socket.id);
+      if (nowOffline) {
+        db.query('UPDATE users SET chat_last_seen = NOW() WHERE id = ?', [uid]).catch(() => {});
+        socket.broadcast.emit('presence:update', { userId: uid, status: 'offline', statusMsg: null });
+      }
+      console.log(`❌ Cliente Socket.io desconectado: ${socket.id} | user:${uid}`);
+    });
+  } else {
+    socket.on('disconnect', () => {
+      console.log(`❌ Cliente Socket.io desconectado: ${socket.id}`);
+    });
+  }
 
   // Evento de teste (opcional, para debug)
   socket.on('ping', (callback) => {
-    console.log(`📡 Ping recebido de ${socket.id}`);
-    callback({ status: 'pong', timestamp: new Date().toISOString() });
+    if (typeof callback === 'function') callback({ status: 'pong', timestamp: new Date().toISOString() });
   });
 });
 

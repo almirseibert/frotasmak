@@ -2,6 +2,11 @@ const express = require('express');
 const router = express.Router();
 const db = require('../database');
 const authMiddleware = require('../middlewares/authMiddleware');
+const userSettingsController = require('../controllers/userSettingsController');
+
+// Configurações do próprio usuário (perfil de chat).
+router.get('/me/settings', authMiddleware, userSettingsController.getMySettings);
+router.put('/me/settings', authMiddleware, userSettingsController.updateMySettings);
 
 // Listar todos os usuários (necessário para CommunicationTab e UserManagementTab)
 router.get('/', authMiddleware, async (req, res) => {
@@ -10,6 +15,7 @@ router.get('/', authMiddleware, async (req, res) => {
             SELECT u.id, u.name, u.email, u.user_type, u.role, u.status,
                    u.canAccessRefueling AS podeAcessarAbastecimento,
                    u.group_id, g.name AS group_name,
+                   u.display_name, u.chat_status, u.chat_status_msg,
                    u.bloqueado_abastecimento, u.tentativas_falhas_abastecimento
             FROM users u
             LEFT JOIN access_groups g ON u.group_id = g.id
