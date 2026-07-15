@@ -82,14 +82,25 @@ const getMessages = async (req, res) => {
         if (!other || String(other) === String(me)) return res.status(400).json({ error: 'Contato inválido.' });
 
         const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+        // Paginação para scroll infinito: `before` = ISO da mensagem mais antiga
+        // já carregada; retorna a página anterior a ela.
+        const before = req.query.before ? new Date(req.query.before) : null;
+        const params = [me, other, other, me];
+        let beforeClause = '';
+        if (before && !isNaN(before.getTime())) {
+            beforeClause = ' AND created_at < ?';
+            params.push(before);
+        }
+        params.push(limit);
         const [rows] = await db.query(
-            `SELECT id, sender_id, recipient_id, body, type, read_at, created_at
+            `SELECT id, sender_id, recipient_id, body, type,
+                    read_at, delivered_at, edited_at, deleted_at, client_msg_id, created_at
                FROM messages
-              WHERE (sender_id = ? AND recipient_id = ?)
-                 OR (sender_id = ? AND recipient_id = ?)
+              WHERE ((sender_id = ? AND recipient_id = ?)
+                 OR (sender_id = ? AND recipient_id = ?))${beforeClause}
               ORDER BY created_at DESC
               LIMIT ?`,
-            [me, other, other, me, limit]
+            params
         );
 
         // Marca como lidas as que ele me enviou.
@@ -117,12 +128,28 @@ const postMessage = async (req, res) => {
         const me = req.user.id;
         const recipientId = (req.body.recipientId ?? '').toString();
         const type = req.body.type === 'nudge' ? 'nudge' : 'text';
+        const clientMsgId = req.body.clientMsgId ? String(req.body.clientMsgId).slice(0, 64) : null;
         let body = (req.body.body || '').toString().trim();
 
         if (!recipientId || recipientId === String(me)) return res.status(400).json({ error: 'Destinatário inválido.' });
         if (type === 'nudge' && !body) body = 'Chamou sua atenção!';
         if (!body) return res.status(400).json({ error: 'Mensagem vazia.' });
         if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
+
+        // Idempotência: reenvio da fila offline usa o mesmo clientMsgId. Se já
+        // existe, devolve o registro salvo em vez de duplicar (e reemite o eco).
+        if (clientMsgId) {
+            const [dup] = await db.query(
+                `SELECT id, sender_id, recipient_id, body, type, read_at, delivered_at, client_msg_id, created_at
+                   FROM messages WHERE sender_id = ? AND client_msg_id = ? LIMIT 1`,
+                [me, clientMsgId]
+            );
+            if (dup.length) {
+                const existing = dup[0];
+                if (req.io) req.io.to('user:' + me).emit('chat:message', existing);
+                return res.status(200).json(existing);
+            }
+        }
 
         // Destinatário precisa existir e ser de escritório.
         const [urows] = await db.query(
@@ -135,13 +162,29 @@ const postMessage = async (req, res) => {
         const [srows] = await db.query('SELECT name, display_name FROM users WHERE id = ?', [me]);
         const senderName = (srows[0] && (srows[0].display_name || srows[0].name)) || req.user.email || 'Usuário';
 
+        // Se o destinatário está conectado, já nasce "entregue".
+        const online = presence.isConnected(recipientId);
         const id = randomUUID();
         const createdAt = new Date();
-        await db.query(
-            `INSERT INTO messages (id, sender_id, recipient_id, body, type, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [id, me, recipientId, body, type, createdAt]
-        );
+        const deliveredAt = online ? createdAt : null;
+        try {
+            await db.query(
+                `INSERT INTO messages (id, sender_id, recipient_id, body, type, client_msg_id, delivered_at, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                [id, me, recipientId, body, type, clientMsgId, deliveredAt, createdAt]
+            );
+        } catch (insErr) {
+            // Corrida: dois reenvios simultâneos com o mesmo clientMsgId.
+            if (insErr.code === 'ER_DUP_ENTRY' && clientMsgId) {
+                const [dup2] = await db.query(
+                    `SELECT id, sender_id, recipient_id, body, type, read_at, delivered_at, client_msg_id, created_at
+                       FROM messages WHERE sender_id = ? AND client_msg_id = ? LIMIT 1`,
+                    [me, clientMsgId]
+                );
+                if (dup2.length) return res.status(200).json(dup2[0]);
+            }
+            throw insErr;
+        }
 
         const payload = {
             id,
@@ -150,7 +193,9 @@ const postMessage = async (req, res) => {
             senderName,
             body,
             type,
+            client_msg_id: clientMsgId,
             read_at: null,
+            delivered_at: deliveredAt,
             created_at: createdAt,
         };
 
@@ -160,10 +205,12 @@ const postMessage = async (req, res) => {
             if (type === 'nudge') {
                 req.io.to('user:' + recipientId).emit('chat:nudge', { from: me, senderName });
             }
+            // Confirma entrega imediata ao remetente (destinatário conectado).
+            if (online) req.io.to('user:' + me).emit('chat:delivered', { id, to: recipientId });
         }
 
         // Offline → push mobile (infra já existente).
-        if (!presence.isConnected(recipientId) && pushService) {
+        if (!online && pushService) {
             pushService.pushToUsers([recipientId], {
                 title: senderName,
                 body: type === 'nudge' ? 'Chamou sua atenção!' : body.slice(0, 120),
@@ -178,4 +225,27 @@ const postMessage = async (req, res) => {
     }
 };
 
-module.exports = { getContacts, getMessages, postMessage };
+// POST /api/chat/read { fromUserId } — marca como lidas as mensagens recebidas
+// de `fromUserId` (endpoint dedicado; getMessages ainda marca por conveniência).
+const markRead = async (req, res) => {
+    try {
+        const me = req.user.id;
+        const other = (req.body.fromUserId ?? '').toString();
+        if (!other || other === String(me)) return res.status(400).json({ error: 'Contato inválido.' });
+
+        const [upd] = await db.query(
+            `UPDATE messages SET read_at = NOW()
+              WHERE recipient_id = ? AND sender_id = ? AND read_at IS NULL`,
+            [me, other]
+        );
+        if (upd.affectedRows > 0 && req.io) {
+            req.io.to('user:' + other).emit('chat:read', { by: me });
+        }
+        res.json({ ok: true, updated: upd.affectedRows });
+    } catch (error) {
+        console.error('❌ Erro ao marcar leitura:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao marcar leitura.' });
+    }
+};
+
+module.exports = { getContacts, getMessages, postMessage, markRead };

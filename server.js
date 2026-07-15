@@ -901,6 +901,36 @@ const http = require('http');
     } catch (e) {
         console.warn('⚠️ [migration] messages:', e.message);
     }
+
+    // ── Fase 1: confiabilidade de entrega ──
+    // delivered_at : marca de entrega (destinatário conectado / conectou depois)
+    // client_msg_id: id gerado no cliente → idempotência de reenvio (fila offline)
+    // edited_at    : marca de edição (Fase 2, coluna criada aqui por conveniência)
+    // deleted_at   : soft delete (Fase 2)
+    const msgCols = [
+        { column: 'delivered_at',  def: 'DATETIME DEFAULT NULL' },
+        { column: 'client_msg_id', def: 'VARCHAR(64) DEFAULT NULL' },
+        { column: 'edited_at',     def: 'DATETIME DEFAULT NULL' },
+        { column: 'deleted_at',    def: 'DATETIME DEFAULT NULL' },
+    ];
+    for (const { column, def } of msgCols) {
+        try {
+            await db.query(`ALTER TABLE \`messages\` ADD COLUMN IF NOT EXISTS \`${column}\` ${def}`);
+        } catch (e) {
+            if (e.code === 'ER_PARSE_ERROR') {
+                try { await db.query(`ALTER TABLE \`messages\` ADD COLUMN \`${column}\` ${def}`); }
+                catch (e2) { if (e2.code !== 'ER_DUP_FIELDNAME') console.warn(`[migration] messages.${column}:`, e2.message); }
+            } else if (e.code !== 'ER_DUP_FIELDNAME') {
+                console.warn(`[migration] messages.${column}:`, e.message);
+            }
+        }
+    }
+    // Idempotência de reenvio: um mesmo (remetente, client_msg_id) só entra uma vez.
+    try {
+        await db.query('ALTER TABLE `messages` ADD UNIQUE INDEX `uniq_sender_clientmsg` (`sender_id`, `client_msg_id`)');
+    } catch (e) {
+        if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] uniq_sender_clientmsg:', e.message);
+    }
 })();
 
 // ====================================================================
@@ -1478,6 +1508,35 @@ io.on('connection', (socket) => {
         }
       })
       .catch(err => console.warn('⚠️ presença connect:', err.message));
+
+    // Entrega em lote: mensagens recebidas enquanto o usuário estava offline
+    // passam a "entregues" agora que ele conectou; avisa cada remetente.
+    (async () => {
+      try {
+        const [pend] = await db.query(
+          `SELECT id, sender_id FROM messages
+            WHERE recipient_id = ? AND delivered_at IS NULL AND deleted_at IS NULL`,
+          [uid]
+        );
+        if (pend.length) {
+          await db.query(
+            'UPDATE messages SET delivered_at = NOW() WHERE recipient_id = ? AND delivered_at IS NULL',
+            [uid]
+          );
+          pend.forEach(m => {
+            io.to('user:' + m.sender_id).emit('chat:delivered', { id: m.id, to: uid });
+          });
+        }
+      } catch (err) { console.warn('⚠️ delivered batch:', err.message); }
+    })();
+
+    // "Digitando…" — relay efêmero (sem persistência) para o destinatário.
+    socket.on('chat:typing', ({ to } = {}) => {
+      if (to) io.to('user:' + to).emit('chat:typing', { from: uid });
+    });
+    socket.on('chat:stopTyping', ({ to } = {}) => {
+      if (to) io.to('user:' + to).emit('chat:stopTyping', { from: uid });
+    });
 
     // Usuário troca o próprio status/recado.
     socket.on('chat:setStatus', ({ status, statusMsg } = {}) => {
