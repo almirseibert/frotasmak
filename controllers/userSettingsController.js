@@ -6,11 +6,18 @@ const presence = require('../services/presenceService');
 
 const VALID_STATUS = ['disponivel', 'ausente', 'ocupado', 'volto_logo', 'invisivel', 'offline'];
 
+// mysql2 pode devolver JSON já parseado (objeto) ou como string, conforme versão.
+const parseJson = (v) => {
+    if (v == null) return null;
+    if (typeof v === 'object') return v;
+    try { return JSON.parse(v); } catch { return null; }
+};
+
 // GET /api/users/me/settings
 const getMySettings = async (req, res) => {
     try {
         const [rows] = await db.query(
-            'SELECT id, name, display_name, chat_status, chat_status_msg FROM users WHERE id = ?',
+            'SELECT id, name, display_name, chat_status, chat_status_msg, chat_notif_prefs FROM users WHERE id = ?',
             [req.user.id]
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
@@ -21,6 +28,7 @@ const getMySettings = async (req, res) => {
             displayName: u.display_name || u.name || '',
             chatStatus: u.chat_status || 'disponivel',
             chatStatusMsg: u.chat_status_msg || '',
+            chatNotifPrefs: parseJson(u.chat_notif_prefs),
         });
     } catch (error) {
         console.error('❌ Erro ao carregar configurações:', error.message);
@@ -51,6 +59,16 @@ const updateMySettings = async (req, res) => {
             fields.push('chat_status_msg = ?');
             params.push(msg || null);
         }
+        if (req.body.chatNotifPrefs !== undefined) {
+            let json = null;
+            try {
+                const obj = typeof req.body.chatNotifPrefs === 'string'
+                    ? JSON.parse(req.body.chatNotifPrefs) : req.body.chatNotifPrefs;
+                if (obj && typeof obj === 'object') json = JSON.stringify(obj);
+            } catch { /* ignora payload inválido */ }
+            fields.push('chat_notif_prefs = ?');
+            params.push(json);
+        }
 
         if (fields.length === 0) return res.status(400).json({ error: 'Nada para atualizar.' });
 
@@ -74,7 +92,7 @@ const updateMySettings = async (req, res) => {
         }
 
         const [rows] = await db.query(
-            'SELECT id, name, display_name, chat_status, chat_status_msg FROM users WHERE id = ?',
+            'SELECT id, name, display_name, chat_status, chat_status_msg, chat_notif_prefs FROM users WHERE id = ?',
             [me]
         );
         const u = rows[0];
@@ -84,6 +102,7 @@ const updateMySettings = async (req, res) => {
             displayName: u.display_name || u.name || '',
             chatStatus: u.chat_status || 'disponivel',
             chatStatusMsg: u.chat_status_msg || '',
+            chatNotifPrefs: parseJson(u.chat_notif_prefs),
         });
     } catch (error) {
         console.error('❌ Erro ao salvar configurações:', error.message);

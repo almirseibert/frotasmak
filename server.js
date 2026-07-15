@@ -26,6 +26,9 @@ const http = require('http');
         { table: 'users',                  column: 'chat_status',                     def: "VARCHAR(20) NOT NULL DEFAULT 'offline'" },
         { table: 'users',                  column: 'chat_status_msg',                 def: 'VARCHAR(140) DEFAULT NULL' },
         { table: 'users',                  column: 'chat_last_seen',                  def: 'DATETIME DEFAULT NULL' },
+        // chat_notif_prefs: preferências de notificação do chat (JSON) — eventos,
+        // DND, horário de silêncio, mute por conversa, prévia de texto.
+        { table: 'users',                  column: 'chat_notif_prefs',                def: 'JSON DEFAULT NULL' },
         { table: 'comboio_transactions',   column: 'authNumber',                      def: 'INT UNSIGNED DEFAULT NULL' },
         { table: 'obras',                  column: 'tipo_registro',                   def: "ENUM('obra','centro_custo') DEFAULT 'obra'" },
         // FASE 1.3 — Campos adicionais em obras
