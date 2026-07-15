@@ -75,14 +75,22 @@ const fmtDate = (d) => {
 const buildOrderText = (order) => {
     const veiculoLinha = [order.vehicleLabel, order.vehicleModelo].filter(Boolean).join(' | ');
     const litrosLinha = order.isFillUp ? 'Tanque Cheio' : `${parseFloat(order.liters || 0).toFixed(2)} L`;
-    const lines = [
+    const lines = [];
+    if (order.isAlteracao) {
+        lines.push(
+            `⚠️ *ORDEM ALTERADA* ⚠️`,
+            `_Esta ordem foi modificada. Considere APENAS as informações abaixo e DESCONSIDERE a versão anterior (original) desta mesma ordem._`,
+            ``
+        );
+    }
+    lines.push(
         `*Ordem de Abastecimento Nº ${String(order.authNumber || '').padStart(6, '0')}*`,
         ``,
         `Data: ${fmtDate(order.date)}`,
         `Veículo: ${veiculoLinha || '—'}`,
         `Combustível: ${fmtFuel(order.fuelType)}`,
         `Quantidade: ${litrosLinha}`,
-    ];
+    );
     if (order.readingLabel && order.readingValue && order.readingValue !== 'N/A') lines.push(`${order.readingLabel}: ${order.readingValue}`);
     if (order.pricePerLiter) lines.push(`Valor/L: ${fmtMoney(order.pricePerLiter)}`);
     if (order.valorTotal)    lines.push(`Total: ${fmtMoney(order.valorTotal)}`);
@@ -105,8 +113,13 @@ const buildOrderText = (order) => {
 
 const buildOrderHtml = (order) => {
     const row = (k, v) => v ? `<tr><td style="padding:4px 8px;border:1px solid #e5e7eb;font-weight:600;background:#f9fafb">${k}</td><td style="padding:4px 8px;border:1px solid #e5e7eb">${v}</td></tr>` : '';
+    const alteracaoBanner = order.isAlteracao ? `
+        <div style="background:#fef2f2;border:2px solid #dc2626;color:#991b1b;padding:10px 12px;border-radius:6px;margin-bottom:10px;font-size:13px;font-weight:600">
+            ⚠️ ORDEM ALTERADA — Esta ordem foi modificada. Considere APENAS as informações abaixo e desconsidere a versão anterior (original) desta mesma ordem.
+        </div>` : '';
     return `
     <div style="font-family:Arial,sans-serif;max-width:600px">
+        ${alteracaoBanner}
         <h2 style="background:#fbbf24;color:#1f2937;padding:12px;margin:0;border-radius:6px 6px 0 0">
             Ordem de Abastecimento Nº ${String(order.authNumber || '').padStart(6, '0')}
         </h2>
@@ -175,9 +188,10 @@ const sendToPartner = async (partner, order, opts = {}) => {
             const authNum = String(order.authNumber || '').padStart(6, '0');
             const ri = order.registroInterno || '';
             const dateStr = fmtDateISO(order.date);
-            const emailSubject = ri
+            const baseSubject = ri
                 ? `Autorizacao_${authNum}_${ri}_${dateStr}`
                 : `Ordem de Abastecimento Nº ${authNum}`;
+            const emailSubject = order.isAlteracao ? `[ALTERADA] ${baseSubject}` : baseSubject;
             const r = await sendEmail({
                 to: partner.email,
                 subject: emailSubject,

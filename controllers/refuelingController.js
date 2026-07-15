@@ -17,7 +17,7 @@ const nodemailer = require('nodemailer');
 // Reusa o orderNotifier (mesmo pipeline da entrada de comboio): gera o PDF
 // uma vez, anexa por e-mail e manda link pelo WhatsApp — respeitando os
 // checkboxes envia_por_whatsapp / envia_por_email do partner. Fire-and-forget.
-const dispatchOrderToPartner = async (refuelingId) => {
+const dispatchOrderToPartner = async (refuelingId, opts = {}) => {
     try {
         const [[r]] = await db.execute(
             `SELECT r.id, r.authNumber, r.data, r.partnerId, r.partnerName,
@@ -72,6 +72,7 @@ const dispatchOrderToPartner = async (refuelingId) => {
                 outros: r.outros,
                 outrosValor: r.outrosValor,
                 issuer,
+                isAlteracao: !!opts.isAlteracao,
             },
         }).then(result => {
             console.log(`[orderNotifier] ordem #${r.authNumber}:`, JSON.stringify(result));
@@ -654,9 +655,17 @@ const updateRefuelingOrder = async (req, res) => {
             const dateStr = data.date.toString().replace(' ', 'T');
             updateData.data = new Date(dateStr);
         }
-        if (data.editedBy) updateData.editedBy = JSON.stringify(data.editedBy);
+        // Registra quem editou (o frontend envia o usuário em createdBy).
+        const editorInfo = data.editedBy || data.createdBy;
+        if (editorInfo) updateData.editedBy = JSON.stringify(editorInfo);
         if (data.status) updateData.status = data.status;
-        
+
+        if (data.vehicleId !== undefined) updateData.vehicleId = data.vehicleId;
+        if (data.employeeId !== undefined) updateData.employeeId = data.employeeId || null;
+        if (data.isFillUp !== undefined) updateData.isFillUp = data.isFillUp ? 1 : 0;
+        if (data.needsArla !== undefined) updateData.needsArla = data.needsArla ? 1 : 0;
+        if (data.isFillUpArla !== undefined) updateData.isFillUpArla = data.isFillUpArla ? 1 : 0;
+
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
         if (data.litrosAbastecidos !== undefined) updateData.litrosAbastecidos = safeNum(data.litrosAbastecidos, true);
         if (data.litrosAbastecidosArla !== undefined) updateData.litrosAbastecidosArla = safeNum(data.litrosAbastecidosArla, true);
@@ -761,6 +770,17 @@ const updateRefuelingOrder = async (req, res) => {
 
         await connection.commit();
         req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles', 'partner_fuel_credits'] });
+
+        // Reenvia a ordem ao posto (WhatsApp/e-mail conforme configurado) com um
+        // alerta de "ORDEM ALTERADA — desconsiderar a anterior". Só reenvia se a
+        // ordem estiver em estado enviável (não bloqueada e não terminal); ordens
+        // bloqueadas aguardam a liberação do admin, que dispara o envio.
+        const finalStatus = updateData.status || oldRefueling.status;
+        const sendableStatuses = ['Aberta', 'Concluída', 'Concluida', 'Confirmada'];
+        if (sendableStatuses.includes(finalStatus)) {
+            dispatchOrderToPartner(id, { isAlteracao: true });
+        }
+
         res.json({ message: 'Ordem atualizada.' });
     } catch (error) {
         await connection.rollback();
