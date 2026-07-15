@@ -921,6 +921,11 @@ const http = require('http');
         { column: 'reply_to',      def: 'VARCHAR(36) DEFAULT NULL' },
         { column: 'pinned_at',     def: 'DATETIME DEFAULT NULL' },
         { column: 'pinned_by',     def: 'VARCHAR(64) DEFAULT NULL' },
+        // ── Fase 4: anexos (reusa POST /api/upload) ──
+        { column: 'attachment_url',  def: 'VARCHAR(500) DEFAULT NULL' },
+        { column: 'attachment_name', def: 'VARCHAR(255) DEFAULT NULL' },
+        { column: 'attachment_mime', def: 'VARCHAR(100) DEFAULT NULL' },
+        { column: 'attachment_size', def: 'INT DEFAULT NULL' },
     ];
     for (const { column, def } of msgCols) {
         try {

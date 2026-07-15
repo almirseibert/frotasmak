@@ -95,7 +95,8 @@ const getMessages = async (req, res) => {
         const [rows] = await db.query(
             `SELECT id, sender_id, recipient_id, body, type, reply_to,
                     read_at, delivered_at, edited_at, deleted_at,
-                    pinned_at, pinned_by, client_msg_id, created_at
+                    pinned_at, pinned_by, client_msg_id, created_at,
+                    attachment_url, attachment_name, attachment_mime, attachment_size
                FROM messages
               WHERE ((sender_id = ? AND recipient_id = ?)
                  OR (sender_id = ? AND recipient_id = ?))${beforeClause}
@@ -121,6 +122,10 @@ const getMessages = async (req, res) => {
         const enriched = rows.map(r => ({
             ...r,
             body: r.deleted_at ? null : r.body,
+            attachment_url: r.deleted_at ? null : r.attachment_url,
+            attachment_name: r.deleted_at ? null : r.attachment_name,
+            attachment_mime: r.deleted_at ? null : r.attachment_mime,
+            attachment_size: r.deleted_at ? null : r.attachment_size,
             reactions: reactionsByMsg[r.id] || [],
         }));
 
@@ -148,14 +153,25 @@ const postMessage = async (req, res) => {
     try {
         const me = req.user.id;
         const recipientId = (req.body.recipientId ?? '').toString();
-        const type = req.body.type === 'nudge' ? 'nudge' : 'text';
+        const ALLOWED_TYPES = ['text', 'nudge', 'card'];
+        const type = ALLOWED_TYPES.includes(req.body.type) ? req.body.type : 'text';
         const clientMsgId = req.body.clientMsgId ? String(req.body.clientMsgId).slice(0, 64) : null;
         const replyTo = req.body.replyTo ? String(req.body.replyTo).slice(0, 36) : null;
         let body = (req.body.body || '').toString().trim();
 
+        // Anexo (opcional) — reusa o resultado de POST /api/upload.
+        const att = req.body.attachment || null;
+        const attachment = att && att.url ? {
+            url: String(att.url).slice(0, 500),
+            name: (att.name ? String(att.name) : '').slice(0, 255) || null,
+            mime: (att.mime ? String(att.mime) : '').slice(0, 100) || null,
+            size: Number.isFinite(+att.size) ? +att.size : null,
+        } : null;
+
         if (!recipientId || recipientId === String(me)) return res.status(400).json({ error: 'Destinatário inválido.' });
         if (type === 'nudge' && !body) body = 'Chamou sua atenção!';
-        if (!body) return res.status(400).json({ error: 'Mensagem vazia.' });
+        // Mensagem só é válida se tiver texto, anexo ou for um card (body=JSON).
+        if (!body && !attachment) return res.status(400).json({ error: 'Mensagem vazia.' });
         if (body.length > MAX_BODY) body = body.slice(0, MAX_BODY);
 
         // Idempotência: reenvio da fila offline usa o mesmo clientMsgId. Se já
@@ -191,9 +207,11 @@ const postMessage = async (req, res) => {
         const deliveredAt = online ? createdAt : null;
         try {
             await db.query(
-                `INSERT INTO messages (id, sender_id, recipient_id, body, type, reply_to, client_msg_id, delivered_at, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [id, me, recipientId, body, type, replyTo, clientMsgId, deliveredAt, createdAt]
+                `INSERT INTO messages (id, sender_id, recipient_id, body, type, reply_to, client_msg_id, delivered_at, created_at,
+                                       attachment_url, attachment_name, attachment_mime, attachment_size)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                [id, me, recipientId, body, type, replyTo, clientMsgId, deliveredAt, createdAt,
+                 attachment?.url || null, attachment?.name || null, attachment?.mime || null, attachment?.size || null]
             );
         } catch (insErr) {
             // Corrida: dois reenvios simultâneos com o mesmo clientMsgId.
@@ -217,6 +235,10 @@ const postMessage = async (req, res) => {
             type,
             reply_to: replyTo,
             reactions: [],
+            attachment_url: attachment?.url || null,
+            attachment_name: attachment?.name || null,
+            attachment_mime: attachment?.mime || null,
+            attachment_size: attachment?.size || null,
             client_msg_id: clientMsgId,
             read_at: null,
             delivered_at: deliveredAt,
@@ -237,7 +259,8 @@ const postMessage = async (req, res) => {
         if (!online && pushService) {
             pushService.pushToUsers([recipientId], {
                 title: senderName,
-                body: type === 'nudge' ? 'Chamou sua atenção!' : body.slice(0, 120),
+                body: type === 'nudge' ? 'Chamou sua atenção!'
+                    : (body ? body.slice(0, 120) : (attachment ? '📎 Anexo' : (type === 'card' ? '📇 Cartão' : ''))),
                 data: { kind: 'chat', from: me },
             }).catch(() => {});
         }
