@@ -1,6 +1,7 @@
 // controllers/expenseController.js
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid'); // Para gerar IDs
+const { ymdBRT } = require('../utils/dateBRT');
 
 // ===================================================================================
 // FUNÇÃO AUXILIAR DE PARSE SEGURO (Adicionada localmente)
@@ -39,16 +40,18 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
     const dayOfWeek = txDate.getDay(); 
     const diff = txDate.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
     const weekStartDate = new Date(txDate.setDate(diff));
-    
+    // Chave da semana em BRT ('YYYY-MM-DD') — determinística, sem depender de UTC.
+    const weekStartStr = ymdBRT(weekStartDate);
+
     // 3. Montar a descrição e os dados
     const formattedFuelType = (fuelType || 'N/A').replace(/([A-Z])/g, ' $1').toLowerCase();
     const description = `Combustível: ${formattedFuelType} - ${partnerName}`;
 
     // 4. Procurar por uma despesa existente para essa semana/obra/combustível/posto
     const [querySnapshot] = await connection.execute(
-        `SELECT id, amount FROM expenses 
+        `SELECT id, amount FROM expenses
          WHERE obraId = ? AND weekStartDate = ? AND fuelType = ? AND partnerName = ?`,
-        [obraId, weekStartDate.toISOString().split('T')[0], fuelType, partnerName]
+        [obraId, weekStartStr, fuelType, partnerName]
     );
 
     if (querySnapshot.length === 0) {
@@ -59,7 +62,7 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
             await connection.execute(`INSERT INTO expenses 
                 (id, obraId, description, amount, category, createdAt, weekStartDate, fuelType, partnerName, expenseType)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, 
-                [newExpenseId, obraId, description, valueChange, 'Combustível', new Date(), weekStartDate, fuelType, partnerName, 'Auto (Combustível)']
+                [newExpenseId, obraId, description, valueChange, 'Combustível', new Date(), weekStartStr, fuelType, partnerName, 'Auto (Combustível)']
             );
         }
     } else {

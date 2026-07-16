@@ -1,4 +1,5 @@
 const db = require('../database');
+const { todayBRT } = require('../utils/dateBRT');
 
 // ==================================================================================
 // FUNÇÕES AUXILIARES
@@ -266,7 +267,7 @@ exports.getObraDetails = async (req, res) => {
 
             if (ancora) {
                 const horasContratadas = parseFloat(contract.total_hours_contracted) || 0;
-                const today = new Date().toISOString().slice(0, 10);
+                const today = todayBRT();
                 const todasQuinzenas = [];
                 let horasAcum = 0;
 

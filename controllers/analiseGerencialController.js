@@ -1,5 +1,6 @@
 const db = require('../database');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
+const { todayBRT } = require('../utils/dateBRT');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -496,7 +497,7 @@ const getProjecaoObra = async (req, res) => {
         // Quinzenas: janelas fixas de 15 dias a partir da data de início operacional
         const quinzenas = [];
         if (dataInicio) {
-            const today = new Date().toISOString().slice(0, 10);
+            const today = todayBRT();
             let horasAcum = 0;
             let faturAcum = 0;
 

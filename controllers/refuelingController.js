@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
 const { recalcFuelAverage } = require('../utils/recalcFuelAverage');
 const { vehicleGroups } = require('../utils/vehicleRules');
+const { ymdBRT } = require('../utils/dateBRT');
 const { notifyComboioEntrada } = require('../services/orderNotifier');
 const fuelCredits = require('../utils/partnerFuelCredits');
 const { dispatchAsync, insertLog } = require('../services/notificationDispatcher');
@@ -419,8 +420,11 @@ const createRefuelingOrder = async (req, res) => {
                 '01-01', '04-21', '05-01', '09-07',
                 '10-12', '11-02', '11-15', '12-25'
             ]);
-            const dow = dataAbastecimento.getDay();
-            const mmdd = dataAbastecimento.toISOString().slice(5, 10);
+            // Dia da semana / MM-DD calculados no fuso de Brasília (não UTC),
+            // senão ordens do fim da tarde caíam no dia seguinte.
+            const ymd = ymdBRT(dataAbastecimento); // 'YYYY-MM-DD' em BRT
+            const dow = new Date(`${ymd}T12:00:00-03:00`).getDay();
+            const mmdd = ymd.slice(5, 10);
             const isWeekendOrHoliday = dow === 0 || dow === 6 || FERIADOS_BR_FIXOS.has(mmdd);
 
             const [vehicleRows] = await connection.execute(

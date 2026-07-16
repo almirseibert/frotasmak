@@ -2,6 +2,7 @@ const cron = require('node-cron');
 const db = require('../database');
 const whatsappService = require('./whatsappService');
 const { dispatchAsync } = require('./notificationDispatcher');
+const { ymdBRT } = require('../utils/dateBRT');
 const { syncJourneyEvents, syncPositions, syncDailySummary } = require('./sigasulSyncService');
 const { processYesterday: processConfrontoYesterday } = require('./confrontoService');
 const { processYesterday: processDiscrepanciaYesterday } = require('./discrepanciaService');
@@ -46,11 +47,8 @@ const getTzDateStr = (daysToAdd = 0) => {
 
 const formatDateDb = (dbDate) => {
     if (!dbDate) return null;
-    try {
-        const d = new Date(dbDate);
-        if(isNaN(d.getTime())) return null;
-        return d.toISOString().split('T')[0];
-    } catch(e) { return null; }
+    // Formata em BRT (GMT-3), fuso oficial da rotina diária — não em UTC.
+    return ymdBRT(dbDate);
 };
 
 // Formatação Padrão de WhatsApp (Padronização Frotas MAK)

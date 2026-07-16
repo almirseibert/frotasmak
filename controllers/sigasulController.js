@@ -1,5 +1,6 @@
 const https = require('https');
 const db = require('../database');
+const { todayBRT } = require('../utils/dateBRT');
 
 const SIGASUL_BASE = 'https://gestao.sigasul.com.br';
 const agent = new https.Agent({ rejectUnauthorized: false }); // SigaSul usa cert auto-assinado
@@ -24,11 +25,8 @@ const sigasulFetch = async (path) => {
     return res.json();
 };
 
-// Retorna a data de hoje no formato YYYY-MM-DD (fuso GMT-3)
-const todayGmt3 = () => {
-    const d = new Date(Date.now() - 3 * 3600000);
-    return d.toISOString().slice(0, 10);
-};
+// Retorna a data de hoje no formato YYYY-MM-DD (fuso GMT-3 / America/Sao_Paulo)
+const todayGmt3 = () => todayBRT();
 
 // Retorna true se a data (YYYY-MM-DD) for hoje ou futura (dados não sincronizados ainda)
 const isNotSynced = (dateStr) => dateStr >= todayGmt3();

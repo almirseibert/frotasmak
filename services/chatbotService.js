@@ -5,6 +5,7 @@ const fs         = require('fs');
 const Anthropic  = require('@anthropic-ai/sdk');
 const db         = require('../database');
 const whatsappService = require('./whatsappService');
+const { todayBRT } = require('../utils/dateBRT');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -404,7 +405,7 @@ async function criarSolicitacaoDB(session) {
         [employeeUuid]
     );
     const usuarioId = userRows.length ? userRows[0].id : null;
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayBRT();
 
     const conn = await db.getConnection();
     try {
