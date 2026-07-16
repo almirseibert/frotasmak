@@ -15,12 +15,60 @@ const num = (v) => {
     return Number.isFinite(n) ? n : 0;
 };
 
+const FOROS_VALIDOS = ['Santa Maria', 'Lajeado'];
+
+// Cláusulas jurídicas parametrizáveis: aplica default do contrato-modelo quando
+// o campo não vier preenchido (contratos antigos, ou criação rápida).
+const clausulasJuridicas = (body) => ({
+    prazoPagamentoDias: body.prazoPagamentoDias != null && body.prazoPagamentoDias !== '' ? parseInt(body.prazoPagamentoDias, 10) || 30 : 30,
+    percentualJurosMora: body.percentualJurosMora != null && body.percentualJurosMora !== '' ? num(body.percentualJurosMora) : 1,
+    percentualMultaMora: body.percentualMultaMora != null && body.percentualMultaMora !== '' ? num(body.percentualMultaMora) : 1,
+    prazoSubstituicaoHoras: body.prazoSubstituicaoHoras != null && body.prazoSubstituicaoHoras !== '' ? parseInt(body.prazoSubstituicaoHoras, 10) || 48 : 48,
+    prazoInicioServicoHoras: body.prazoInicioServicoHoras != null && body.prazoInicioServicoHoras !== '' ? parseInt(body.prazoInicioServicoHoras, 10) || 48 : 48,
+    percentualMultaInadimplemento: body.percentualMultaInadimplemento != null && body.percentualMultaInadimplemento !== '' ? num(body.percentualMultaInadimplemento) : 0.5,
+    avisoPrevioRescisaoDias: body.avisoPrevioRescisaoDias != null && body.avisoPrevioRescisaoDias !== '' ? parseInt(body.avisoPrevioRescisaoDias, 10) || 2 : 2,
+    foroComarca: FOROS_VALIDOS.includes(body.foroComarca) ? body.foroComarca : 'Santa Maria',
+});
+
 const normalizeMaquinas = (m) => {
     if (Array.isArray(m)) return m.filter(Boolean);
     if (typeof m === 'string') {
         try { const p = JSON.parse(m); return Array.isArray(p) ? p.filter(Boolean) : []; } catch { return []; }
     }
     return [];
+};
+
+// Normaliza os itens do plano de trabalho ([{ type, hours, price }]).
+const normalizeItens = (itens) => {
+    let arr = itens;
+    if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { arr = []; } }
+    if (!Array.isArray(arr)) return [];
+    return arr
+        .filter((i) => i && i.type)
+        .map((i) => ({ type: String(i.type), hours: num(i.hours), price: num(i.price) }));
+};
+
+// A partir do plano, calcula horas totais e valor total (por horas) ou usa o valor fechado.
+const derivarAgregados = ({ contractType, itens, horasContratadas, valorHora, valorTotal }) => {
+    if (contractType === 'fechado') {
+        return {
+            horas: num(horasContratadas),
+            vHora: 0,
+            vTotal: valorTotal != null && valorTotal !== '' ? num(valorTotal) : 0,
+            itens: [],
+        };
+    }
+    // 'horas': se vier plano de itens, ele é a fonte de verdade; senão cai no par simples.
+    if (itens.length > 0) {
+        const horas = itens.reduce((a, i) => a + i.hours, 0);
+        const vTotal = itens.reduce((a, i) => a + i.hours * i.price, 0);
+        const vHora = horas > 0 ? Math.round((vTotal / horas) * 100) / 100 : 0;
+        return { horas, vHora, vTotal, itens };
+    }
+    const horas = num(horasContratadas);
+    const vHora = num(valorHora);
+    const vTotal = valorTotal != null && valorTotal !== '' ? num(valorTotal) : horas * vHora;
+    return { horas, vHora, vTotal, itens: [] };
 };
 
 // Impede que uma máquina fique vinculada a mais de um contrato (1 máquina : 1 contrato).
@@ -67,16 +115,19 @@ const createTerceiroContrato = async (req, res) => {
     const {
         locadorId, obraId, tipoMaquina, horasContratadas, valorHora,
         valorTotal, vigenciaInicio, vigenciaFim, status, observacoes, maquinas, createdBy,
+        contractType, itensContratados,
     } = req.body;
 
     if (!locadorId) return res.status(400).json({ error: 'Terceiro (locador) é obrigatório.' });
     if (!obraId) return res.status(400).json({ error: 'Obra é obrigatória.' });
 
-    const horas = num(horasContratadas);
-    const vHora = num(valorHora);
-    // Valor total: usa o enviado; se ausente, deriva de horas × valor/hora.
-    const vTotal = valorTotal != null && valorTotal !== '' ? num(valorTotal) : horas * vHora;
+    const tipoContrato = contractType === 'fechado' ? 'fechado' : 'horas';
+    const itens = normalizeItens(itensContratados);
+    const { horas, vHora, vTotal, itens: itensFinal } = derivarAgregados({
+        contractType: tipoContrato, itens, horasContratadas, valorHora, valorTotal,
+    });
     const maqs = normalizeMaquinas(maquinas);
+    const clausulas = clausulasJuridicas(req.body);
 
     const id = randomUUID();
     const criadoPor = createdBy?.userEmail || req.user?.email || null;
@@ -90,11 +141,18 @@ const createTerceiroContrato = async (req, res) => {
         await db.execute(
             `INSERT INTO terceiro_contratos
                 (id, numero, locadorId, obraId, tipoMaquina, horasContratadas, valorHora,
-                 valorTotal, vigenciaInicio, vigenciaFim, status, observacoes, maquinas, created_by_email)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 valorTotal, vigenciaInicio, vigenciaFim, status, observacoes, maquinas,
+                 contractType, itensContratados, created_by_email,
+                 prazoPagamentoDias, percentualJurosMora, percentualMultaMora,
+                 prazoSubstituicaoHoras, prazoInicioServicoHoras, percentualMultaInadimplemento,
+                 avisoPrevioRescisaoDias, foroComarca)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [id, numero, locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
-             JSON.stringify(maqs), criadoPor]
+             JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal), criadoPor,
+             clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
+             clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
+             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca]
         );
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
@@ -110,15 +168,19 @@ const updateTerceiroContrato = async (req, res) => {
     const {
         locadorId, obraId, tipoMaquina, horasContratadas, valorHora,
         valorTotal, vigenciaInicio, vigenciaFim, status, observacoes, maquinas,
+        contractType, itensContratados,
     } = req.body;
 
     if (!locadorId) return res.status(400).json({ error: 'Terceiro (locador) é obrigatório.' });
     if (!obraId) return res.status(400).json({ error: 'Obra é obrigatória.' });
 
-    const horas = num(horasContratadas);
-    const vHora = num(valorHora);
-    const vTotal = valorTotal != null && valorTotal !== '' ? num(valorTotal) : horas * vHora;
+    const tipoContrato = contractType === 'fechado' ? 'fechado' : 'horas';
+    const itens = normalizeItens(itensContratados);
+    const { horas, vHora, vTotal, itens: itensFinal } = derivarAgregados({
+        contractType: tipoContrato, itens, horasContratadas, valorHora, valorTotal,
+    });
     const maqs = normalizeMaquinas(maquinas);
+    const clausulas = clausulasJuridicas(req.body);
 
     try {
         const conflito = await maquinasEmConflito(maqs, id);
@@ -128,11 +190,18 @@ const updateTerceiroContrato = async (req, res) => {
         const [result] = await db.execute(
             `UPDATE terceiro_contratos
                 SET locadorId = ?, obraId = ?, tipoMaquina = ?, horasContratadas = ?, valorHora = ?,
-                    valorTotal = ?, vigenciaInicio = ?, vigenciaFim = ?, status = ?, observacoes = ?, maquinas = ?
+                    valorTotal = ?, vigenciaInicio = ?, vigenciaFim = ?, status = ?, observacoes = ?, maquinas = ?,
+                    contractType = ?, itensContratados = ?,
+                    prazoPagamentoDias = ?, percentualJurosMora = ?, percentualMultaMora = ?,
+                    prazoSubstituicaoHoras = ?, prazoInicioServicoHoras = ?, percentualMultaInadimplemento = ?,
+                    avisoPrevioRescisaoDias = ?, foroComarca = ?
               WHERE id = ?`,
             [locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
-             JSON.stringify(maqs), id]
+             JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal),
+             clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
+             clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
+             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, id]
         );
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);

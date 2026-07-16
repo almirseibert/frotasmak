@@ -825,6 +825,39 @@ const http = require('http');
         } catch (err) {
             if (err.code !== 'ER_DUP_FIELDNAME') throw err;
         }
+        // Plano de trabalho estilo Obra: tipo de contrato ('horas' | 'fechado') e
+        // itens contratados por subgrupo ([{ type, hours, price }]). horasContratadas
+        // e valorTotal continuam sendo os AGREGADOS (soma), consumidos pelo cálculo de saldo.
+        try {
+            await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN contractType VARCHAR(20) NOT NULL DEFAULT 'horas'`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        try {
+            await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN itensContratados JSON DEFAULT NULL`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        // Cláusulas jurídicas parametrizáveis (extraídas de contrato real de terceiro,
+        // ver services/contratoPdfGenerator.js): prazos e percentuais que hoje eram
+        // texto fixo ou simplesmente ausentes do PDF gerado.
+        const clausulasJuridicas = [
+            { column: 'prazoPagamentoDias',              def: 'INT NOT NULL DEFAULT 30' },
+            { column: 'percentualJurosMora',              def: 'DECIMAL(5,2) NOT NULL DEFAULT 1.00' },
+            { column: 'percentualMultaMora',              def: 'DECIMAL(5,2) NOT NULL DEFAULT 1.00' },
+            { column: 'prazoSubstituicaoHoras',           def: 'INT NOT NULL DEFAULT 48' },
+            { column: 'prazoInicioServicoHoras',          def: 'INT NOT NULL DEFAULT 48' },
+            { column: 'percentualMultaInadimplemento',    def: 'DECIMAL(5,2) NOT NULL DEFAULT 0.50' },
+            { column: 'avisoPrevioRescisaoDias',          def: 'INT NOT NULL DEFAULT 2' },
+            { column: 'foroComarca',                      def: "VARCHAR(60) NOT NULL DEFAULT 'Santa Maria'" },
+        ];
+        for (const { column, def } of clausulasJuridicas) {
+            try {
+                await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN ${column} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+            }
+        }
         console.log('✅ Migração terceiro_contratos concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] terceiro_contratos:', e.message);
