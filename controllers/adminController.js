@@ -65,15 +65,32 @@ const approveRegistrationRequest = async (req, res) => {
 const deleteRegistrationRequest = async (req, res) => {
     const { id } = req.params;
     if (!id) return res.status(400).json({ error: 'ID não informado.' });
+    const conn = await db.getConnection();
     try {
-        const [result] = await db.query("DELETE FROM users WHERE id = ? AND status = 'inativo'", [id]);
-        if (result.affectedRows === 0) {
+        await conn.beginTransaction();
+
+        // Garante que só rejeitamos solicitações pendentes (usuário inativo).
+        const [users] = await conn.query("SELECT id FROM users WHERE id = ? AND status = 'inativo'", [id]);
+        if (users.length === 0) {
+            await conn.rollback();
             return res.status(404).json({ error: 'Solicitação não encontrada ou já processada.' });
         }
+
+        // Remove dependências que impedem a exclusão do usuário (FK).
+        // Um usuário inativo pode ter gerado solicitações de abastecimento antes
+        // da aprovação; ao rejeitar o cadastro, esses registros ficam órfãos.
+        await conn.query('DELETE FROM solicitacoes_abastecimento WHERE usuario_id = ?', [id]);
+
+        await conn.query('DELETE FROM users WHERE id = ?', [id]);
+
+        await conn.commit();
         res.status(204).end();
     } catch (error) {
+        await conn.rollback();
         console.error('Erro ao rejeitar solicitação [id=%s]:', id, error);
         res.status(500).json({ error: 'Erro ao rejeitar solicitação.', detail: error.message, code: error.code });
+    } finally {
+        conn.release();
     }
 };
 
