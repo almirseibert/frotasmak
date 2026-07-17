@@ -49,6 +49,17 @@ const http = require('http');
         // FASE 2.9 — Canais de envio de ordem para parceiros (posto)
         { table: 'partners',               column: 'envia_por_whatsapp',               def: 'TINYINT(1) DEFAULT 0' },
         { table: 'partners',               column: 'envia_por_email',                  def: 'TINYINT(1) DEFAULT 0' },
+        // Cadastro do terceiro/parceiro: nome fantasia (exibição no sistema, razão
+        // social vai por extenso só no contrato), bairro/CEP e tipo de pessoa
+        // (juridica → CNPJ / fisica → CPF), que muda a redação do contrato.
+        { table: 'partners',               column: 'nomeFantasia',                     def: 'VARCHAR(160) DEFAULT NULL' },
+        { table: 'partners',               column: 'bairro',                           def: 'VARCHAR(120) DEFAULT NULL' },
+        { table: 'partners',               column: 'cep',                              def: 'VARCHAR(12) DEFAULT NULL' },
+        { table: 'partners',               column: 'tipoPessoa',                       def: "VARCHAR(10) DEFAULT 'juridica'" },
+        // Representante legal do terceiro (assinante), opcional. Se preenchido, o
+        // gerador de contrato usa como fallback do representante da CONTRATADA.
+        { table: 'partners',               column: 'representanteLegalNome',            def: 'VARCHAR(160) DEFAULT NULL' },
+        { table: 'partners',               column: 'representanteLegalCpf',             def: 'VARCHAR(20) DEFAULT NULL' },
         // FASE 2.10 — Colunas de movimentação de pneus
         { table: 'tire_transactions',      column: 'employeeName',                     def: 'VARCHAR(255) NULL' },
         { table: 'tire_transactions',      column: 'odometer',                         def: 'DECIMAL(10,1) NULL' },
@@ -850,6 +861,11 @@ const http = require('http');
             { column: 'percentualMultaInadimplemento',    def: 'DECIMAL(5,2) NOT NULL DEFAULT 0.50' },
             { column: 'avisoPrevioRescisaoDias',          def: 'INT NOT NULL DEFAULT 2' },
             { column: 'foroComarca',                      def: "VARCHAR(60) NOT NULL DEFAULT 'Santa Maria'" },
+            // Qualificação do representante legal (assinante) da CONTRATADA — sustenta o
+            // contrato como título executivo extrajudicial (arts. 783/784, III, CPC).
+            { column: 'contratadaRepresentanteNome',         def: 'VARCHAR(160) DEFAULT NULL' },
+            { column: 'contratadaRepresentanteQualificacao', def: 'VARCHAR(200) DEFAULT NULL' },
+            { column: 'contratadaRepresentanteCpf',          def: 'VARCHAR(20) DEFAULT NULL' },
         ];
         for (const { column, def } of clausulasJuridicas) {
             try {

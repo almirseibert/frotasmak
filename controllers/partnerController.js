@@ -20,6 +20,21 @@ const sanitizeTipoParceiro = (tipo, fallback = 'posto') => {
     return TIPOS_PARCEIRO_VALIDOS.includes(t) ? t : fallback;
 };
 
+// Normaliza tipoPessoa para 'fisica' | 'juridica'.
+const sanitizeTipoPessoa = (v) => (String(v || '').trim().toLowerCase() === 'fisica' ? 'fisica' : 'juridica');
+
+// Normaliza o documento (CNPJ/CPF) para o formato padrão, para sair formatado no
+// contrato. 14 dígitos → CNPJ (00.000.000/0000-00); 11 → CPF (000.000.000-00).
+// Quantidade inesperada de dígitos: devolve o valor original (não corrompe dado
+// incompleto). Aplica no cadastro (create/update) do parceiro.
+const normalizeDocumento = (v) => {
+    if (v == null) return v;
+    const dig = String(v).replace(/\D/g, '');
+    if (dig.length === 14) return dig.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+    if (dig.length === 11) return dig.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4');
+    return v;
+};
+
 // --- READ: Obter todos os parceiros ---
 const getAllPartners = async (req, res) => {
     try {
@@ -73,13 +88,19 @@ const createPartner = async (req, res) => {
     const allowedPartnerFields = [
         'id', 
         'razaoSocial',
+        'nomeFantasia',
         'cnpj',
+        'tipoPessoa',
         'inscricaoEstadual',
         'endereco',
+        'bairro',
+        'cep',
         'telefone',
         'whatsapp',
         'email',
         'contatoResponsavel',
+        'representanteLegalNome',
+        'representanteLegalCpf',
         'cidade',
         'status_operacional',
         'tipo_parceiro',
@@ -99,6 +120,9 @@ const createPartner = async (req, res) => {
 
     // Sanitiza tipo_parceiro: garante valor válido no ENUM ('posto', 'fornecedor', 'comboio')
     partnerData.tipo_parceiro = sanitizeTipoParceiro(partnerData.tipo_parceiro, 'posto');
+    if ('tipoPessoa' in partnerData) partnerData.tipoPessoa = sanitizeTipoPessoa(partnerData.tipoPessoa);
+    if ('cnpj' in partnerData && partnerData.cnpj) partnerData.cnpj = normalizeDocumento(partnerData.cnpj);
+    if ('representanteLegalCpf' in partnerData && partnerData.representanteLegalCpf) partnerData.representanteLegalCpf = normalizeDocumento(partnerData.representanteLegalCpf);
 
     const fields = Object.keys(partnerData);
     const values = Object.values(partnerData);
@@ -145,13 +169,19 @@ const updatePartner = async (req, res) => {
 
     const allowedPartnerFields = [
         'razaoSocial',
+        'nomeFantasia',
         'cnpj',
+        'tipoPessoa',
         'inscricaoEstadual',
         'endereco',
+        'bairro',
+        'cep',
         'telefone',
         'whatsapp',
         'email',
         'contatoResponsavel',
+        'representanteLegalNome',
+        'representanteLegalCpf',
         'cidade',
         'status_operacional',
         'tipo_parceiro',
@@ -172,6 +202,9 @@ const updatePartner = async (req, res) => {
     if ('tipo_parceiro' in partnerData) {
         partnerData.tipo_parceiro = sanitizeTipoParceiro(partnerData.tipo_parceiro, 'posto');
     }
+    if ('tipoPessoa' in partnerData) partnerData.tipoPessoa = sanitizeTipoPessoa(partnerData.tipoPessoa);
+    if ('cnpj' in partnerData && partnerData.cnpj) partnerData.cnpj = normalizeDocumento(partnerData.cnpj);
+    if ('representanteLegalCpf' in partnerData && partnerData.representanteLegalCpf) partnerData.representanteLegalCpf = normalizeDocumento(partnerData.representanteLegalCpf);
 
     const fields = Object.keys(partnerData);
     const values = fields.map(field => partnerData[field]);
