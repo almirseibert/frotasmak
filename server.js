@@ -99,6 +99,16 @@ const http = require('http');
         // ex. Escavadeira 13t vs 26t. Campos antigos (…PorTipo) seguem como fallback.
         { table: 'obras',                  column: 'horasContratadasPorSubTipo',       def: 'JSON DEFAULT NULL' },
         { table: 'obras',                  column: 'valoresPorSubTipo',                def: 'JSON DEFAULT NULL' },
+        // ── Geolocalização / Mapa Operacional (cidades IBGE do RS) ──
+        // cidade_ibge liga obra/funcionário ao município do RS (código IBGE 7 díg.)
+        // para posicionar no mapa (centroide da cidade) e casar proximidade.
+        { table: 'obras',                  column: 'cidade_ibge',                      def: 'VARCHAR(7) DEFAULT NULL' },
+        // Atributos do colaborador usados na sugestão de equipe:
+        // equipamentos_aptos = JSON array dos tipos de equipamento que sabe operar;
+        // is_lider_obra = apto a liderar obra (designação de líder por lógica).
+        { table: 'employees',              column: 'cidade_ibge',                      def: 'VARCHAR(7) DEFAULT NULL' },
+        { table: 'employees',              column: 'equipamentos_aptos',               def: 'JSON DEFAULT NULL' },
+        { table: 'employees',              column: 'is_lider_obra',                    def: 'TINYINT(1) NOT NULL DEFAULT 0' },
     ];
 
     for (const { table, column, def } of migrations) {

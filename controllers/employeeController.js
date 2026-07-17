@@ -102,12 +102,13 @@ const getAllEmployees = async (req, res) => {
                 alocadoEm: parseJsonSafe(emp.alocadoEm),
                 aso: parseJsonSafe(emp.aso),
                 epi: parseJsonSafe(emp.epi),
-                cnh: parseJsonSafe(emp.cnh) || { 
+                cnh: parseJsonSafe(emp.cnh) || {
                     numero: emp.cnhNumero,
                     categoria: emp.cnhCategoria,
                     validade: emp.cnhVencimento
                 },
-                certificados: parseJsonSafe(emp.certificados) || []
+                certificados: parseJsonSafe(emp.certificados) || [],
+                equipamentos_aptos: parseJsonSafe(emp.equipamentos_aptos) || []
             };
         });
 
@@ -130,7 +131,8 @@ const getEmployeeById = async (req, res) => {
             aso: parseJsonSafe(emp.aso),
             epi: parseJsonSafe(emp.epi),
             cnh: parseJsonSafe(emp.cnh) || { numero: emp.cnhNumero, categoria: emp.cnhCategoria, validade: emp.cnhVencimento },
-            certificados: parseJsonSafe(emp.certificados)
+            certificados: parseJsonSafe(emp.certificados),
+            equipamentos_aptos: parseJsonSafe(emp.equipamentos_aptos) || []
         });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao buscar funcionário.' });
@@ -176,6 +178,11 @@ const createEmployee = async (req, res) => {
 
         const isPlaceholder = (data.isPlaceholder === 1 || data.isPlaceholder === true) ? 1 : 0;
 
+        // Geolocalização / sugestão de equipe
+        const cidadeIbge = valOrNull(data.cidade_ibge);
+        const equipamentosAptos = JSON.stringify(Array.isArray(data.equipamentos_aptos) ? data.equipamentos_aptos : []);
+        const isLiderObra = (data.is_lider_obra === 1 || data.is_lider_obra === true) ? 1 : 0;
+
         const values = [
             newId,
             valOrNull(data.nome),
@@ -201,7 +208,10 @@ const createEmployee = async (req, res) => {
             epi,
             cnhJson,
             certificados,
-            isPlaceholder
+            isPlaceholder,
+            cidadeIbge,
+            equipamentosAptos,
+            isLiderObra
         ];
 
         // Query sem a coluna telefone, mas com as novas colunas
@@ -210,8 +220,9 @@ const createEmployee = async (req, res) => {
                 id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, contato, email,
                 endereco, cidade, dataAdmissao, dataContratacao, status,
                 cnhNumero, cnhCategoria, cnhVencimento, cnhEmissao, exameToxicologicoVencimento,
-                aso, epi, cnh, certificados, isPlaceholder
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                aso, epi, cnh, certificados, isPlaceholder,
+                cidade_ibge, equipamentos_aptos, is_lider_obra
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             values
         );
 
@@ -286,6 +297,11 @@ const updateEmployee = async (req, res) => {
         
         const isPlaceholder = (data.isPlaceholder === 1 || data.isPlaceholder === true) ? 1 : 0;
 
+        // Geolocalização / sugestão de equipe
+        const cidadeIbge = valOrNull(data.cidade_ibge);
+        const equipamentosAptos = JSON.stringify(Array.isArray(data.equipamentos_aptos) ? data.equipamentos_aptos : []);
+        const isLiderObra = (data.is_lider_obra === 1 || data.is_lider_obra === true) ? 1 : 0;
+
         let params = [
             valOrNull(data.nome),
             valOrNull(data.vulgo),
@@ -309,7 +325,10 @@ const updateEmployee = async (req, res) => {
             cnhJson,
             certificados,
             dataDesligamento,
-            isPlaceholder
+            isPlaceholder,
+            cidadeIbge,
+            equipamentosAptos,
+            isLiderObra
         ];
 
         if (data.status && typeof data.status === 'string' && !data.status.includes('{')) {
@@ -325,7 +344,8 @@ const updateEmployee = async (req, res) => {
                 contato=?, email=?, endereco=?, cidade=?,
                 dataAdmissao=?,
                 cnhNumero=?, cnhCategoria=?, cnhVencimento=?, cnhEmissao=?, exameToxicologicoVencimento=?,
-                aso=?, epi=?, cnh=?, certificados=?, dataDesligamento=?, isPlaceholder=?
+                aso=?, epi=?, cnh=?, certificados=?, dataDesligamento=?, isPlaceholder=?,
+                cidade_ibge=?, equipamentos_aptos=?, is_lider_obra=?
                 ${statusUpdateClause}
              WHERE id=?`,
             params
