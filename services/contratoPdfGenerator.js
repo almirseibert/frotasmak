@@ -362,8 +362,9 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         paragraph(
             `k) entregar diariamente à CONTRATANTE o relatório das horas efetivamente trabalhadas por ` +
             `cada equipamento, acompanhado de registro fotográfico dos equipamentos em operação no dia, ` +
-            `constituindo a apresentação de ambos os documentos condição indispensável para a liberação ` +
-            `do abastecimento de combustível pela CONTRATANTE;`
+            `obrigação esta exigível independentemente da forma de contratação; nos casos em que o ` +
+            `combustível for fornecido pela CONTRATANTE, a apresentação de tais documentos constitui, ` +
+            `ainda, condição indispensável para a liberação do abastecimento;`
         );
         paragraph(
             `l) assumir integral e exclusiva responsabilidade por acidentes de trabalho que envolvam seus ` +
