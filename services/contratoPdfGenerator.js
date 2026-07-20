@@ -269,12 +269,14 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
             `As horas efetivamente executadas serão apuradas pelo Relatório de Horas da CONTRATANTE, ` +
             `servindo de acompanhamento físico da execução, sem alterar o valor global ora ajustado.`
         );
-        const prazoPagamentoDias = contrato.prazoPagamentoDias || 30;
+        const prazoPagamentoDias = contrato.prazoPagamentoDias || 45;
         paragraph(
             `O pagamento pela prestação dos serviços será feito em favor da CONTRATADA mediante ` +
-            `depósito bancário em sua conta corrente, a ser informada, acompanhado da nota fiscal e do ` +
-            `relatório/planilha de horas, o qual deverá ser conferido e aceito pela CONTRATANTE, em até ` +
-            `${prazoPagamentoDias} dias após a conclusão dos serviços. Recaindo o vencimento em feriado ` +
+            `depósito bancário em conta corrente por ela indicada, e somente após a expressa autorização ` +
+            `da CONTRATANTE, mediante apresentação da nota fiscal e do relatório/planilha de horas, os ` +
+            `quais deverão ser previamente conferidos e aceitos pela CONTRATANTE. O prazo de pagamento ` +
+            `será de até ${prazoPagamentoDias} dias contados da data do aceite formal da CONTRATANTE, e ` +
+            `não da mera conclusão dos serviços. Recaindo o vencimento em feriado ` +
             `(nacional, estadual ou municipal), o vencimento fica prorrogado para o primeiro dia útil ` +
             `subsequente. O CNPJ constante das notas fiscais/faturas deverá ser o constante na ` +
             `qualificação das partes deste contrato.`
@@ -294,10 +296,10 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         // ── Abatimentos ──────────────────────────────────────────────
         heading('CLÁUSULA 3ª — DOS ABATIMENTOS');
         paragraph(
-            `Serão descontados do valor global os adiantamentos pagos pela CONTRATANTE, bem como o ` +
-            `combustível fornecido pela CONTRATANTE aos equipamentos da CONTRATADA, valorado pelo preço ` +
-            `efetivo de cada abastecimento. O saldo a pagar corresponde ao valor global deduzido de tais ` +
-            `abatimentos.`
+            `Serão descontados do valor global os adiantamentos pagos pela CONTRATANTE. Caso a ` +
+            `CONTRATANTE forneça combustível aos equipamentos da CONTRATADA, o respectivo valor, apurado ` +
+            `pelo preço efetivo de cada abastecimento, será igualmente deduzido do valor global, a título ` +
+            `de adiantamento. O saldo a pagar corresponde ao valor global deduzido de tais abatimentos.`
         );
 
         // ── Vigência ─────────────────────────────────────────────────
