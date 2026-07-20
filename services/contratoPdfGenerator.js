@@ -25,6 +25,9 @@ const fmtBRL = (n) =>
     (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const fmtNum = (n) =>
     (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+// Horas: sem casa decimal quando inteiro (514, não 514,0); 1 casa quando fracionário (7,5).
+const fmtHoras = (n) =>
+    (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 1 });
 const fmtDate = (d) => {
     if (!d) return '____/____/______';
     try {
@@ -224,10 +227,21 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         if (!Array.isArray(itens)) itens = [];
 
         if (contrato.contractType === 'fechado') {
-            paragraph(
-                `A CONTRATADA executará o objeto pelo valor global e fechado de ` +
-                `${fmtBRL(contrato.valorTotal)}, independentemente do volume de horas efetivamente executado.`
-            );
+            if (itens.length > 0) {
+                paragraph(
+                    `A CONTRATADA executará o objeto pelo valor global e fechado de ` +
+                    `${fmtBRL(contrato.valorTotal)}, independentemente do volume de horas efetivamente executado, ` +
+                    `compreendendo os seguintes volumes de máquina:`
+                );
+                itens.forEach((i) => {
+                    paragraph(`• ${sanitizeText(i.type) || '—'}: ${fmtHoras(Number(i.hours) || 0)} horas.`);
+                });
+            } else {
+                paragraph(
+                    `A CONTRATADA executará o objeto pelo valor global e fechado de ` +
+                    `${fmtBRL(contrato.valorTotal)}, independentemente do volume de horas efetivamente executado.`
+                );
+            }
         } else if (itens.length > 0) {
             paragraph(
                 `A CONTRATADA executará os seguintes volumes de máquina, cujo somatório perfaz o valor ` +
@@ -237,12 +251,12 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
                 const h = Number(i.hours) || 0;
                 const p = Number(i.price) || 0;
                 paragraph(
-                    `• ${sanitizeText(i.type) || '—'}: ${fmtNum(h)} h × ${fmtBRL(p)}/h = ${fmtBRL(h * p)}.`
+                    `• ${sanitizeText(i.type) || '—'}: ${fmtHoras(h)} h × ${fmtBRL(p)}/h = ${fmtBRL(h * p)}.`
                 );
             });
         } else {
             paragraph(
-                `A CONTRATADA executará o total de ${fmtNum(contrato.horasContratadas)} horas de máquina, ` +
+                `A CONTRATADA executará o total de ${fmtHoras(contrato.horasContratadas)} horas de máquina, ` +
                 `ao valor de ${fmtBRL(contrato.valorHora)} por hora, totalizando o valor global e fechado de ` +
                 `${fmtBRL(contrato.valorTotal)}.`
             );

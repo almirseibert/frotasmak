@@ -63,11 +63,15 @@ const normalizeItens = (itens) => {
 // A partir do plano, calcula horas totais e valor total (por horas) ou usa o valor fechado.
 const derivarAgregados = ({ contractType, itens, horasContratadas, valorHora, valorTotal }) => {
     if (contractType === 'fechado') {
+        // Fechado agora aceita máquinas (subgrupos) com horas, mas SEM valor/hora (price = 0):
+        // o valor é o global informado; as horas são demonstrativas e alimentam o progresso físico.
+        const itensSemPreco = itens.map((i) => ({ type: i.type, hours: i.hours, price: 0 }));
+        const horasItens = itensSemPreco.reduce((a, i) => a + i.hours, 0);
         return {
-            horas: num(horasContratadas),
+            horas: horasItens > 0 ? horasItens : num(horasContratadas),
             vHora: 0,
             vTotal: valorTotal != null && valorTotal !== '' ? num(valorTotal) : 0,
-            itens: [],
+            itens: itensSemPreco,
         };
     }
     // 'horas': se vier plano de itens, ele é a fonte de verdade; senão cai no par simples.
