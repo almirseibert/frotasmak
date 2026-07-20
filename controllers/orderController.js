@@ -8,9 +8,27 @@
 
 const db = require('../database');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const whatsappService = require('../services/whatsappService');
 const { sendEmail } = require('../services/emailService');
 const { dispatchAsync } = require('../services/notificationDispatcher');
+
+// Resolve a URL de upload (ex.: https://host/uploads/arquivo.pdf) para o caminho
+// local em public/uploads e devolve { buffer, filename } — ou null se falhar.
+const resolvePdfArtifact = (pdfUrl) => {
+    if (!pdfUrl) return null;
+    try {
+        const filename = String(pdfUrl).split('/uploads/').pop().split('?')[0];
+        if (!filename) return null;
+        const localPath = path.join(__dirname, '..', 'public', 'uploads', filename);
+        if (!fs.existsSync(localPath)) return null;
+        return { buffer: fs.readFileSync(localPath), filename };
+    } catch (e) {
+        console.warn('[orderController] Falha ao ler PDF do upload:', e.message);
+        return null;
+    }
+};
 
 // --- Funções Auxiliares ---
 const parseJsonSafe = (field, key) => {
@@ -58,19 +76,22 @@ const getSafeObraId = (id) => {
 // ============================================================================
 // Helper: envia WhatsApp em background (não bloqueia a resposta HTTP)
 // ============================================================================
-const _notifyOrderCS = async ({ orderNumber, supplierId, status, totalValue, anexos, isUpdate = false, isCanceled = false }) => {
+const _notifyOrderCS = async ({ orderNumber, supplierId, status, totalValue, anexos, pdfUrl = null, notifyEmail, notifyWhatsapp, isUpdate = false, isCanceled = false }) => {
     if (!supplierId) return;
 
     try {
         const [partnerRows] = await db.execute(
-            'SELECT razaoSocial, whatsapp, email, envia_por_whatsapp, envia_por_email FROM partners WHERE id = ?',
+            'SELECT razaoSocial, whatsapp, telefone, email, envia_por_whatsapp, envia_por_email FROM partners WHERE id = ?',
             [supplierId]
         );
         const partner = partnerRows[0];
         if (!partner) return;
 
-        const wantWa = partner.envia_por_whatsapp == 1 && !!partner.whatsapp;
-        const wantEm = partner.envia_por_email    == 1 && !!partner.email;
+        // Canal decidido pelos checkboxes do modal quando fornecidos;
+        // caso contrário (mobile/outros callers), cai no flag do cadastro.
+        const waNumber = partner.whatsapp || partner.telefone;
+        const wantWa = (typeof notifyWhatsapp === 'boolean' ? notifyWhatsapp : partner.envia_por_whatsapp == 1) && !!waNumber;
+        const wantEm = (typeof notifyEmail    === 'boolean' ? notifyEmail    : partner.envia_por_email    == 1) && !!partner.email;
         if (!wantWa && !wantEm) return;
 
         const numStr = String(orderNumber).padStart(6, '0');
@@ -107,17 +128,29 @@ const _notifyOrderCS = async ({ orderNumber, supplierId, status, totalValue, ane
             msg += `Por favor, providencie o material/serviço conforme combinado.`;
         }
 
-        // Tenta pegar primeiro anexo como URL
-        let anexoUrl = null;
-        try {
-            const arr = typeof anexos === 'string' ? JSON.parse(anexos) : (Array.isArray(anexos) ? anexos : []);
-            if (arr.length > 0 && arr[0].url) anexoUrl = arr[0].url;
-        } catch (_) {}
+        // Resolve o PDF: prioriza o pdfUrl explícito (gerado no frontend com o
+        // número real da ordem); senão, tenta o primeiro anexo da ordem.
+        let anexoUrl = pdfUrl || null;
+        if (!anexoUrl) {
+            try {
+                const arr = typeof anexos === 'string' ? JSON.parse(anexos) : (Array.isArray(anexos) ? anexos : []);
+                if (arr.length > 0 && arr[0].url) anexoUrl = arr[0].url;
+            } catch (_) {}
+        }
+        const pdf = resolvePdfArtifact(anexoUrl);
+        const pdfFilename = `Ordem_${numStr}.pdf`;
 
         if (wantWa) {
             try {
-                await whatsappService.enviarMensagem(partner.whatsapp, partner.razaoSocial, motivo, msg, anexoUrl);
-                console.log(`✅ [orderController] WhatsApp enviado para ${partner.razaoSocial} (Ordem C/S #${numStr})`);
+                const pdfB64 = pdf?.buffer ? pdf.buffer.toString('base64') : null;
+                await whatsappService.enviarMensagem(
+                    waNumber, partner.razaoSocial, motivo, msg,
+                    anexoUrl || null,
+                    pdfB64 ? pdfFilename : null,
+                    pdfB64,
+                    pdfB64 ? 'application/pdf' : null
+                );
+                console.log(`✅ [orderController] WhatsApp enviado para ${partner.razaoSocial} (Ordem C/S #${numStr})${pdfB64 ? ' com PDF' : ''}`);
             } catch (e) {
                 console.warn(`⚠️ [orderController] WhatsApp falhou para ${partner.razaoSocial}:`, e.message);
             }
@@ -126,13 +159,19 @@ const _notifyOrderCS = async ({ orderNumber, supplierId, status, totalValue, ane
         if (wantEm) {
             try {
                 const htmlMsg = msg.replace(/\*(.*?)\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+                const attachments = pdf?.buffer ? [{
+                    filename: pdfFilename,
+                    content: pdf.buffer,
+                    contentType: 'application/pdf',
+                }] : undefined;
                 await sendEmail({
                     to: partner.email,
                     subject: motivo,
                     text: msg,
                     html: `<div style="font-family:Arial,sans-serif;font-size:13px">${htmlMsg}</div>`,
+                    attachments,
                 });
-                console.log(`✅ [orderController] E-mail enviado para ${partner.razaoSocial} (Ordem C/S #${numStr})`);
+                console.log(`✅ [orderController] E-mail enviado para ${partner.razaoSocial} (Ordem C/S #${numStr})${attachments ? ' com PDF' : ''}`);
             } catch (e) {
                 console.warn(`⚠️ [orderController] E-mail falhou para ${partner.razaoSocial}:`, e.message);
             }
@@ -254,8 +293,12 @@ const createOrder = async (req, res) => {
         connection.release();
     }
 
-    // Notifica parceiro por WhatsApp/e-mail conforme flags do cadastro (background)
-    if (newOrderNumber) {
+    // Notificação: quando o frontend envia os checkboxes (notifyEmail/notifyWhatsapp),
+    // ele dispara o envio via POST /orders/:id/notify após gerar o PDF com o número
+    // real. Só notifica aqui (comportamento legado por cadastro) para callers que
+    // NÃO trazem esses flags (ex.: app mobile).
+    const drivesNotifyClient = typeof data.notifyEmail === 'boolean' || typeof data.notifyWhatsapp === 'boolean';
+    if (newOrderNumber && !drivesNotifyClient) {
         _notifyOrderCS({
             orderNumber: newOrderNumber,
             supplierId:  data.supplierId,
@@ -358,8 +401,10 @@ const updateOrder = async (req, res) => {
         connection.release();
     }
 
-    // Notifica parceiro por WhatsApp/e-mail conforme flags do cadastro (background)
-    if (originalOrder) {
+    // Notificação: quando o frontend envia os checkboxes, ele dispara via
+    // POST /orders/:id/notify. Aqui só notifica callers legados (sem os flags).
+    const drivesNotifyClient = typeof data.notifyEmail === 'boolean' || typeof data.notifyWhatsapp === 'boolean';
+    if (originalOrder && !drivesNotifyClient) {
         _notifyOrderCS({
             orderNumber: originalOrder.orderNumber,
             supplierId:  data.supplierId,
@@ -429,6 +474,49 @@ const deleteOrder = async (req, res) => {
     }
 };
 
+// ============================================================================
+// NOTIFY — dispara e-mail/WhatsApp ao fornecedor com o PDF já gerado.
+// Chamado pelo frontend após salvar (quando o número real da ordem já existe).
+// ============================================================================
+const notifyOrder = async (req, res) => {
+    const { id } = req.params;
+    const { pdfUrl = null, notifyEmail, notifyWhatsapp, isUpdate = false } = req.body || {};
+
+    try {
+        const [rows] = await db.execute(
+            'SELECT orderNumber, supplierId, status, totalValue, anexos FROM orders WHERE id = ?',
+            [id]
+        );
+        const order = rows[0];
+        if (!order) return res.status(404).json({ error: 'Ordem não encontrada.' });
+
+        if (!order.supplierId) {
+            return res.status(200).json({ ok: false, reason: 'Ordem sem fornecedor.' });
+        }
+        if (notifyEmail !== true && notifyWhatsapp !== true) {
+            return res.status(200).json({ ok: false, reason: 'Nenhum canal selecionado.' });
+        }
+
+        // Fire-and-forget: não bloqueia a resposta HTTP.
+        _notifyOrderCS({
+            orderNumber:    order.orderNumber,
+            supplierId:     order.supplierId,
+            status:         order.status,
+            totalValue:     order.totalValue,
+            anexos:         order.anexos,
+            pdfUrl,
+            notifyEmail:    notifyEmail === true,
+            notifyWhatsapp: notifyWhatsapp === true,
+            isUpdate:       !!isUpdate,
+        });
+
+        res.status(202).json({ ok: true });
+    } catch (error) {
+        console.error('[orderController] Falha em notifyOrder:', error.message);
+        res.status(500).json({ error: 'Falha ao disparar notificação.', details: error.message });
+    }
+};
+
 module.exports = {
     getAllOrders,
     getOrderById,
@@ -436,4 +524,5 @@ module.exports = {
     updateOrder,
     deleteOrder,
     cancelOrder,
+    notifyOrder,
 };
