@@ -202,6 +202,7 @@ const createOrder = async (req, res) => {
             totalValue:  data.totalValue || 0,
             status:      data.status     || 'Aberta',
             invoiceNumber: data.invoiceNumber || null,
+            observacoes: data.observacoes || null,
             items:    safeStringify(data.items),
             payment:  safeStringify(data.payment),
             createdBy: safeStringify(data.createdBy),
@@ -303,6 +304,7 @@ const updateOrder = async (req, res) => {
             invoiceNumber: data.invoiceNumber || null,
             status:        newStatus,
             totalValue:    data.totalValue    || 0,
+            observacoes:   data.observacoes    || null,
             date:          orderDate,          // removido automaticamente se não existir
             items:    safeStringify(data.items),
             payment:  safeStringify(data.payment),

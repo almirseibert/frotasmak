@@ -77,6 +77,8 @@ const http = require('http');
         // Campo KM/Hr atual no modal de OS/OC
         { table: 'orders',                 column: 'kmHrAtual',                        def: 'DECIMAL(12,1) DEFAULT NULL' },
         { table: 'orders',                 column: 'kmHrUnit',                         def: "VARCHAR(10) DEFAULT NULL" },
+        // Caixa de observações livre da ordem de compra/serviço
+        { table: 'orders',                 column: 'observacoes',                      def: 'TEXT DEFAULT NULL' },
         // ── Saldo pré-pago em postos (controle de crédito por parceiro) ──
         // reserved_amount: valor empenhado quando a ordem foi criada (NULL em ordens antigas / fill-up sem valor)
         // reserved_price: preço usado no empenho (auditoria)
