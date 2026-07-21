@@ -873,6 +873,9 @@ const http = require('http');
             { column: 'percentualMultaInadimplemento',    def: 'DECIMAL(5,2) NOT NULL DEFAULT 0.50' },
             { column: 'avisoPrevioRescisaoDias',          def: 'INT NOT NULL DEFAULT 2' },
             { column: 'foroComarca',                      def: "VARCHAR(60) NOT NULL DEFAULT 'Santa Maria'" },
+            // Prazo de vigência em meses contados da assinatura. Parametrizado na
+            // criação; a cláusula do PDF passa a usar "X meses" em vez das datas.
+            { column: 'prazoVigenciaMeses',              def: 'INT DEFAULT NULL' },
             // Qualificação do representante legal (assinante) da CONTRATADA — sustenta o
             // contrato como título executivo extrajudicial (arts. 783/784, III, CPC).
             { column: 'contratadaRepresentanteNome',         def: 'VARCHAR(160) DEFAULT NULL' },

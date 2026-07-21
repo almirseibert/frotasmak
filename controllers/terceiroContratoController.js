@@ -28,6 +28,7 @@ const clausulasJuridicas = (body) => ({
     percentualMultaInadimplemento: body.percentualMultaInadimplemento != null && body.percentualMultaInadimplemento !== '' ? num(body.percentualMultaInadimplemento) : 0.5,
     avisoPrevioRescisaoDias: body.avisoPrevioRescisaoDias != null && body.avisoPrevioRescisaoDias !== '' ? parseInt(body.avisoPrevioRescisaoDias, 10) || 2 : 2,
     foroComarca: FOROS_VALIDOS.includes(body.foroComarca) ? body.foroComarca : 'Santa Maria',
+    prazoVigenciaMeses: body.prazoVigenciaMeses != null && body.prazoVigenciaMeses !== '' ? parseInt(body.prazoVigenciaMeses, 10) || 6 : 6,
 });
 
 // Qualificação do representante legal (assinante) da CONTRATADA. Campos livres,
@@ -162,15 +163,15 @@ const createTerceiroContrato = async (req, res) => {
                  contractType, itensContratados, created_by_email,
                  prazoPagamentoDias, percentualJurosMora, percentualMultaMora,
                  prazoSubstituicaoHoras, prazoInicioServicoHoras, percentualMultaInadimplemento,
-                 avisoPrevioRescisaoDias, foroComarca,
+                 avisoPrevioRescisaoDias, foroComarca, prazoVigenciaMeses,
                  contratadaRepresentanteNome, contratadaRepresentanteQualificacao, contratadaRepresentanteCpf)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [id, numero, locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
              JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal), criadoPor,
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
-             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca,
+             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
              rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf]
         );
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
@@ -221,7 +222,7 @@ const updateTerceiroContrato = async (req, res) => {
                     contractType = ?, itensContratados = ?,
                     prazoPagamentoDias = ?, percentualJurosMora = ?, percentualMultaMora = ?,
                     prazoSubstituicaoHoras = ?, prazoInicioServicoHoras = ?, percentualMultaInadimplemento = ?,
-                    avisoPrevioRescisaoDias = ?, foroComarca = ?,
+                    avisoPrevioRescisaoDias = ?, foroComarca = ?, prazoVigenciaMeses = ?,
                     contratadaRepresentanteNome = ?, contratadaRepresentanteQualificacao = ?, contratadaRepresentanteCpf = ?
               WHERE id = ?`,
             [locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
@@ -229,7 +230,7 @@ const updateTerceiroContrato = async (req, res) => {
              JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal),
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
-             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca,
+             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
              rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf, id]
         );
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
