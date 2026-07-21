@@ -886,6 +886,37 @@ const http = require('http');
                 if (err.code !== 'ER_DUP_FIELDNAME') throw err;
             }
         }
+        // Contrato ASSINADO (documento oficial vigente). Diferente do pdfUrl, que é a
+        // MINUTA regenerável dos dados: o assinado é um PDF enviado por upload, imutável.
+        // Enquanto houver assinado vigente, minuta e edição ficam bloqueadas (contrato
+        // "congelado"). Colunas espelho abaixo = o vigente; histórico em terceiro_contrato_docs.
+        const colunasAssinado = [
+            { column: 'contratoAssinadoUrl',  def: 'VARCHAR(500) DEFAULT NULL' },
+            { column: 'contratoAssinadoNome', def: 'VARCHAR(255) DEFAULT NULL' },
+            { column: 'contratoAssinadoEm',   def: 'TIMESTAMP NULL DEFAULT NULL' },
+            { column: 'contratoAssinadoPor',  def: 'VARCHAR(255) DEFAULT NULL' },
+        ];
+        for (const { column, def } of colunasAssinado) {
+            try {
+                await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN ${column} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+            }
+        }
+        // Histórico de documentos assinados: 1 vigente por vez (vigente=1), reenvios
+        // ficam arquivados (vigente=0) para trilha de auditoria.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceiro_contrato_docs (
+                id           VARCHAR(36)  PRIMARY KEY,
+                contratoId   VARCHAR(36)  NOT NULL,
+                url          VARCHAR(500) NOT NULL,
+                nomeOriginal VARCHAR(255) DEFAULT NULL,
+                vigente      TINYINT      NOT NULL DEFAULT 1,
+                enviadoPor   VARCHAR(255) DEFAULT NULL,
+                enviadoEm    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_contratodoc_contrato (contratoId)
+            )
+        `);
         console.log('✅ Migração terceiro_contratos concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] terceiro_contratos:', e.message);
