@@ -15,6 +15,8 @@ router.post('/send-email', refuelingController.sendOrderEmail);
 
 // Rotas CRUD padrão
 router.get('/', refuelingController.getAllRefuelings);
+// Abastecimentos de um veículo — DEVE vir antes de /:id (senão "vehicle" vira um id)
+router.get('/vehicle/:vehicleId', refuelingController.getRefuelingsByVehicle);
 router.get('/:id', refuelingController.getRefuelingById);
 router.post('/', refuelingController.createRefuelingOrder);
 router.put('/:id', refuelingController.updateRefuelingOrder);
