@@ -775,10 +775,24 @@ const http = require('http');
 // ====================================================================
 (async () => {
     const addColumn = async (sql, label) => {
-        try {
-            await db.query(sql);
-        } catch (e) {
-            if (e.code !== 'ER_DUP_FIELDNAME') console.warn(`⚠️ [migration] ${label}:`, e.message);
+        // Deadlock é transitório: as IIFEs de migração rodam concorrentes e várias
+        // trancam metadados de `vehicles` (ALTERs aqui + FK de vehicle_documents).
+        // Numa base zerada, deixar o deadlock passar faz a coluna nascer faltando
+        // e derruba o save de veículo. Por isso retentamos antes de desistir.
+        for (let tentativa = 1; tentativa <= 4; tentativa++) {
+            try {
+                await db.query(sql);
+                return;
+            } catch (e) {
+                if (e.code === 'ER_DUP_FIELDNAME') return; // já existe — ok
+                const transitorio = e.code === 'ER_LOCK_DEADLOCK' || e.code === 'ER_LOCK_WAIT_TIMEOUT';
+                if (transitorio && tentativa < 4) {
+                    await new Promise(r => setTimeout(r, 200 * tentativa)); // backoff
+                    continue;
+                }
+                console.warn(`⚠️ [migration] ${label}${transitorio ? ` (após ${tentativa} tentativas)` : ''}:`, e.message);
+                return;
+            }
         }
     };
     try {
