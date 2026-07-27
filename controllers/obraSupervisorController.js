@@ -549,17 +549,19 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     const qtdVeiculos = scopedVehicles.length;
     const qtdManutencao = scopedVehicles.filter(v => v.estado_calculado === 'manutencao').length;
 
-    // Opção A (frota consistente): TODO numerador de horas é restrito às máquinas
-    // do escopo (frota produtiva alocada). Assim o aproveitamento do resumo vira a
-    // média ponderada das mesmas linhas por categoria/máquina — nunca supera todas
-    // elas. Horas de máquinas que já saíram da obra ou de tipos não-produtivos
-    // (prancha, leves) NÃO entram no aproveitamento; continuam no Físico/Faturamento,
-    // que somam tudo de propósito. Sem histórico de alocação por dia, esta é a base
-    // menos distorcida sob dado de snapshot.
-    const scopedIds = scopedVehicles.map(v => v.id);
-    const vehFilter = () => scopedIds.length
-        ? { frag: ` AND l.vehicleId IN (${scopedIds.map(() => '?').join(',')})`, params: [...scopedIds] }
-        : { frag: ' AND 1=0', params: [] }; // sem frota produtiva → zera numeradores
+    // Opção B (fluxo real): o numerador conta as horas de TODA máquina produtiva
+    // que passou pela obra no período — o vínculo é o log (l.obraId + l.date), não
+    // o snapshot de alocação atual. Assim máquinas já desalocadas mas que
+    // trabalharam no período continuam contando. Tipos não-produtivos (prancha,
+    // leves) ficam de fora porque `allVehicles` já é filtrado por
+    // `tipo NOT IN (TIPOS_EXCLUIDOS_PRODUTIVOS)`. Como o denominador é a capacidade
+    // da frota alocada HOJE (scopedVehicles), o aproveitamento PODE ultrapassar
+    // 100% quando passou mais máquina do que a frota atual comporta — e isso é
+    // esperado, não é bug.
+    const produtivoIds = allVehicles.map(v => v.id);
+    const prodFilter = () => produtivoIds.length
+        ? { frag: ` AND l.vehicleId IN (${produtivoIds.map(() => '?').join(',')})`, params: [...produtivoIds] }
+        : { frag: ' AND 1=0', params: [] }; // sem máquina produtiva → zera numeradores
 
     // 2) Calendário do período
     const cal = _businessDayList(startDate, endDate);
@@ -575,7 +577,7 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     let logsParams = [startDate, endDate];
     let logsCondObra = '';
     if (!isGeral) { logsCondObra = ' AND l.obraId = ?'; logsParams.push(obraId); }
-    const vfDia = vehFilter();
+    const vfDia = prodFilter();
 
     const [logsDia] = await db.query(`
         SELECT DATE_FORMAT(l.date, '%Y-%m-%d') as data_log, SUM(l.totalHours) as horas
@@ -608,7 +610,7 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     let tipoParams = [startDate, endDate];
     let tipoCondObra = '';
     if (!isGeral) { tipoCondObra = ' AND l.obraId = ?'; tipoParams.push(obraId); }
-    const vfTipo = vehFilter();
+    const vfTipo = prodFilter();
     const [tipoLogs] = await db.query(`
         SELECT v.tipo, SUM(l.totalHours) as horas
         FROM daily_work_logs l
@@ -651,7 +653,7 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
             if (v.estado_calculado === 'manutencao') cur.qtdMan += 1;
         });
 
-        const vfObra = vehFilter();
+        const vfObra = prodFilter();
         const [obraLogs] = await db.query(`
             SELECT l.obraId, SUM(l.totalHours) as horas
             FROM daily_work_logs l
@@ -699,7 +701,7 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     let veiculoParams = [startDate, endDate];
     let veiculoCondObra = '';
     if (!isGeral) { veiculoCondObra = ' AND l.obraId = ?'; veiculoParams.push(obraId); }
-    const vfVeic = vehFilter();
+    const vfVeic = prodFilter();
     const [veiculoLogs] = await db.query(`
         SELECT l.vehicleId, SUM(l.totalHours) as horas
         FROM daily_work_logs l
