@@ -1,11 +1,25 @@
+// utils/permissions.js
+// ─────────────────────────────────────────────────────────────────────────────
+// FONTE ÚNICA DE PERMISSÃO DE PÁGINAS (backend = autoridade).
+//
+// O front NÃO deve manter um mapa próprio que decida acesso: ele recebe
+// `effectivePages` calculado aqui (via /auth/me) e apenas renderiza o que o
+// servidor liberou. As rotas da API usam as MESMAS funções deste arquivo para
+// barrar acesso. Assim, menu e API não podem divergir — era a causa dos bugs
+// "aparece na tela mas a API dá 403".
+//
+// Ao criar/renomear uma página, altere APENAS este arquivo.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// role -> páginas que o role enxerga por padrão. 'admin' usa curinga '*'.
 const ROLE_PAGE_ACCESS = {
   admin:         ['*'],
-  gerencia:      ['dashboard','obras','expenses','operacional','billing','reports','refueling','comboio','admin_solicitacoes','orders','revisions','tires','vehicles','employees','partners','inventory','fines','sigasul','supervisor_dashboard'],
+  gerencia:      ['dashboard','obras','planejamento','expenses','operacional','billing','terceirizados','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','revisions','tires','vehicles','employees','partners','inventory','fines','sigasul','supervisor_dashboard','analise_gerencial'],
   rh:            ['dashboard','obras','billing','reports','vehicles','employees','fines'],
-  faturamento:   ['dashboard','obras','operacional','billing','reports','vehicles'],
-  abastecimento: ['dashboard','obras','expenses','reports','refueling','comboio','admin_solicitacoes','orders','vehicles','partners','inventory'],
-  oficina:       ['dashboard','obras','reports','revisions','tires','orders','vehicles','inventory'],
-  editor:        ['dashboard','obras','expenses','operacional','billing','reports','refueling','comboio','admin_solicitacoes','orders','revisions','tires','vehicles','employees','partners','inventory','fines'],
+  faturamento:   ['dashboard','obras','operacional','billing','terceirizados','reports','vehicles'],
+  abastecimento: ['dashboard','obras','expenses','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','vehicles','partners','inventory'],
+  oficina:       ['dashboard','obras','reports','revisions','tires','orders','vehicles','inventory','employees'],
+  editor:        ['dashboard','obras','expenses','operacional','billing','terceirizados','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','revisions','tires','vehicles','employees','partners','inventory','fines'],
   supervisor:    ['dashboard','obras','supervisor_dashboard','expenses','operacional','billing','reports','revisions','tires','orders','vehicles'],
   operador:      ['admin_solicitacoes_app'],
   viewer:        ['dashboard','reports'],
@@ -25,19 +39,69 @@ const VEHICLE_ACTION_BUTTONS = {
   visualizador:  [],
 };
 
-// Roles que NÃO podem excluir nada
 const ROLES_NO_DELETE = ['gerencia','rh','faturamento','abastecimento','oficina','viewer','visualizador'];
-
-// Roles que NÃO podem liberar com senha admin
 const ROLES_NO_PASSWORD_RELEASE = ['gerencia','rh','faturamento','abastecimento','oficina','viewer','visualizador','editor'];
 
-function canAccessPage(role, pageId) {
-  const pages = ROLE_PAGE_ACCESS[role?.toLowerCase()] || ROLE_PAGE_ACCESS['viewer'];
+// page_permissions vem do MySQL como array (JSON já parseado) ou string. Normaliza para array|null.
+function normalizePagePermissions(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string') {
+    try { const v = JSON.parse(raw); return Array.isArray(v) ? v : null; } catch { return null; }
+  }
+  return null;
+}
+
+function getRolePages(role) {
+  return ROLE_PAGE_ACCESS[(role || '').toLowerCase()] || ROLE_PAGE_ACCESS['viewer'];
+}
+
+// Páginas EFETIVAS de um usuário:
+// - override individual (page_permissions não-vazio) vence o padrão do role;
+// - admin ('*') nunca é reduzido, para não travar o próprio acesso.
+// Aceita tanto `pagePermissions` (req.user) quanto `page_permissions` (linha do banco).
+function getEffectivePages(user) {
+  const role = ((user && (user.role || user.user_type)) || 'viewer').toLowerCase();
+  const rolePages = getRolePages(role);
+  if (rolePages.includes('*')) return rolePages;
+  const custom = normalizePagePermissions(user && (user.pagePermissions != null ? user.pagePermissions : user.page_permissions));
+  if (Array.isArray(custom) && custom.length > 0) return custom;
+  return rolePages;
+}
+
+function canUserAccessPage(user, pageId) {
+  const pages = getEffectivePages(user);
   return pages.includes('*') || pages.includes(pageId);
 }
 
-function getVehicleButtons(role) {
-  return VEHICLE_ACTION_BUTTONS[role?.toLowerCase()] || [];
+// Compat: checagem só por role (sem override). Prefira canUserAccessPage(user, ...).
+function canAccessPage(role, pageId) {
+  const pages = getRolePages(role);
+  return pages.includes('*') || pages.includes(pageId);
 }
 
-module.exports = { ROLE_PAGE_ACCESS, VEHICLE_ACTION_BUTTONS, ROLES_NO_DELETE, ROLES_NO_PASSWORD_RELEASE, canAccessPage, getVehicleButtons };
+// Middleware factory para proteger rotas. Requer authMiddleware antes (popula req.user).
+// Uso: router.get('/x', requirePage('billing'), handler)
+function requirePage(pageId) {
+  return (req, res, next) => {
+    if (req.user && canUserAccessPage(req.user, pageId)) return next();
+    return res.status(403).json({ error: 'Acesso negado a este módulo.' });
+  };
+}
+
+function getVehicleButtons(role) {
+  return VEHICLE_ACTION_BUTTONS[(role || '').toLowerCase()] || [];
+}
+
+module.exports = {
+  ROLE_PAGE_ACCESS,
+  VEHICLE_ACTION_BUTTONS,
+  ROLES_NO_DELETE,
+  ROLES_NO_PASSWORD_RELEASE,
+  normalizePagePermissions,
+  getRolePages,
+  getEffectivePages,
+  canUserAccessPage,
+  canAccessPage,
+  requirePage,
+  getVehicleButtons,
+};

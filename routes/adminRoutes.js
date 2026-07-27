@@ -159,12 +159,17 @@ router.get('/users', adminOnly, async (req, res) => {
             SELECT u.id, u.name, u.email, u.role, u.user_type, u.status,
                    u.canAccessRefueling AS podeAcessarAbastecimento,
                    u.bloqueado_abastecimento, u.tentativas_falhas_abastecimento,
-                   u.group_id, g.name AS group_name
+                   u.group_id, g.name AS group_name, u.page_permissions
             FROM users u
             LEFT JOIN access_groups g ON u.group_id = g.id
             ORDER BY u.name ASC
         `);
-        res.json(rows.map(u => ({ ...u, podeAcessarAbastecimento: !!u.podeAcessarAbastecimento })));
+        const parsePages = (raw) => {
+            if (Array.isArray(raw)) return raw;
+            if (typeof raw === 'string') { try { const v = JSON.parse(raw); return Array.isArray(v) ? v : null; } catch { return null; } }
+            return null;
+        };
+        res.json(rows.map(u => ({ ...u, podeAcessarAbastecimento: !!u.podeAcessarAbastecimento, page_permissions: parsePages(u.page_permissions) })));
     } catch (error) {
         console.error('Erro ao listar usuários:', error);
         res.status(500).json({ error: 'Erro ao listar usuários.' });
@@ -173,11 +178,13 @@ router.get('/users', adminOnly, async (req, res) => {
 
 // Criar novo usuário
 router.post('/users', adminOnly, async (req, res) => {
-    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling } = req.body;
+    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling, page_permissions } = req.body;
     if (!name || !email || !password) {
         return res.status(400).json({ error: 'Nome, e-mail e senha são obrigatórios.' });
     }
     const canRefuel = !!(podeAcessarAbastecimento || canAccessRefueling);
+    const customPages = Array.isArray(page_permissions) && page_permissions.length > 0
+        ? JSON.stringify(page_permissions) : null;
     try {
         const [existing] = await db.query('SELECT id FROM users WHERE email = ?', [email]);
         if (existing.length > 0) return res.status(409).json({ error: 'E-mail já cadastrado.' });
@@ -187,9 +194,9 @@ router.post('/users', adminOnly, async (req, res) => {
         const role = user_type || 'viewer';
 
         await db.query(
-            `INSERT INTO users (id, name, email, password, role, user_type, status, canAccessRefueling, group_id, data_criacao)
-             VALUES (?, ?, ?, ?, ?, ?, 'ativo', ?, ?, NOW())`,
-            [id, name, email, hashed, role, role, canRefuel ? 1 : 0, group_id || null]
+            `INSERT INTO users (id, name, email, password, role, user_type, status, canAccessRefueling, group_id, page_permissions, data_criacao)
+             VALUES (?, ?, ?, ?, ?, ?, 'ativo', ?, ?, ?, NOW())`,
+            [id, name, email, hashed, role, role, canRefuel ? 1 : 0, group_id || null, customPages]
         );
         res.status(201).json({ id, message: 'Usuário criado com sucesso.' });
     } catch (error) {
@@ -201,7 +208,7 @@ router.post('/users', adminOnly, async (req, res) => {
 // Atualizar usuário (PATCH — usado pelo UserEditModal)
 router.patch('/users/:id', adminOnly, async (req, res) => {
     const { id } = req.params;
-    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling, active } = req.body;
+    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling, active, page_permissions } = req.body;
     const canRefuel = podeAcessarAbastecimento !== undefined ? podeAcessarAbastecimento
                     : canAccessRefueling !== undefined ? canAccessRefueling : undefined;
     try {
@@ -214,6 +221,12 @@ router.patch('/users/:id', adminOnly, async (req, res) => {
         if (group_id !== undefined) { sets.push('group_id = ?');           params.push(group_id || null); }
         if (canRefuel !== undefined){ sets.push('canAccessRefueling = ?'); params.push(canRefuel ? 1 : 0); }
         if (active !== undefined)   { sets.push('status = ?');             params.push(active ? 'ativo' : 'inativo'); }
+        // page_permissions: array não-vazio = override individual; null/[] = volta ao padrão do role.
+        if (page_permissions !== undefined) {
+            const custom = Array.isArray(page_permissions) && page_permissions.length > 0
+                ? JSON.stringify(page_permissions) : null;
+            sets.push('page_permissions = ?'); params.push(custom);
+        }
         if (password) {
             const hashed = await bcrypt.hash(password, 10);
             sets.push('password = ?');
