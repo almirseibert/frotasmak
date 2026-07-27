@@ -1156,6 +1156,34 @@ const http = require('http');
 })();
 
 // ====================================================================
+// BACKFILL — obras.dataInicio = MIN(date) dos lançamentos de horas.
+// Corrige registros em que dataInicio divergiu do primeiro dia realmente
+// trabalhado (ex.: data digitada no cadastro ou congelada por lógica antiga).
+// Fonte única de verdade passa a ser o MIN(date). Idempotente: a cláusula
+// WHERE zera o efeito assim que todas as obras estão reconciliadas.
+// Não mexe em obras sem lançamentos (mantêm o valor atual; a tela usa a Data Prevista).
+// ====================================================================
+(async () => {
+    try {
+        const [r] = await db.query(`
+            UPDATE obras o
+            JOIN (
+                SELECT obraId, MIN(date) AS minDate
+                  FROM daily_work_logs
+                 GROUP BY obraId
+            ) l ON l.obraId = o.id
+            SET o.dataInicio = l.minDate
+            WHERE o.dataInicio IS NULL OR o.dataInicio <> l.minDate
+        `);
+        if (r.affectedRows > 0) {
+            console.log(`✅ Backfill obras.dataInicio (MIN dos logs): ${r.affectedRows} obra(s) reconciliada(s).`);
+        }
+    } catch (e) {
+        console.warn('⚠️ [migration] backfill obras.dataInicio:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — responsavel_email em obras (Item 4: responsável notificável)
 // ====================================================================
 (async () => {

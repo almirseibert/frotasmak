@@ -68,22 +68,38 @@ const getDailyLogs = async (req, res) => {
     }
 };
 
-// Planejamento: o 1º lançamento de horas ativa a obra (radar/planejada/mobilizacao → ativa).
-// Evento único — apagar o lançamento não reverte o status.
-const activateObraOnFirstLog = async (obraId, date, io) => {
+// Reconcilia a obra a partir dos seus lançamentos de horas. Fonte única de verdade:
+//  - dataInicio = MIN(date) dos logs (menor data efetivamente trabalhada).
+//    Reconciliação real: sobe ou desce conforme upsert/delete. Sem lançamentos → NULL
+//    (a tela usa a Data Prevista como fallback).
+//  - 1º lançamento ativa a obra (radar/planejada/mobilizacao → ativa).
+//    Evento único: apagar o último lançamento NÃO reverte o status (só a data).
+const syncObraFromLogs = async (obraId, io) => {
+    if (!obraId) return;
     try {
+        const [[agg]] = await db.query(
+            "SELECT DATE_FORMAT(MIN(date), '%Y-%m-%d') AS minDate FROM daily_work_logs WHERE obraId = ?",
+            [obraId]
+        );
+        const minDate = agg?.minDate || null;
+
         const [rows] = await db.query('SELECT nome, status FROM obras WHERE id = ?', [obraId]);
         const obra = rows[0];
-        if (obra && ['radar', 'planejada', 'mobilizacao'].includes(obra.status)) {
+        if (!obra) return;
+
+        const deveAtivar = minDate && ['radar', 'planejada', 'mobilizacao'].includes(obra.status);
+        if (deveAtivar) {
             await db.execute(
-                'UPDATE obras SET status = ?, dataInicio = COALESCE(dataInicio, ?) WHERE id = ?',
-                ['ativa', date, obraId]
+                'UPDATE obras SET status = ?, dataInicio = ? WHERE id = ?',
+                ['ativa', minDate, obraId]
             );
-            if (io) io.emit('server:sync', { targets: ['obras'] });
             console.log(`✅ Obra "${obra.nome}" ativada automaticamente (1º lançamento de horas).`);
+        } else {
+            await db.execute('UPDATE obras SET dataInicio = ? WHERE id = ?', [minDate, obraId]);
         }
+        if (io) io.emit('server:sync', { targets: ['obras'] });
     } catch (e) {
-        console.warn('⚠️ [planejamento] Falha ao ativar obra no 1º lançamento:', e.message);
+        console.warn('⚠️ [planejamento] Falha ao reconciliar início da obra:', e.message);
     }
 };
 
@@ -128,7 +144,7 @@ const upsertDailyLog = async (req, res) => {
                 targetId
             ]);
             
-            await activateObraOnFirstLog(data.obraId, data.date, req.io);
+            await syncObraFromLogs(data.obraId, req.io);
             if (req.io) req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
             res.json({ message: 'Registro atualizado.', id: targetId });
         } else {
@@ -149,7 +165,7 @@ const upsertDailyLog = async (req, res) => {
                 totalHours || 0, observation || null, justificativaTipo || null
             ]);
             
-            await activateObraOnFirstLog(obraId, date, req.io);
+            await syncObraFromLogs(obraId, req.io);
             if (req.io) req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
             res.status(201).json({ message: 'Registro criado.', id: newId });
         }
@@ -162,7 +178,10 @@ const upsertDailyLog = async (req, res) => {
 const deleteDailyLog = async (req, res) => {
     const { id } = req.params;
     try {
+        // Guarda a obra antes de apagar para reconciliar dataInicio = MIN(date) depois.
+        const [[log]] = await db.query('SELECT obraId FROM daily_work_logs WHERE id = ?', [id]);
         await db.execute('DELETE FROM daily_work_logs WHERE id = ?', [id]);
+        if (log?.obraId) await syncObraFromLogs(log.obraId, req.io);
         if (req.io) req.io.emit('server:sync', { targets: ['dailyWorkLogs'] });
         res.status(204).end();
     } catch (error) {
