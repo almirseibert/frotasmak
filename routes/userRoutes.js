@@ -4,6 +4,15 @@ const db = require('../database');
 const authMiddleware = require('../middlewares/authMiddleware');
 const userSettingsController = require('../controllers/userSettingsController');
 
+// page_permissions vem do MySQL como array (JSON parseado) ou string. Normaliza para array|null.
+const normalizePagePermissions = (raw) => {
+    if (Array.isArray(raw)) return raw;
+    if (typeof raw === 'string') {
+        try { const v = JSON.parse(raw); return Array.isArray(v) ? v : null; } catch { return null; }
+    }
+    return null;
+};
+
 // Configurações do próprio usuário (perfil de chat).
 router.get('/me/settings', authMiddleware, userSettingsController.getMySettings);
 router.put('/me/settings', authMiddleware, userSettingsController.updateMySettings);
@@ -14,14 +23,18 @@ router.get('/', authMiddleware, async (req, res) => {
         const [rows] = await db.query(`
             SELECT u.id, u.name, u.email, u.user_type, u.role, u.status,
                    u.canAccessRefueling AS podeAcessarAbastecimento,
-                   u.group_id, g.name AS group_name,
+                   u.group_id, g.name AS group_name, u.page_permissions,
                    u.display_name, u.chat_status, u.chat_status_msg,
                    u.bloqueado_abastecimento, u.tentativas_falhas_abastecimento
             FROM users u
             LEFT JOIN access_groups g ON u.group_id = g.id
             ORDER BY u.name ASC
         `);
-        res.json(rows.map(u => ({ ...u, podeAcessarAbastecimento: !!u.podeAcessarAbastecimento })));
+        res.json(rows.map(u => ({
+            ...u,
+            podeAcessarAbastecimento: !!u.podeAcessarAbastecimento,
+            page_permissions: normalizePagePermissions(u.page_permissions),
+        })));
     } catch (error) {
         // Se access_groups ainda não existe, retorna sem o JOIN
         try {

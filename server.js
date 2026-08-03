@@ -775,10 +775,24 @@ const http = require('http');
 // ====================================================================
 (async () => {
     const addColumn = async (sql, label) => {
-        try {
-            await db.query(sql);
-        } catch (e) {
-            if (e.code !== 'ER_DUP_FIELDNAME') console.warn(`⚠️ [migration] ${label}:`, e.message);
+        // Deadlock é transitório: as IIFEs de migração rodam concorrentes e várias
+        // trancam metadados de `vehicles` (ALTERs aqui + FK de vehicle_documents).
+        // Numa base zerada, deixar o deadlock passar faz a coluna nascer faltando
+        // e derruba o save de veículo. Por isso retentamos antes de desistir.
+        for (let tentativa = 1; tentativa <= 4; tentativa++) {
+            try {
+                await db.query(sql);
+                return;
+            } catch (e) {
+                if (e.code === 'ER_DUP_FIELDNAME') return; // já existe — ok
+                const transitorio = e.code === 'ER_LOCK_DEADLOCK' || e.code === 'ER_LOCK_WAIT_TIMEOUT';
+                if (transitorio && tentativa < 4) {
+                    await new Promise(r => setTimeout(r, 200 * tentativa)); // backoff
+                    continue;
+                }
+                console.warn(`⚠️ [migration] ${label}${transitorio ? ` (após ${tentativa} tentativas)` : ''}:`, e.message);
+                return;
+            }
         }
     };
     try {
@@ -873,6 +887,9 @@ const http = require('http');
             { column: 'percentualMultaInadimplemento',    def: 'DECIMAL(5,2) NOT NULL DEFAULT 0.50' },
             { column: 'avisoPrevioRescisaoDias',          def: 'INT NOT NULL DEFAULT 2' },
             { column: 'foroComarca',                      def: "VARCHAR(60) NOT NULL DEFAULT 'Santa Maria'" },
+            // Prazo de vigência em meses contados da assinatura. Parametrizado na
+            // criação; a cláusula do PDF passa a usar "X meses" em vez das datas.
+            { column: 'prazoVigenciaMeses',              def: 'INT DEFAULT NULL' },
             // Qualificação do representante legal (assinante) da CONTRATADA — sustenta o
             // contrato como título executivo extrajudicial (arts. 783/784, III, CPC).
             { column: 'contratadaRepresentanteNome',         def: 'VARCHAR(160) DEFAULT NULL' },
@@ -886,6 +903,37 @@ const http = require('http');
                 if (err.code !== 'ER_DUP_FIELDNAME') throw err;
             }
         }
+        // Contrato ASSINADO (documento oficial vigente). Diferente do pdfUrl, que é a
+        // MINUTA regenerável dos dados: o assinado é um PDF enviado por upload, imutável.
+        // Enquanto houver assinado vigente, minuta e edição ficam bloqueadas (contrato
+        // "congelado"). Colunas espelho abaixo = o vigente; histórico em terceiro_contrato_docs.
+        const colunasAssinado = [
+            { column: 'contratoAssinadoUrl',  def: 'VARCHAR(500) DEFAULT NULL' },
+            { column: 'contratoAssinadoNome', def: 'VARCHAR(255) DEFAULT NULL' },
+            { column: 'contratoAssinadoEm',   def: 'TIMESTAMP NULL DEFAULT NULL' },
+            { column: 'contratoAssinadoPor',  def: 'VARCHAR(255) DEFAULT NULL' },
+        ];
+        for (const { column, def } of colunasAssinado) {
+            try {
+                await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN ${column} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+            }
+        }
+        // Histórico de documentos assinados: 1 vigente por vez (vigente=1), reenvios
+        // ficam arquivados (vigente=0) para trilha de auditoria.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceiro_contrato_docs (
+                id           VARCHAR(36)  PRIMARY KEY,
+                contratoId   VARCHAR(36)  NOT NULL,
+                url          VARCHAR(500) NOT NULL,
+                nomeOriginal VARCHAR(255) DEFAULT NULL,
+                vigente      TINYINT      NOT NULL DEFAULT 1,
+                enviadoPor   VARCHAR(255) DEFAULT NULL,
+                enviadoEm    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_contratodoc_contrato (contratoId)
+            )
+        `);
         console.log('✅ Migração terceiro_contratos concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] terceiro_contratos:', e.message);
@@ -1155,6 +1203,34 @@ const http = require('http');
         console.log('✅ Migração obras.created_at + backfill concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] obras.created_at:', e.message);
+    }
+})();
+
+// ====================================================================
+// BACKFILL — obras.dataInicio = MIN(date) dos lançamentos de horas.
+// Corrige registros em que dataInicio divergiu do primeiro dia realmente
+// trabalhado (ex.: data digitada no cadastro ou congelada por lógica antiga).
+// Fonte única de verdade passa a ser o MIN(date). Idempotente: a cláusula
+// WHERE zera o efeito assim que todas as obras estão reconciliadas.
+// Não mexe em obras sem lançamentos (mantêm o valor atual; a tela usa a Data Prevista).
+// ====================================================================
+(async () => {
+    try {
+        const [r] = await db.query(`
+            UPDATE obras o
+            JOIN (
+                SELECT obraId, MIN(date) AS minDate
+                  FROM daily_work_logs
+                 GROUP BY obraId
+            ) l ON l.obraId = o.id
+            SET o.dataInicio = l.minDate
+            WHERE o.dataInicio IS NULL OR o.dataInicio <> l.minDate
+        `);
+        if (r.affectedRows > 0) {
+            console.log(`✅ Backfill obras.dataInicio (MIN dos logs): ${r.affectedRows} obra(s) reconciliada(s).`);
+        }
+    } catch (e) {
+        console.warn('⚠️ [migration] backfill obras.dataInicio:', e.message);
     }
 })();
 

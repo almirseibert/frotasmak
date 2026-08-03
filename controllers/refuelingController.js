@@ -313,6 +313,21 @@ const getAllRefuelings = async (req, res) => {
     }
 };
 
+// Abastecimentos de UM veículo (aba "Abastecimento" no histórico do veículo).
+// Escopado por vehicleId para não trafegar a tabela inteira no modal.
+const getRefuelingsByVehicle = async (req, res) => {
+    try {
+        const [rows] = await db.execute(
+            'SELECT * FROM refuelings WHERE vehicleId = ? ORDER BY id DESC',
+            [req.params.vehicleId]
+        );
+        res.json(parseRefuelingRows(rows));
+    } catch (error) {
+        console.error('Erro GET refuelings por veículo:', error);
+        res.status(500).json({ error: 'Erro ao buscar abastecimentos do veículo.' });
+    }
+};
+
 const getRefuelingById = async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM refuelings WHERE id = ?', [req.params.id]);
@@ -1153,6 +1168,7 @@ const liberarOrdemBloqueada = async (req, res) => {
 
 module.exports = {
     getAllRefuelings,
+    getRefuelingsByVehicle,
     getRefuelingById,
     createRefuelingOrder,
     updateRefuelingOrder,

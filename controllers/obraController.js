@@ -155,9 +155,10 @@ const createObra = async (req, res) => {
     data.status = (VALID_OBRA_STATUSES.includes(data.status) && data.status !== 'finalizada')
         ? data.status
         : 'ativa';
+    // dataInicio NÃO é editável: é reconciliado como MIN(date) dos lançamentos de horas.
+    // Enquanto não houver lançamento, fica NULL e a tela usa a Data Prevista (dataInicioPrevisto).
+    data.dataInicio = null;
     if (PRE_ACTIVE_STATUSES.includes(data.status)) {
-        // Obra futura ainda não começou — dataInicio real só é preenchida no 1º lançamento de horas.
-        data.dataInicio = null;
         // Radar = apenas criada; registrar contrato de horas já promove para 'planejada'.
         if (data.status === 'radar' &&
             (temContratoDeHoras(data.horasContratadasPorSubTipo) || temContratoDeHoras(data.horasContratadasPorTipo))) {
@@ -199,6 +200,8 @@ const updateObra = async (req, res) => {
     delete data.realizadoPorTipo;
     delete data.totalHorasRealizadas;
     delete data.id;
+    // dataInicio é derivado dos logs (MIN(date)) — nunca gravado pela edição de obra.
+    delete data.dataInicio;
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);

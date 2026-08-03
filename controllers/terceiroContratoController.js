@@ -28,6 +28,7 @@ const clausulasJuridicas = (body) => ({
     percentualMultaInadimplemento: body.percentualMultaInadimplemento != null && body.percentualMultaInadimplemento !== '' ? num(body.percentualMultaInadimplemento) : 0.5,
     avisoPrevioRescisaoDias: body.avisoPrevioRescisaoDias != null && body.avisoPrevioRescisaoDias !== '' ? parseInt(body.avisoPrevioRescisaoDias, 10) || 2 : 2,
     foroComarca: FOROS_VALIDOS.includes(body.foroComarca) ? body.foroComarca : 'Santa Maria',
+    prazoVigenciaMeses: body.prazoVigenciaMeses != null && body.prazoVigenciaMeses !== '' ? parseInt(body.prazoVigenciaMeses, 10) || 6 : 6,
 });
 
 // Qualificação do representante legal (assinante) da CONTRATADA. Campos livres,
@@ -63,11 +64,15 @@ const normalizeItens = (itens) => {
 // A partir do plano, calcula horas totais e valor total (por horas) ou usa o valor fechado.
 const derivarAgregados = ({ contractType, itens, horasContratadas, valorHora, valorTotal }) => {
     if (contractType === 'fechado') {
+        // Fechado agora aceita máquinas (subgrupos) com horas, mas SEM valor/hora (price = 0):
+        // o valor é o global informado; as horas são demonstrativas e alimentam o progresso físico.
+        const itensSemPreco = itens.map((i) => ({ type: i.type, hours: i.hours, price: 0 }));
+        const horasItens = itensSemPreco.reduce((a, i) => a + i.hours, 0);
         return {
-            horas: num(horasContratadas),
+            horas: horasItens > 0 ? horasItens : num(horasContratadas),
             vHora: 0,
             vTotal: valorTotal != null && valorTotal !== '' ? num(valorTotal) : 0,
-            itens: [],
+            itens: itensSemPreco,
         };
     }
     // 'horas': se vier plano de itens, ele é a fonte de verdade; senão cai no par simples.
@@ -158,15 +163,15 @@ const createTerceiroContrato = async (req, res) => {
                  contractType, itensContratados, created_by_email,
                  prazoPagamentoDias, percentualJurosMora, percentualMultaMora,
                  prazoSubstituicaoHoras, prazoInicioServicoHoras, percentualMultaInadimplemento,
-                 avisoPrevioRescisaoDias, foroComarca,
+                 avisoPrevioRescisaoDias, foroComarca, prazoVigenciaMeses,
                  contratadaRepresentanteNome, contratadaRepresentanteQualificacao, contratadaRepresentanteCpf)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [id, numero, locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
              JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal), criadoPor,
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
-             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca,
+             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
              rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf]
         );
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
@@ -199,6 +204,13 @@ const updateTerceiroContrato = async (req, res) => {
     const rep = representanteContratada(req.body);
 
     try {
+        // Contrato assinado é imutável: bloqueia edição enquanto houver documento
+        // assinado vigente (mesma regra da geração de minuta).
+        const [cur] = await db.query('SELECT contratoAssinadoUrl FROM terceiro_contratos WHERE id = ?', [id]);
+        if (cur.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+        if (cur[0].contratoAssinadoUrl) {
+            return res.status(409).json({ error: 'Contrato com versão assinada não pode ser editado. Remova o contrato assinado para editar.' });
+        }
         const conflito = await maquinasEmConflito(maqs, id);
         if (conflito.length > 0) {
             return res.status(400).json({ error: 'Uma ou mais máquinas já estão vinculadas a outro contrato.' });
@@ -210,7 +222,7 @@ const updateTerceiroContrato = async (req, res) => {
                     contractType = ?, itensContratados = ?,
                     prazoPagamentoDias = ?, percentualJurosMora = ?, percentualMultaMora = ?,
                     prazoSubstituicaoHoras = ?, prazoInicioServicoHoras = ?, percentualMultaInadimplemento = ?,
-                    avisoPrevioRescisaoDias = ?, foroComarca = ?,
+                    avisoPrevioRescisaoDias = ?, foroComarca = ?, prazoVigenciaMeses = ?,
                     contratadaRepresentanteNome = ?, contratadaRepresentanteQualificacao = ?, contratadaRepresentanteCpf = ?
               WHERE id = ?`,
             [locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
@@ -218,7 +230,7 @@ const updateTerceiroContrato = async (req, res) => {
              JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal),
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
-             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca,
+             clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
              rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf, id]
         );
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
@@ -234,8 +246,14 @@ const updateTerceiroContrato = async (req, res) => {
 const deleteTerceiroContrato = async (req, res) => {
     const { id } = req.params;
     try {
+        const [cur] = await db.query('SELECT contratoAssinadoUrl FROM terceiro_contratos WHERE id = ?', [id]);
+        if (cur.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+        if (cur[0].contratoAssinadoUrl) {
+            return res.status(409).json({ error: 'Contrato com versão assinada não pode ser excluído. Remova o contrato assinado antes.' });
+        }
         const [result] = await db.execute('DELETE FROM terceiro_contratos WHERE id = ?', [id]);
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+        await db.execute('DELETE FROM terceiro_contrato_docs WHERE contratoId = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
         res.status(204).end();
     } catch (error) {
@@ -252,6 +270,13 @@ const gerarContratoPdf = async (req, res) => {
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         const contrato = rows[0];
+
+        // Contrato com versão assinada está "congelado": a minuta não pode ser
+        // regenerada (evita que o oficial e o rascunho divirjam). Remova o assinado
+        // para reabrir.
+        if (contrato.contratoAssinadoUrl) {
+            return res.status(409).json({ error: 'Contrato já possui versão assinada — a geração de minuta está bloqueada. Remova o contrato assinado para gerar novamente.' });
+        }
 
         const [locRows] = await db.query('SELECT * FROM partners WHERE id = ?', [contrato.locadorId]);
         const [obraRows] = await db.query('SELECT * FROM obras WHERE id = ?', [contrato.obraId]);
@@ -274,10 +299,98 @@ const gerarContratoPdf = async (req, res) => {
     }
 };
 
+// Anexa um PDF de contrato ASSINADO (enviado via multipart pela rota). Arquiva o
+// vigente anterior no histórico, marca o novo como vigente, espelha nas colunas do
+// contrato e promove o status para 'assinado' (congela minuta/edição/exclusão).
+const enviarContratoAssinado = async (req, res) => {
+    const { id } = req.params;
+    if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo recebido.' });
+
+    const cleanup = () => { try { fs.unlinkSync(req.file.path); } catch (_) {} };
+    try {
+        const [rows] = await db.query('SELECT id FROM terceiro_contratos WHERE id = ?', [id]);
+        if (rows.length === 0) { cleanup(); return res.status(404).json({ error: 'Contrato não encontrado.' }); }
+
+        const url = `/uploads/contratos_assinados/${req.file.filename}`;
+        const nome = req.file.originalname;
+        const por = req.user?.email || null;
+
+        // Arquiva o vigente anterior e registra o novo como vigente (histórico).
+        await db.execute('UPDATE terceiro_contrato_docs SET vigente = 0 WHERE contratoId = ? AND vigente = 1', [id]);
+        await db.execute(
+            `INSERT INTO terceiro_contrato_docs (id, contratoId, url, nomeOriginal, vigente, enviadoPor)
+             VALUES (?, ?, ?, ?, 1, ?)`,
+            [randomUUID(), id, url, nome, por]
+        );
+        // Espelha o vigente nas colunas do contrato + status 'assinado'.
+        await db.execute(
+            `UPDATE terceiro_contratos
+                SET contratoAssinadoUrl = ?, contratoAssinadoNome = ?, contratoAssinadoEm = CURRENT_TIMESTAMP,
+                    contratoAssinadoPor = ?, status = 'assinado'
+              WHERE id = ?`,
+            [url, nome, por, id]
+        );
+
+        const [updated] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
+        res.status(201).json(updated[0]);
+    } catch (error) {
+        cleanup();
+        console.error('❌ Erro ao enviar contrato assinado:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao enviar contrato assinado.' });
+    }
+};
+
+// Remove o contrato assinado VIGENTE (mantém o arquivo e o registro no histórico,
+// apenas desmarca) e reverte o status, reabrindo minuta/edição. Válvula de escape
+// para upload equivocado.
+const removerContratoAssinado = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const [rows] = await db.query('SELECT id FROM terceiro_contratos WHERE id = ?', [id]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+
+        const novo = ['ativo', 'concluido', 'cancelado'].includes(req.body?.status) ? req.body.status : 'ativo';
+        await db.execute('UPDATE terceiro_contrato_docs SET vigente = 0 WHERE contratoId = ? AND vigente = 1', [id]);
+        await db.execute(
+            `UPDATE terceiro_contratos
+                SET contratoAssinadoUrl = NULL, contratoAssinadoNome = NULL, contratoAssinadoEm = NULL,
+                    contratoAssinadoPor = NULL, status = ?
+              WHERE id = ?`,
+            [novo, id]
+        );
+
+        const [updated] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
+        res.json(updated[0]);
+    } catch (error) {
+        console.error('❌ Erro ao remover contrato assinado:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao remover contrato assinado.' });
+    }
+};
+
+// Histórico de documentos assinados de um contrato (vigente + arquivados).
+const getContratoDocs = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const [rows] = await db.query(
+            'SELECT id, url, nomeOriginal, vigente, enviadoPor, enviadoEm FROM terceiro_contrato_docs WHERE contratoId = ? ORDER BY enviadoEm DESC',
+            [id]
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('❌ Erro ao listar documentos do contrato:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao listar documentos do contrato.' });
+    }
+};
+
 module.exports = {
     getTerceiroContratos,
     createTerceiroContrato,
     updateTerceiroContrato,
     deleteTerceiroContrato,
     gerarContratoPdf,
+    enviarContratoAssinado,
+    removerContratoAssinado,
+    getContratoDocs,
 };

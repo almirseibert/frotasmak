@@ -25,6 +25,9 @@ const fmtBRL = (n) =>
     (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const fmtNum = (n) =>
     (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+// Horas: sem casa decimal quando inteiro (514, não 514,0); 1 casa quando fracionário (7,5).
+const fmtHoras = (n) =>
+    (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 0, maximumFractionDigits: 1 });
 const fmtDate = (d) => {
     if (!d) return '____/____/______';
     try {
@@ -44,6 +47,17 @@ const fmtDateExtenso = (d) => {
         return `${date.getDate()} de ${MESES[date.getMonth()]} de ${date.getFullYear()}`;
     } catch { return ''; }
 };
+
+// Número por extenso para prazos em meses (cobre os valores usuais de contrato).
+// Fora do mapa, o PDF mostra só o algarismo — sem parêntese por extenso.
+const NUM_EXTENSO = {
+    1: 'um', 2: 'dois', 3: 'três', 4: 'quatro', 5: 'cinco', 6: 'seis',
+    7: 'sete', 8: 'oito', 9: 'nove', 10: 'dez', 11: 'onze', 12: 'doze',
+    13: 'treze', 14: 'quatorze', 15: 'quinze', 16: 'dezesseis', 17: 'dezessete',
+    18: 'dezoito', 19: 'dezenove', 20: 'vinte', 24: 'vinte e quatro',
+    30: 'trinta', 36: 'trinta e seis', 48: 'quarenta e oito', 60: 'sessenta',
+};
+const mesesExtenso = (n) => (NUM_EXTENSO[n] ? ` (${NUM_EXTENSO[n]})` : '');
 
 // Aplica máscara de CNPJ (00.000.000/0000-00) ou CPF (000.000.000-00) a partir
 // dos dígitos. Se o valor não tiver a quantidade esperada de dígitos, devolve o
@@ -216,6 +230,10 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         paragraph(`b) O período de transporte da máquina não será computado como hora trabalhada.`);
         paragraph(`c) Os trabalhos poderão ser supervisionados por técnicos contratados pela CONTRATANTE.`);
         paragraph(`d) Os locais onde serão prestados os serviços ora contratados serão indicados pela CONTRATANTE.`);
+        // Observações do cadastro entram como item adicional do objeto (não mais em cláusula própria ao fim).
+        if (contrato.observacoes && String(contrato.observacoes).trim()) {
+            paragraph(`e) ${sanitizeText(String(contrato.observacoes))}`);
+        }
 
         // ── Volume e preço ───────────────────────────────────────────
         heading('CLÁUSULA 2ª — DO VOLUME E DO PREÇO');
@@ -224,10 +242,21 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         if (!Array.isArray(itens)) itens = [];
 
         if (contrato.contractType === 'fechado') {
-            paragraph(
-                `A CONTRATADA executará o objeto pelo valor global e fechado de ` +
-                `${fmtBRL(contrato.valorTotal)}, independentemente do volume de horas efetivamente executado.`
-            );
+            if (itens.length > 0) {
+                paragraph(
+                    `A CONTRATADA executará o objeto pelo valor global e fechado de ` +
+                    `${fmtBRL(contrato.valorTotal)}, independentemente do volume de horas efetivamente executado, ` +
+                    `compreendendo os seguintes volumes de máquina:`
+                );
+                itens.forEach((i) => {
+                    paragraph(`• ${sanitizeText(i.type) || '—'}: ${fmtHoras(Number(i.hours) || 0)} horas.`);
+                });
+            } else {
+                paragraph(
+                    `A CONTRATADA executará o objeto pelo valor global e fechado de ` +
+                    `${fmtBRL(contrato.valorTotal)}, independentemente do volume de horas efetivamente executado.`
+                );
+            }
         } else if (itens.length > 0) {
             paragraph(
                 `A CONTRATADA executará os seguintes volumes de máquina, cujo somatório perfaz o valor ` +
@@ -237,12 +266,12 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
                 const h = Number(i.hours) || 0;
                 const p = Number(i.price) || 0;
                 paragraph(
-                    `• ${sanitizeText(i.type) || '—'}: ${fmtNum(h)} h × ${fmtBRL(p)}/h = ${fmtBRL(h * p)}.`
+                    `• ${sanitizeText(i.type) || '—'}: ${fmtHoras(h)} h × ${fmtBRL(p)}/h = ${fmtBRL(h * p)}.`
                 );
             });
         } else {
             paragraph(
-                `A CONTRATADA executará o total de ${fmtNum(contrato.horasContratadas)} horas de máquina, ` +
+                `A CONTRATADA executará o total de ${fmtHoras(contrato.horasContratadas)} horas de máquina, ` +
                 `ao valor de ${fmtBRL(contrato.valorHora)} por hora, totalizando o valor global e fechado de ` +
                 `${fmtBRL(contrato.valorTotal)}.`
             );
@@ -255,12 +284,14 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
             `As horas efetivamente executadas serão apuradas pelo Relatório de Horas da CONTRATANTE, ` +
             `servindo de acompanhamento físico da execução, sem alterar o valor global ora ajustado.`
         );
-        const prazoPagamentoDias = contrato.prazoPagamentoDias || 30;
+        const prazoPagamentoDias = contrato.prazoPagamentoDias || 45;
         paragraph(
             `O pagamento pela prestação dos serviços será feito em favor da CONTRATADA mediante ` +
-            `depósito bancário em sua conta corrente, a ser informada, acompanhado da nota fiscal e do ` +
-            `relatório/planilha de horas, o qual deverá ser conferido e aceito pela CONTRATANTE, em até ` +
-            `${prazoPagamentoDias} dias após a conclusão dos serviços. Recaindo o vencimento em feriado ` +
+            `depósito bancário em conta corrente por ela indicada, e somente após a expressa autorização ` +
+            `da CONTRATANTE, mediante apresentação da nota fiscal e do relatório/planilha de horas, os ` +
+            `quais deverão ser previamente conferidos e aceitos pela CONTRATANTE. O prazo de pagamento ` +
+            `será de até ${prazoPagamentoDias} dias contados da data do aceite formal da CONTRATANTE, e ` +
+            `não da mera conclusão dos serviços. Recaindo o vencimento em feriado ` +
             `(nacional, estadual ou municipal), o vencimento fica prorrogado para o primeiro dia útil ` +
             `subsequente. O CNPJ constante das notas fiscais/faturas deverá ser o constante na ` +
             `qualificação das partes deste contrato.`
@@ -280,18 +311,19 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         // ── Abatimentos ──────────────────────────────────────────────
         heading('CLÁUSULA 3ª — DOS ABATIMENTOS');
         paragraph(
-            `Serão descontados do valor global os adiantamentos pagos pela CONTRATANTE, bem como o ` +
-            `combustível fornecido pela CONTRATANTE aos equipamentos da CONTRATADA, valorado pelo preço ` +
-            `efetivo de cada abastecimento. O saldo a pagar corresponde ao valor global deduzido de tais ` +
-            `abatimentos.`
+            `Serão descontados do valor global os adiantamentos pagos pela CONTRATANTE. Caso a ` +
+            `CONTRATANTE forneça combustível aos equipamentos da CONTRATADA, o respectivo valor, apurado ` +
+            `pelo preço efetivo de cada abastecimento, será igualmente deduzido do valor global, a título ` +
+            `de adiantamento. O saldo a pagar corresponde ao valor global deduzido de tais abatimentos.`
         );
 
         // ── Vigência ─────────────────────────────────────────────────
         heading('CLÁUSULA 4ª — DA VIGÊNCIA E DO PRAZO');
+        const prazoVigenciaMeses = parseInt(contrato.prazoVigenciaMeses, 10) > 0 ? parseInt(contrato.prazoVigenciaMeses, 10) : 6;
         paragraph(
-            `O presente contrato vigora de ${fmtDate(contrato.vigenciaInicio)} a ` +
-            `${fmtDate(contrato.vigenciaFim)}, podendo ser prorrogado mediante acordo entre as partes, ` +
-            `conforme o artigo 571 do Código Civil.`
+            `O presente contrato vigora pelo prazo de ${prazoVigenciaMeses}${mesesExtenso(prazoVigenciaMeses)} ` +
+            `${prazoVigenciaMeses === 1 ? 'mês' : 'meses'}, contados da data de assinatura deste instrumento, ` +
+            `podendo ser prorrogado mediante acordo entre as partes, conforme o artigo 571 do Código Civil.`
         );
         // Quando o início de vigência é anterior à assinatura, ratifica os atos já
         // praticados para não deixar a execução pretérita sem cobertura contratual.
@@ -450,11 +482,6 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         // ── Foro ─────────────────────────────────────────────────────
         heading('CLÁUSULA 12ª — DO FORO');
         paragraph(`Para dirimir as dúvidas emergentes do presente contrato, as partes de comum acordo elegem o Foro da Comarca de ${contrato.foroComarca || 'Santa Maria'}, RS.`);
-
-        if (contrato.observacoes) {
-            heading('CLÁUSULA 13ª — DAS DISPOSIÇÕES ADICIONAIS');
-            paragraph(sanitizeText(String(contrato.observacoes)));
-        }
 
         // ── Assinaturas ──────────────────────────────────────────────
         paragraph(

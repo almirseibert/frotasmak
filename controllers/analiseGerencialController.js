@@ -558,83 +558,31 @@ const getProjecaoObra = async (req, res) => {
         const diasParaFinalizar = ritmoHorasPorDia > 0 ? Math.ceil(horasRestantes / ritmoHorasPorDia) : null;
         const percentConcluido  = horasContratadas > 0 ? (totalHoras / horasContratadas) * 100 : 0;
 
-        // Custo de combustível (diesel) vinculado à obra.
-        // Abastecimentos feitos pelo Comboio ("saída") são gravados em `refuelings`
-        // com pricePerLiter = 0 — o custo real fica registrado na "entrada" (quando
-        // o comboio se abasteceu no posto), que pode ter obraId diferente (ou nulo).
-        // Por isso o custo dessas saídas precisa ser resgatado a partir do preço
-        // pago na entrada do comboio mais próxima (na data) que a antecedeu.
-        const [refuelRows] = await db.query(`
-            SELECT r.authNumber, r.litrosLiberados, r.pricePerLiter
-              FROM refuelings r
-             WHERE r.obraId = ?
-               AND r.litrosLiberados IS NOT NULL
-               AND r.pricePerLiter  IS NOT NULL
+        // Custo de combustível (diesel) da obra.
+        // Fonte única de verdade: a tabela `expenses` (categoria 'Combustível'),
+        // que consolida TODOS os fluxos de combustível — ordens de abastecimento,
+        // comboio (saída/drenagem/descarte), lançamentos automáticos e manuais.
+        // É exatamente o mesmo número exibido no painel de Gestão de Obras.
+        //
+        // Antes, este cálculo recomputava o custo apenas a partir de `refuelings`
+        // (litros × preço, com resgate do preço do comboio), o que subestimava o
+        // total: ignorava abastecimentos lançados por outros fluxos e zerava o
+        // custo das saídas de comboio cujo preço de entrada não fosse resolvido.
+        const [[custoRow]] = await db.query(`
+            SELECT COALESCE(SUM(amount), 0) AS total
+              FROM expenses
+             WHERE obraId = ? AND category = 'Combustível'
         `, [obraId]);
+        const totalCustoCombust = parseFloat(custoRow.total) || 0;
 
-        const authNumbers = [...new Set(refuelRows.map(r => r.authNumber).filter(a => a != null))];
-
-        const saidaByAuth = new Map();
-        if (authNumbers.length) {
-            const placeholders = authNumbers.map(() => '?').join(',');
-            const [saidaRows] = await db.query(`
-                SELECT authNumber, comboioVehicleId, date
-                  FROM comboio_transactions
-                 WHERE type = 'saida' AND authNumber IN (${placeholders})
-            `, authNumbers);
-            saidaRows.forEach(s => saidaByAuth.set(s.authNumber, s));
-        }
-
-        const comboioIds = [...new Set([...saidaByAuth.values()].map(s => s.comboioVehicleId).filter(Boolean))];
-
-        const entradasPorComboio = new Map(); // comboioVehicleId -> [{ ts, price }] ordenado por data
-        if (comboioIds.length) {
-            const placeholders = comboioIds.map(() => '?').join(',');
-            const [entradaRows] = await db.query(`
-                SELECT r.vehicleId AS comboioVehicleId, r.data AS date, r.pricePerLiter
-                  FROM refuelings r
-                  JOIN comboio_transactions ct ON ct.authNumber = r.authNumber AND ct.type = 'entrada'
-                 WHERE r.vehicleId IN (${placeholders})
-                   AND r.pricePerLiter IS NOT NULL
-                   AND r.pricePerLiter > 0
-                 ORDER BY r.data ASC
-            `, comboioIds);
-            entradaRows.forEach(e => {
-                if (!entradasPorComboio.has(e.comboioVehicleId)) entradasPorComboio.set(e.comboioVehicleId, []);
-                entradasPorComboio.get(e.comboioVehicleId).push({
-                    ts:    new Date(e.date).getTime(),
-                    price: parseFloat(e.pricePerLiter) || 0,
-                });
-            });
-        }
-
-        // Preço vigente do comboio numa data: última entrada com data <= saída;
-        // se a saída for anterior a qualquer entrada registrada, usa a mais antiga disponível.
-        const precoComboioNaData = (comboioVehicleId, dataSaida) => {
-            const lista = entradasPorComboio.get(comboioVehicleId);
-            if (!lista || !lista.length) return 0;
-            const alvo = new Date(dataSaida).getTime();
-            let melhor = null;
-            for (const e of lista) {
-                if (e.ts <= alvo) melhor = e;
-                else break;
-            }
-            return melhor ? melhor.price : lista[0].price;
-        };
-
-        let totalLitros = 0;
-        let totalCustoCombust = 0;
-        refuelRows.forEach(r => {
-            const litros = parseFloat(r.litrosLiberados) || 0;
-            totalLitros += litros;
-
-            const saida = saidaByAuth.get(r.authNumber);
-            const preco = saida
-                ? precoComboioNaData(saida.comboioVehicleId, saida.date)
-                : (parseFloat(r.pricePerLiter) || 0);
-
-            totalCustoCombust += litros * preco;
-        });
+        // Litros consumidos (informativo) — somados dos abastecimentos vinculados
+        // à obra. Serve só para exibição; o custo NÃO deriva mais daqui.
+        const [[litrosRow]] = await db.query(`
+            SELECT COALESCE(SUM(litrosLiberados), 0) AS total
+              FROM refuelings
+             WHERE obraId = ? AND litrosLiberados IS NOT NULL
+        `, [obraId]);
+        const totalLitros = parseFloat(litrosRow.total) || 0;
 
         // % combustível sobre faturamento já realizado
         const percentCombust = totalFaturamentoRS > 0
@@ -671,7 +619,7 @@ const getProjecaoObra = async (req, res) => {
                 percentualAtual:       Math.round(percentCombust     * 10)  / 10,
                 projecaoFinalPercent:  Math.round(projecaoFinalPercent * 10) / 10,
                 alertaCritico:         projecaoFinalPercent > 20,
-                semDados:              totalLitros === 0,
+                semDados:              totalCustoCombust === 0 && totalLitros === 0,
             },
         });
     } catch (e) {

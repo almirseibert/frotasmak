@@ -549,6 +549,20 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     const qtdVeiculos = scopedVehicles.length;
     const qtdManutencao = scopedVehicles.filter(v => v.estado_calculado === 'manutencao').length;
 
+    // Opção B (fluxo real): o numerador conta as horas de TODA máquina produtiva
+    // que passou pela obra no período — o vínculo é o log (l.obraId + l.date), não
+    // o snapshot de alocação atual. Assim máquinas já desalocadas mas que
+    // trabalharam no período continuam contando. Tipos não-produtivos (prancha,
+    // leves) ficam de fora porque `allVehicles` já é filtrado por
+    // `tipo NOT IN (TIPOS_EXCLUIDOS_PRODUTIVOS)`. Como o denominador é a capacidade
+    // da frota alocada HOJE (scopedVehicles), o aproveitamento PODE ultrapassar
+    // 100% quando passou mais máquina do que a frota atual comporta — e isso é
+    // esperado, não é bug.
+    const produtivoIds = allVehicles.map(v => v.id);
+    const prodFilter = () => produtivoIds.length
+        ? { frag: ` AND l.vehicleId IN (${produtivoIds.map(() => '?').join(',')})`, params: [...produtivoIds] }
+        : { frag: ' AND 1=0', params: [] }; // sem máquina produtiva → zera numeradores
+
     // 2) Calendário do período
     const cal = _businessDayList(startDate, endDate);
     const diasTotais = cal.length;
@@ -563,13 +577,14 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     let logsParams = [startDate, endDate];
     let logsCondObra = '';
     if (!isGeral) { logsCondObra = ' AND l.obraId = ?'; logsParams.push(obraId); }
+    const vfDia = prodFilter();
 
     const [logsDia] = await db.query(`
         SELECT DATE_FORMAT(l.date, '%Y-%m-%d') as data_log, SUM(l.totalHours) as horas
         FROM daily_work_logs l
-        WHERE l.date BETWEEN ? AND ?${logsCondObra}
+        WHERE l.date BETWEEN ? AND ?${logsCondObra}${vfDia.frag}
         GROUP BY data_log
-    `, logsParams);
+    `, [...logsParams, ...vfDia.params]);
     const logsMap = new Map(logsDia.map(r => [r.data_log, parseFloat(r.horas) || 0]));
 
     const chartData = cal.map(c => ({
@@ -595,13 +610,14 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     let tipoParams = [startDate, endDate];
     let tipoCondObra = '';
     if (!isGeral) { tipoCondObra = ' AND l.obraId = ?'; tipoParams.push(obraId); }
+    const vfTipo = prodFilter();
     const [tipoLogs] = await db.query(`
         SELECT v.tipo, SUM(l.totalHours) as horas
         FROM daily_work_logs l
         JOIN vehicles v ON l.vehicleId = v.id
-        WHERE l.date BETWEEN ? AND ?${tipoCondObra}
+        WHERE l.date BETWEEN ? AND ?${tipoCondObra}${vfTipo.frag}
         GROUP BY v.tipo
-    `, tipoParams);
+    `, [...tipoParams, ...vfTipo.params]);
     tipoLogs.forEach(t => {
         const tipo = t.tipo || 'Outros';
         if (!frotaPorTipo[tipo]) frotaPorTipo[tipo] = { qtd: 0, qtdManutencao: 0, horas_executadas: 0 };
@@ -637,12 +653,13 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
             if (v.estado_calculado === 'manutencao') cur.qtdMan += 1;
         });
 
+        const vfObra = prodFilter();
         const [obraLogs] = await db.query(`
             SELECT l.obraId, SUM(l.totalHours) as horas
             FROM daily_work_logs l
-            WHERE l.date BETWEEN ? AND ?
+            WHERE l.date BETWEEN ? AND ?${vfObra.frag}
             GROUP BY l.obraId
-        `, [startDate, endDate]);
+        `, [startDate, endDate, ...vfObra.params]);
         const obraLogsMap = new Map(obraLogs.map(r => [String(r.obraId), parseFloat(r.horas) || 0]));
 
         const obraIds = Array.from(new Set([
@@ -684,12 +701,13 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     let veiculoParams = [startDate, endDate];
     let veiculoCondObra = '';
     if (!isGeral) { veiculoCondObra = ' AND l.obraId = ?'; veiculoParams.push(obraId); }
+    const vfVeic = prodFilter();
     const [veiculoLogs] = await db.query(`
         SELECT l.vehicleId, SUM(l.totalHours) as horas
         FROM daily_work_logs l
-        WHERE l.date BETWEEN ? AND ?${veiculoCondObra}
+        WHERE l.date BETWEEN ? AND ?${veiculoCondObra}${vfVeic.frag}
         GROUP BY l.vehicleId
-    `, veiculoParams);
+    `, [...veiculoParams, ...vfVeic.params]);
     const veiculoHorasMap = new Map(veiculoLogs.map(r => [String(r.vehicleId), parseFloat(r.horas) || 0]));
 
     // Mapa obra→nome (para enriquecer)

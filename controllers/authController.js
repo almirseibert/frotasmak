@@ -3,6 +3,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
+const { getEffectivePages } = require('../utils/permissions');
 
 // ====================================================================
 // CONFIGURAÇÃO DE SESSÃO
@@ -175,7 +176,7 @@ const getMe = async (req, res) => {
         let rows;
         try {
             [rows] = await db.query(
-                'SELECT id, name, email, username, role, user_type, status, canAccessRefueling, canAccessAnaliseGerencial, bloqueado_abastecimento, employeeId FROM users WHERE id = ?',
+                'SELECT id, name, email, username, role, user_type, status, canAccessRefueling, canAccessAnaliseGerencial, bloqueado_abastecimento, page_permissions, employeeId FROM users WHERE id = ?',
                 [req.user.id]
             );
         } catch (colErr) {
@@ -190,6 +191,20 @@ const getMe = async (req, res) => {
         if (!user) {
             return res.status(404).json({ message: 'Usuário não encontrado' });
         }
+
+        // page_permissions: lista explícita de páginas do usuário (override individual).
+        // O driver pode devolver JSON já parseado (array) ou como string — normaliza para array|null.
+        if ('page_permissions' in user) {
+            const raw = user.page_permissions;
+            if (typeof raw === 'string') {
+                try { user.page_permissions = JSON.parse(raw); } catch { user.page_permissions = null; }
+            }
+            if (!Array.isArray(user.page_permissions)) user.page_permissions = null;
+        }
+
+        // Fonte única: o servidor calcula as páginas efetivas e o front apenas consome.
+        user.effectivePages = getEffectivePages(user);
+
         res.status(200).json(user);
     } catch (error) {
         console.error('Erro na rota /me:', error);
