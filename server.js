@@ -893,6 +893,57 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Integração ERP (Odoo): fila de sincronização + IDs espelho
+// Ver IMPLANTACAO_ERP_ODOO.md. Idempotente. A fila só é PROCESSADA quando a
+// env ODOO_URL estiver configurada (worker em services/cronService.js).
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS erp_sync_queue (
+                id            VARCHAR(36)  PRIMARY KEY,
+                entity_type   VARCHAR(40)  NOT NULL,
+                entity_id     VARCHAR(64)  NOT NULL,
+                operation     VARCHAR(40)  NOT NULL,
+                payload       JSON         DEFAULT NULL,
+                status        VARCHAR(20)  NOT NULL DEFAULT 'pending',
+                attempts      INT          NOT NULL DEFAULT 0,
+                last_error    TEXT         DEFAULT NULL,
+                odoo_result   JSON         DEFAULT NULL,
+                created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_erp_sync_entity_op (entity_type, entity_id, operation),
+                INDEX idx_erp_sync_status (status)
+            )
+        `);
+        // Colunas-espelho do ID do registro no Odoo (evitam duplicidade de
+        // lançamento). Cada ALTER é tolerante e independente: coluna já
+        // existente (ER_DUP_FIELDNAME) ou tabela ainda ausente (ER_NO_SUCH_TABLE)
+        // não abortam as demais.
+        const espelhosOdoo = [
+            { table: 'partners',                col: 'odoo_partner_id',  def: 'INT DEFAULT NULL' },
+            { table: 'obras',                   col: 'odoo_analytic_id', def: 'INT DEFAULT NULL' },
+            { table: 'orders',                  col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+            { table: 'terceirizado_pagamentos', col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+            { table: 'expenses',                col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+            { table: 'fines',                   col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+        ];
+        for (const { table, col, def } of espelhosOdoo) {
+            try {
+                await db.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME' && err.code !== 'ER_NO_SUCH_TABLE') {
+                    console.warn(`⚠️ [migration] ${table}.${col}:`, err.message);
+                }
+            }
+        }
+        console.log('✅ Migração erp_sync_queue + colunas odoo_* concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] erp_sync_queue:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Log de e-mails enviados pelo sistema (auditoria de envios)
 // ====================================================================
 (async () => {

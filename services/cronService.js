@@ -6,6 +6,7 @@ const { ymdBRT } = require('../utils/dateBRT');
 const { syncJourneyEvents, syncPositions, syncDailySummary } = require('./sigasulSyncService');
 const { processYesterday: processConfrontoYesterday } = require('./confrontoService');
 const { processYesterday: processDiscrepanciaYesterday } = require('./discrepanciaService');
+const erpSyncService = require('./erpSyncService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -684,6 +685,21 @@ cron.schedule('*/5 * * * *', async () => {
         }
     } catch (e) {
         console.error('❌ [CRON-WA] Erro ao verificar status WhatsApp:', e.message);
+    }
+});
+
+// ====================================================================
+// [ERP-SYNC] Processa a fila de sincronização com o Odoo (contas a pagar).
+// INERTE até a env ODOO_URL estar configurada (isConfigured() = false →
+// processQueue() retorna sem fazer nada). A cada 2 minutos.
+// Ver IMPLANTACAO_ERP_ODOO.md.
+// ====================================================================
+cron.schedule('*/2 * * * *', async () => {
+    if (!erpSyncService.isConfigured()) return;
+    try {
+        await erpSyncService.processQueue();
+    } catch (e) {
+        console.error('❌ [ERP-SYNC] Erro no processamento da fila:', e.message);
     }
 });
 
