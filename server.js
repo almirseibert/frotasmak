@@ -60,6 +60,9 @@ const http = require('http');
         // gerador de contrato usa como fallback do representante da CONTRATADA.
         { table: 'partners',               column: 'representanteLegalNome',            def: 'VARCHAR(160) DEFAULT NULL' },
         { table: 'partners',               column: 'representanteLegalCpf',             def: 'VARCHAR(20) DEFAULT NULL' },
+        // Chave Pix do terceiro/parceiro — apenas cadastro informativo, sem uso em
+        // transações pelo sistema.
+        { table: 'partners',               column: 'chavePix',                          def: 'VARCHAR(140) DEFAULT NULL' },
         // FASE 2.10 — Colunas de movimentação de pneus
         { table: 'tire_transactions',      column: 'employeeName',                     def: 'VARCHAR(255) NULL' },
         { table: 'tire_transactions',      column: 'odometer',                         def: 'DECIMAL(10,1) NULL' },
@@ -597,6 +600,20 @@ const http = require('http');
         console.log('✅ Migração solicitacao_erros_log concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] solicitacao_erros_log:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Rastreamento de entrega das ordens de abastecimento
+// Cria order_notifications. O DDL fica em services/orderDelivery.js para que
+// o serviço também consiga se auto-criar caso rode antes desta migração.
+// ====================================================================
+(async () => {
+    try {
+        await require('./services/orderDelivery').ensureTable();
+        console.log('✅ Migração order_notifications concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] order_notifications:', e.message);
     }
 })();
 
@@ -1444,6 +1461,7 @@ const comboioTransactionRoutes = require('./routes/comboioTransactionRoutes');
 const agendaRoutes = require('./routes/agendaRoutes');
 const diarioDeBordoRoutes = require('./routes/diarioDeBordoRoutes');
 const orderRoutes = require('./routes/orderRoutes');
+const orderNotificationRoutes = require('./routes/orderNotificationRoutes');
 const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
@@ -1606,6 +1624,7 @@ apiRouter.use('/washings', washingRoutes);
 apiRouter.use('/agenda', agendaRoutes);
 apiRouter.use('/inventory', inventoryRoutes);
 apiRouter.use('/whatsapp', whatsappRoutes);
+apiRouter.use('/orderNotifications', orderNotificationRoutes);
 apiRouter.use('/sigasul', sigasulRoutes);
 apiRouter.use('/vehicle-type-configs', vehicleTypeConfigRoutes);
 apiRouter.use('/vehicle-taxonomy', vehicleTaxonomyRoutes);

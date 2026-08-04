@@ -12,6 +12,7 @@ const whatsappService = require('./whatsappService');
 const { sendEmail } = require('./emailService');
 const { generateOrderPdf } = require('./pdfGenerator');
 const { buildComboioPartnerId } = require('../utils/ensureComboioPartner');
+const orderDelivery = require('./orderDelivery');
 
 // Diretório onde os PDFs ficam hospedados — servido via /uploads/ordens
 const ORDERS_PDF_DIR = path.join(__dirname, '..', 'public', 'uploads', 'ordens');
@@ -146,22 +147,57 @@ const buildOrderHtml = (order) => {
 // ─── Envio para um partner específico, conforme suas flags ──────────────────
 // opts.forceWhatsapp / opts.forceEmail ignoram as flags do partner (usado para o comboio)
 // opts.pdf = { buffer, url, filename } — pré-gerado uma vez e reusado entre canais
+// opts.canais = ['whatsapp'] restringe quais canais são tentados E rastreados.
+//   Usado no reenvio manual/automático: reenviar só o WhatsApp não pode
+//   sobrescrever o registro de um e-mail que já havia sido entregue.
 const sendToPartner = async (partner, order, opts = {}) => {
     const out = { whatsapp: null, email: null };
     if (!partner) return out;
 
-    const wantWa = opts.forceWhatsapp || partner.envia_por_whatsapp == 1;
-    const wantEm = opts.forceEmail    || partner.envia_por_email    == 1;
+    const canais = opts.canais || ['whatsapp', 'email'];
+    const usaWa  = canais.includes('whatsapp');
+    const usaEm  = canais.includes('email');
+
+    const wantWa = usaWa && (opts.forceWhatsapp || partner.envia_por_whatsapp == 1);
+    const wantEm = usaEm && (opts.forceEmail    || partner.envia_por_email    == 1);
     const pdf = opts.pdf || null;
 
+    // Contexto de rastreio — toda tentativa (ou ausência dela) vira linha em
+    // order_notifications para que a tela de ordens saiba o que aconteceu.
+    const S = orderDelivery.STATUS;
+    const rastreio = (canal, status, extra = {}) => orderDelivery.registrar({
+        authNumber:       order.authNumber,
+        tipo:             order.tipo,
+        destinatarioTipo: opts.destinatarioTipo || 'posto',
+        partnerId:        partner.id || null,
+        destinatarioNome: partner.razaoSocial || partner.nomeFantasia || 'Destinatário',
+        canal,
+        status,
+        order:            opts.rastrearPayload === false ? null : order,
+        ...extra,
+    });
+
+    // ── WhatsApp ────────────────────────────────────────────────────────────
+    if (!usaWa) {
+        // Canal fora do escopo desta chamada (reenvio seletivo) — não mexe no registro.
+    } else if (!wantWa) {
+        // Canal desligado no cadastro do posto. Não é erro, mas precisa ficar
+        // visível — senão a ordem "some" sem nenhum registro.
+        await rastreio('whatsapp', S.DESATIVADO);
+    } else if (!partner.whatsapp) {
+        await rastreio('whatsapp', S.SEM_CONTATO, { erro: 'Parceiro sem número de WhatsApp cadastrado.' });
+        out.whatsapp = 'sem contato cadastrado';
+    }
+
     if (wantWa && partner.whatsapp) {
+        await rastreio('whatsapp', S.PENDENTE, { destino: partner.whatsapp });
         try {
             // Envia o PDF como base64 (mesmo buffer já gerado para o e-mail).
             // O microsserviço usa o buffer direto — sem precisar baixar a URL,
             // o que evita falhas silenciosas que faziam o WhatsApp chegar
             // apenas com o texto, sem o anexo.
             const pdfB64 = pdf?.buffer ? pdf.buffer.toString('base64') : null;
-            await whatsappService.enviarMensagem(
+            const resp = await whatsappService.enviarMensagem(
                 partner.whatsapp,
                 partner.razaoSocial || 'Posto',
                 `ordem_${order.tipo || 'abastecimento'}_${order.authNumber || ''}`,
@@ -171,11 +207,35 @@ const sendToPartner = async (partner, order, opts = {}) => {
                 pdfB64,
                 pdfB64 ? 'application/pdf' : null
             );
-            out.whatsapp = (pdfB64 || pdf?.url) ? 'enviado (com PDF)' : 'enviado';
+            // O microsserviço devolve pdfStatus = 'enviado' | 'falha: <msg>' | null.
+            // Texto entregue mas PDF não é PARCIAL — o posto recebeu a ordem, mas
+            // sem o documento; quem emitiu precisa saber.
+            const pediuAnexo = !!(pdfB64 || pdf?.url);
+            const pdfStatus = resp?.pdfStatus || null;
+            const parcial = pediuAnexo && pdfStatus && pdfStatus !== 'enviado';
+            await rastreio('whatsapp', parcial ? S.PARCIAL : S.ENVIADO, {
+                destino: partner.whatsapp,
+                erro: parcial ? `Texto entregue, PDF não: ${pdfStatus}` : null,
+                incrementaTentativa: true,
+            });
+            out.whatsapp = parcial ? `parcial (PDF: ${pdfStatus})` : (pediuAnexo ? 'enviado (com PDF)' : 'enviado');
         } catch (e) {
             console.warn(`[orderNotifier] WhatsApp falhou para ${partner.razaoSocial}:`, e.message);
+            await rastreio('whatsapp', S.FALHA, {
+                destino: partner.whatsapp, erro: e.message, incrementaTentativa: true,
+            });
             out.whatsapp = `falha: ${e.message}`;
         }
+    }
+
+    // ── E-mail ──────────────────────────────────────────────────────────────
+    if (!usaEm) {
+        // Fora do escopo desta chamada.
+    } else if (!wantEm) {
+        await rastreio('email', S.DESATIVADO);
+    } else if (!partner.email) {
+        await rastreio('email', S.SEM_CONTATO, { erro: 'Parceiro sem e-mail cadastrado.' });
+        out.email = 'sem contato cadastrado';
     }
 
     if (wantEm && partner.email) {
@@ -199,14 +259,46 @@ const sendToPartner = async (partner, order, opts = {}) => {
                 html: buildOrderHtml(order),
                 attachments,
             });
+            await rastreio('email', r.skipped ? S.FALHA : S.ENVIADO, {
+                destino: partner.email,
+                erro: r.skipped ? `Envio pulado: ${r.reason}` : null,
+                incrementaTentativa: true,
+            });
             out.email = r.skipped ? `pulado: ${r.reason}` : (pdf?.buffer ? 'enviado (com PDF)' : 'enviado');
         } catch (e) {
             console.warn(`[orderNotifier] E-mail falhou para ${partner.razaoSocial}:`, e.message);
+            await rastreio('email', S.FALHA, {
+                destino: partner.email, erro: e.message, incrementaTentativa: true,
+            });
             out.email = `falha: ${e.message}`;
         }
     }
 
+    // Se nenhum canal entregou, avisa em tempo real quem estiver na tela.
+    await notificarSeFalhou(order, out, opts.destinatarioTipo || 'posto', partner);
+
     return out;
+};
+
+// Emite socket quando a ordem NÃO chegou ao destino por nenhum canal.
+// O frontend usa isso para o toast imediato ao emitir a ordem — sem isso o
+// usuário só descobriria pelo badge, depois de recarregar a lista.
+const notificarSeFalhou = async (order, out, destinatarioTipo, partner) => {
+    try {
+        const okWa = out.whatsapp === 'enviado' || String(out.whatsapp || '').startsWith('enviado');
+        const okEm = out.email === 'enviado' || String(out.email || '').startsWith('enviado');
+        const parcial = String(out.whatsapp || '').startsWith('parcial');
+        if (okWa || okEm || parcial) return;
+        if (!global.io) return;
+        global.io.emit('ordem:falha_envio', {
+            authNumber:       order.authNumber,
+            destinatarioTipo,
+            destinatarioNome: partner?.razaoSocial || partner?.nomeFantasia || 'Destinatário',
+            whatsapp:         out.whatsapp,
+            email:            out.email,
+        });
+        console.error(`🚨 [orderNotifier] Ordem #${order.authNumber} NÃO entregue a ${destinatarioTipo} — whatsapp: ${out.whatsapp} | email: ${out.email}`);
+    } catch (_) {}
 };
 
 // ─── Notificação principal de entrada do comboio ────────────────────────────
@@ -236,12 +328,36 @@ const notifyComboioEntrada = async ({ partnerId, comboioVehicleId, order }) => {
                 result.posto = await sendToPartner(
                     rows[0],
                     { ...order, partnerName: rows[0].razaoSocial },
-                    { pdf }
+                    { pdf, destinatarioTipo: 'posto' }
                 );
+            } else {
+                // Ordem aponta para um partnerId que não existe mais — silêncio
+                // total antes desta mudança. Agora fica registrado.
+                await orderDelivery.registrar({
+                    authNumber: order.authNumber, tipo: order.tipo,
+                    destinatarioTipo: 'posto', partnerId, canal: 'whatsapp',
+                    status: orderDelivery.STATUS.SEM_CONTATO,
+                    erro: `Posto ${partnerId} não encontrado no cadastro.`, order,
+                });
             }
         } catch (e) {
             console.warn('[orderNotifier] erro ao buscar posto:', e.message);
+            await orderDelivery.registrar({
+                authNumber: order.authNumber, tipo: order.tipo,
+                destinatarioTipo: 'posto', partnerId, canal: 'whatsapp',
+                status: orderDelivery.STATUS.FALHA,
+                erro: `Erro ao buscar posto: ${e.message}`, order,
+            });
         }
+    } else {
+        // Ordem sem posto vinculado: nada a enviar, mas registramos para a
+        // tela não mostrar "pendente" eternamente.
+        await orderDelivery.registrar({
+            authNumber: order.authNumber, tipo: order.tipo,
+            destinatarioTipo: 'posto', canal: 'whatsapp',
+            status: orderDelivery.STATUS.SEM_CONTATO,
+            erro: 'Ordem sem posto vinculado.', order,
+        });
     }
 
     // 2) Comboio (espelho em partners) — sempre tenta enviar se contato existir
@@ -258,7 +374,7 @@ const notifyComboioEntrada = async ({ partnerId, comboioVehicleId, order }) => {
                 result.comboio = await sendToPartner(
                     { ...c, envia_por_whatsapp: c.whatsapp ? 1 : 0, envia_por_email: c.email ? 1 : 0 },
                     order,
-                    { forceWhatsapp: !!c.whatsapp, forceEmail: !!c.email, pdf }
+                    { forceWhatsapp: !!c.whatsapp, forceEmail: !!c.email, pdf, destinatarioTipo: 'comboio' }
                 );
             }
         } catch (e) {

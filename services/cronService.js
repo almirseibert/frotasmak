@@ -6,6 +6,9 @@ const { ymdBRT } = require('../utils/dateBRT');
 const { syncJourneyEvents, syncPositions, syncDailySummary } = require('./sigasulSyncService');
 const { processYesterday: processConfrontoYesterday } = require('./confrontoService');
 const { processYesterday: processDiscrepanciaYesterday } = require('./discrepanciaService');
+const orderDelivery = require('./orderDelivery');
+const orderRetryService = require('./orderRetryService');
+const { sendEmail } = require('./emailService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -662,25 +665,82 @@ cron.schedule('45 6 * * *', async () => {
 // estar na tela de configurações.
 // ====================================================================
 let _waEstavaDesconectado = false;
+let _waDesconectadoDesde = null;   // timestamp do início da queda atual
+let _waEscalonadoEm = null;        // última vez que escalamos por e-mail
 
-cron.schedule('*/5 * * * *', async () => {
-    if (!global.io) return;
+// Depois de quanto tempo fora escalar por e-mail. Socket sozinho não basta:
+// se ninguém estiver com o sistema aberto, o alerta cai no vazio — que é
+// exatamente o cenário "ficamos no escuro" que estamos combatendo.
+const MIN_ATE_ESCALAR = 10;
+const MIN_ENTRE_ESCALONAMENTOS = 60;
+
+const escalarQuedaWhatsapp = async (statusAtual, minutosFora) => {
+    try {
+        const [admins] = await db.query(
+            "SELECT email FROM users WHERE role IN ('admin', 'master') AND email IS NOT NULL AND email <> ''"
+        );
+        const destinatarios = admins.map(a => a.email).filter(Boolean);
+        if (destinatarios.length === 0) return;
+
+        const pendencias = await orderDelivery.contarPendencias({ dias: 2 });
+        await sendEmail({
+            to: destinatarios.join(','),
+            subject: `🚨 WhatsApp do Frotas MAK fora do ar há ${minutosFora} min`,
+            text: [
+                `O serviço de WhatsApp está com status "${statusAtual}" há aproximadamente ${minutosFora} minutos.`,
+                ``,
+                `Enquanto isso, as ordens de abastecimento NÃO estão sendo entregues aos postos.`,
+                `Envios pendentes/falhos nas últimas 48h: ${pendencias}.`,
+                ``,
+                `Ação: acesse Admin → Comunicação → WhatsApp e reconecte (leitura do QR Code).`,
+                `As ordens que falharam são reenviadas automaticamente assim que a conexão voltar.`,
+            ].join('\n'),
+        });
+        console.warn(`📧 [CRON-WA] Escalonamento por e-mail enviado a ${destinatarios.length} admin(s).`);
+    } catch (e) {
+        console.error('❌ [CRON-WA] Falha ao escalar queda por e-mail:', e.message);
+    }
+};
+
+// A cada 2 min (era 5): quanto antes detectarmos, menos ordens caem no vazio.
+cron.schedule('*/2 * * * *', async () => {
     try {
         const { status } = await whatsappService.getStatus();
         const desconectado = status !== 'PRONTO' && status !== 'AUTENTICANDO' && status !== 'AUTENTICADO';
 
         if (desconectado && !_waEstavaDesconectado) {
-            // Acabou de desconectar — já notificado pelo getStatus() acima via whatsappService
             _waEstavaDesconectado = true;
+            _waDesconectadoDesde = Date.now();
+            _waEscalonadoEm = null;
             console.warn('⚠️ [CRON-WA] WhatsApp desconectado — alerta emitido para admins.');
         } else if (!desconectado && _waEstavaDesconectado) {
-            // Reconectou — avisa o frontend para limpar o alerta
             _waEstavaDesconectado = false;
-            global.io.emit('whatsapp:reconectado');
+            _waDesconectadoDesde = null;
+            _waEscalonadoEm = null;
+            if (global.io) global.io.emit('whatsapp:reconectado');
             console.log('✅ [CRON-WA] WhatsApp reconectado — limpeza de alerta emitida.');
         } else if (desconectado) {
-            // Continua desconectado — re-emite para admins que entraram depois
-            global.io.emit('admin:notificacao', { tipo: 'whatsapp_desconectado' });
+            const minutosFora = Math.round((Date.now() - (_waDesconectadoDesde || Date.now())) / 60000);
+            if (global.io) {
+                global.io.emit('admin:notificacao', { tipo: 'whatsapp_desconectado', minutosFora });
+            }
+            // Escalonamento por e-mail — canal independente do WhatsApp caído.
+            const podeEscalar = minutosFora >= MIN_ATE_ESCALAR &&
+                (!_waEscalonadoEm || (Date.now() - _waEscalonadoEm) >= MIN_ENTRE_ESCALONAMENTOS * 60000);
+            if (podeEscalar) {
+                _waEscalonadoEm = Date.now();
+                await escalarQuedaWhatsapp(status, minutosFora);
+            }
+        }
+
+        // Fila de retentativa — roda sempre; o próprio serviço decide o que é
+        // elegível conforme o status da sessão.
+        await orderRetryService.processarFila();
+
+        // Mantém o contador de pendências visível para quem estiver na tela.
+        if (global.io) {
+            const pendencias = await orderDelivery.contarPendencias({ dias: 2 });
+            if (pendencias > 0) global.io.emit('ordens:pendencias_envio', { total: pendencias });
         }
     } catch (e) {
         console.error('❌ [CRON-WA] Erro ao verificar status WhatsApp:', e.message);
