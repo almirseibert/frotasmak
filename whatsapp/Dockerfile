@@ -16,6 +16,12 @@ RUN npm ci --omit=dev
 
 COPY server.js ./
 
+# A sessão do WhatsApp Web fica em WA_SESSION_PATH. NÃO definimos um default
+# aqui de propósito: o volume é montado pelo Easypanel e mudar o caminho por
+# conta própria gravaria a sessão fora dele. O default do server.js é o caminho
+# histórico (<app>/.wwebjs_auth) — só defina a variável se o volume estiver
+# montado em outro lugar.
+
 EXPOSE 3002
 
 ENTRYPOINT ["dumb-init", "--"]
