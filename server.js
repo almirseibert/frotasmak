@@ -111,6 +111,8 @@ const http = require('http');
         { table: 'employees',              column: 'cidade_ibge',                      def: 'VARCHAR(7) DEFAULT NULL' },
         { table: 'employees',              column: 'equipamentos_aptos',               def: 'JSON DEFAULT NULL' },
         { table: 'employees',              column: 'is_lider_obra',                    def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        // NOTA: admin_holidays.regiao é migrada em routes/adminRoutes.js (initAdminTables),
+        // logo após o CREATE TABLE — aqui correria antes da tabela existir.
     ];
 
     for (const { table, column, def } of migrations) {
@@ -1351,6 +1353,202 @@ const http = require('http');
     }
 })();
 
+// ====================================================================
+// MIGRAÇÃO — Relato de Ocorrência e Manutenção de Frota (FRM-MAN-001)
+// ====================================================================
+// Digitalização da ficha de papel que o operador preenche apontando os
+// problemas do equipamento e a gravidade de cada um (A/B/C/D). O gestor de
+// frota digita a ficha, faz a triagem (quem executa cada serviço) e "fecha" o
+// relato informando o número da OS do sistema MC — daí o sistema gera as
+// ordens de serviço agrupadas por executor, tira o equipamento da obra e
+// monta o cronograma em dias úteis.
+//
+// Tabelas novas em vez de estender `manutencoes_programadas`: aquela é uma
+// linha = um defeito em texto livre, sem cabeçalho, gravidade, executor nem
+// prazo. As duas tabelas legadas seguem intactas e em uso.
+//
+// Sem FOREIGN KEYs, seguindo a convenção de manutencoes_programadas/lavagens
+// (integridade garantida na aplicação).
+// ====================================================================
+(async () => {
+    try {
+        // --- Cabeçalho: seções 1, 2, 5 e 6 da ficha ---
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relatos_ocorrencia (
+                id                    VARCHAR(36)   PRIMARY KEY,
+                numero                INT           NOT NULL,
+                relatorNome           VARCHAR(150)  NOT NULL,
+                relatorEmployeeId     VARCHAR(255)  DEFAULT NULL,
+                relatorFuncao         VARCHAR(120)  DEFAULT NULL,
+                filialCidade          VARCHAR(120)  DEFAULT NULL,
+                dataRelato            DATE          NOT NULL,
+                vehicleId             VARCHAR(255)  NOT NULL,
+                veiculoModelo         VARCHAR(150)  DEFAULT NULL,
+                veiculoPlaca          VARCHAR(20)   DEFAULT NULL,
+                veiculoFrota          VARCHAR(60)   DEFAULT NULL,
+                hodometro             DECIMAL(12,1) DEFAULT NULL,
+                horimetro             DECIMAL(12,1) DEFAULT NULL,
+                observacoesGerais     TEXT          DEFAULT NULL,
+                assinaturaColaborador VARCHAR(150)  DEFAULT NULL,
+                assinaturaSupervisor  VARCHAR(150)  DEFAULT NULL,
+                recebidoEm            DATE          DEFAULT NULL,
+                responsavelManutencao VARCHAR(150)  DEFAULT NULL,
+                providenciaAdotada    TEXT          DEFAULT NULL,
+                concluidoEm           DATE          DEFAULT NULL,
+                status                VARCHAR(30)   NOT NULL DEFAULT 'Rascunho',
+                osMc                  VARCHAR(60)   DEFAULT NULL,
+                osMcRegistradaEm      DATETIME      DEFAULT NULL,
+                osMcRegistradaPor     JSON          DEFAULT NULL,
+                obraOrigemId          VARCHAR(255)  DEFAULT NULL,
+                saidaObraFeita        TINYINT(1)    NOT NULL DEFAULT 0,
+                vehicleStatusAnterior VARCHAR(50)   DEFAULT NULL,
+                localManutencao       VARCHAR(150)  DEFAULT NULL,
+                dataConclusaoPrevista DATE          DEFAULT NULL,
+                fechadoEm             DATETIME      DEFAULT NULL,
+                fechadoPor            JSON          DEFAULT NULL,
+                anexos                JSON          DEFAULT NULL,
+                createdBy             JSON          DEFAULT NULL,
+                createdAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updatedAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_relato_numero (numero),
+                INDEX idx_relato_vehicle (vehicleId),
+                INDEX idx_relato_status  (status),
+                INDEX idx_relato_osmc    (osMc)
+            )
+        `);
+
+        // --- Itens: seção 4 (a grade) + triagem do gestor + cronograma ---
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relato_ocorrencia_itens (
+                id                    VARCHAR(36)   PRIMARY KEY,
+                relatoId              VARCHAR(36)   NOT NULL,
+                sequencia             INT           NOT NULL,
+                itemComponente        VARCHAR(180)  NOT NULL,
+                descricaoProblema     TEXT          NOT NULL,
+                gravidade             CHAR(1)       NOT NULL,
+                executorTipo          VARCHAR(20)   DEFAULT NULL,
+                executorPartnerId     VARCHAR(255)  DEFAULT NULL,
+                executorNome          VARCHAR(180)  DEFAULT NULL,
+                servicoDescricao      TEXT          DEFAULT NULL,
+                quantidade            DECIMAL(12,2) NOT NULL DEFAULT 1,
+                inventoryItemId       VARCHAR(36)   DEFAULT NULL,
+                valorEstimado         DECIMAL(12,2) DEFAULT NULL,
+                slaDiasUteis          INT           DEFAULT NULL,
+                ordemSequencia        INT           DEFAULT NULL,
+                dataInicioPrevista    DATE          DEFAULT NULL,
+                dataConclusaoPrevista DATE          DEFAULT NULL,
+                dataConclusaoReal     DATE          DEFAULT NULL,
+                status                VARCHAR(30)   NOT NULL DEFAULT 'Em Análise',
+                motivoCancelamento    TEXT          DEFAULT NULL,
+                observacoes           TEXT          DEFAULT NULL,
+                createdAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updatedAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_relato_seq (relatoId, sequencia),
+                INDEX idx_item_relato   (relatoId),
+                INDEX idx_item_status   (status),
+                INDEX idx_item_executor (executorPartnerId)
+            )
+        `);
+
+        // --- Ligação item ↔ ordem gerada ---
+        // Tabela de ligação (e não itens.orderId) porque um item pode virar
+        // compra de peça num fornecedor + mão de obra em outro, e porque o
+        // UNIQUE(itemId, orderId) é a rede de segurança contra geração dupla.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relato_item_ordens (
+                id        VARCHAR(36)  PRIMARY KEY,
+                relatoId  VARCHAR(36)  NOT NULL,
+                itemId    VARCHAR(36)  NOT NULL,
+                orderId   VARCHAR(255) NOT NULL,
+                papel     VARCHAR(20)  NOT NULL DEFAULT 'servico',
+                createdAt DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_item_order (itemId, orderId),
+                INDEX idx_rio_relato (relatoId),
+                INDEX idx_rio_order  (orderId)
+            )
+        `);
+
+        // --- Legenda de gravidade + prazo (SLA) por gravidade ---
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relato_sla_config (
+                gravidade        CHAR(1)      PRIMARY KEY,
+                label            VARCHAR(120) NOT NULL,
+                descricao        VARCHAR(255) DEFAULT NULL,
+                slaDiasUteis     INT          NOT NULL,
+                bloqueiaOperacao TINYINT(1)   NOT NULL DEFAULT 0,
+                ordemPrioridade  INT          NOT NULL DEFAULT 99,
+                updatedAt        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        // Seed com os textos exatos da legenda impressa na ficha. INSERT IGNORE:
+        // não sobrescreve prazos que o admin já tenha ajustado.
+        await db.query(`
+            INSERT IGNORE INTO relato_sla_config
+                (gravidade, label, descricao, slaDiasUteis, bloqueiaOperacao, ordemPrioridade)
+            VALUES
+                ('A', 'IMPOSSIBILITA TRABALHAR',  'Veículo parado / uso proibido. Risco iminente ou falha total.',  2, 1, 1),
+                ('B', 'PODE QUEBRAR EM BREVE',    'Uso restrito, reparo urgente. Falha provável a curto prazo.',    5, 0, 2),
+                ('C', 'PODE TRABALHAR ASSIM',     'Operação normal, agendar reparo. Não compromete a segurança.',  10, 0, 3),
+                ('D', 'EMBELEZAMENTO / ESTÉTICA', 'Sem urgência, corrigir quando possível. Aparência, acabamento.', 30, 0, 4)
+        `);
+
+        // Numeração do relato, no mesmo padrão de purchaseOrderCounter.
+        await db.query(
+            "INSERT IGNORE INTO counters (name, lastNumber) VALUES ('relatoOcorrenciaCounter', 0)"
+        );
+
+        // --- Colunas novas em orders e partners ---
+        // orders.tipo    → separa ordem de compra de ordem de serviço (antes a
+        //                  distinção só existia no texto livre do item).
+        // orders.relatoId/osMc/origem → vínculo com o relato e com a OS do MC.
+        //   osMc é cópia desnormalizada de relatos_ocorrencia.osMc (a fonte de
+        //   verdade) para a OrdersPage filtrar sem join e para sair no PDF.
+        // partners.is_oficina → oficina externa; continua tipo_parceiro
+        //   'fornecedor' de propósito, senão o SearchableSupplierSelect da
+        //   OrdersPage (que filtra === 'fornecedor') deixaria de listá-la.
+        // partners.is_interno → o partner-espelho da oficina própria da MAK.
+        const colunasRelato = [
+            { table: 'orders',   col: 'tipo',       def: "VARCHAR(20) DEFAULT 'compra'" },
+            { table: 'orders',   col: 'relatoId',   def: 'VARCHAR(36) DEFAULT NULL' },
+            { table: 'orders',   col: 'osMc',       def: 'VARCHAR(60) DEFAULT NULL' },
+            { table: 'orders',   col: 'origem',     def: "VARCHAR(30) DEFAULT 'manual'" },
+            { table: 'partners', col: 'is_oficina', def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+            { table: 'partners', col: 'is_interno', def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        ];
+        for (const { table, col, def } of colunasRelato) {
+            try {
+                await db.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') console.warn(`⚠️ [migration] ${table}.${col}:`, err.message);
+            }
+        }
+        for (const [nome, ddl] of [
+            ['idx_orders_relato', 'ALTER TABLE orders ADD INDEX idx_orders_relato (relatoId)'],
+            ['idx_orders_osmc',   'ALTER TABLE orders ADD INDEX idx_orders_osmc (osMc)'],
+        ]) {
+            try {
+                await db.query(ddl);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_KEYNAME') console.warn(`⚠️ [migration] ${nome}:`, err.message);
+            }
+        }
+        // Backfill idempotente das ordens que já existiam.
+        await db.query("UPDATE orders SET tipo = 'compra' WHERE tipo IS NULL");
+        await db.query("UPDATE orders SET origem = 'manual' WHERE origem IS NULL");
+
+        // Partner-espelho da oficina própria. Fica aqui dentro (e não num IIFE
+        // próprio) porque depende das colunas is_oficina/is_interno criadas
+        // logo acima — os IIFEs de migração rodam em paralelo, sem ordem
+        // garantida entre si.
+        const { ensureOficinaInternaPartner } = require('./utils/ensureOficinaInternaPartner');
+        await ensureOficinaInternaPartner(db);
+
+        console.log('✅ Migração relatos_ocorrencia (FRM-MAN-001) concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] relatos_ocorrencia:', e.message);
+    }
+})();
+
 const { Server } = require("socket.io");
 const multer = require('multer');
 
@@ -1525,6 +1723,8 @@ const comboioReportRoutes      = require('./routes/comboioReportRoutes');
 const terceirizadoPagamentoRoutes = require('./routes/terceirizadoPagamentoRoutes');
 const terceiroContratoRoutes      = require('./routes/terceiroContratoRoutes');
 const chatRoutes                  = require('./routes/chatRoutes');
+const holidayRoutes               = require('./routes/holidayRoutes');
+const relatoRoutes                = require('./routes/relatoRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -1668,6 +1868,10 @@ apiRouter.use('/comboio-report', comboioReportRoutes);
 apiRouter.use('/terceirizadoPagamentos', terceirizadoPagamentoRoutes);
 apiRouter.use('/terceiroContratos', terceiroContratoRoutes);
 apiRouter.use('/chat', chatRoutes);
+// Leitura de feriados sem exigir admin (o CRUD segue em /admin/holidays).
+apiRouter.use('/holidays', holidayRoutes);
+// Relato de Ocorrência e Manutenção de Frota (FRM-MAN-001).
+apiRouter.use('/relatos', relatoRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware

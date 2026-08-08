@@ -8,6 +8,7 @@ const whatsappService = require('../services/whatsappService');
 const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 const { EVENT_CATALOG, isKnownEvent } = require('../services/notificationEvents');
+const { listHolidays, invalidateHolidayCache, sanitizeRegiao } = require('../utils/businessDays');
 
 router.use(authMiddleware);
 
@@ -68,6 +69,43 @@ const initAdminTables = async () => {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
+        // Feriados: regiao '' = nacional; preenchida = municipal/estadual, válida
+        // só naquela região (mesmos valores de obras.regiao). Consumida por
+        // utils/businessDays.loadHolidaySet, que reexpõe '' como null na API.
+        //
+        // A coluna é NOT NULL DEFAULT '' de propósito: em índice UNIQUE o MySQL
+        // trata cada NULL como distinto, então com regiao NULL daria para
+        // cadastrar o mesmo feriado nacional várias vezes — e feriado duplicado
+        // quebraria a contagem de dias úteis, que é justamente o que a chave
+        // uk_holiday_date existe para impedir.
+        //
+        // MySQL não aceita `ADD COLUMN IF NOT EXISTS` (isso é MariaDB) — a forma
+        // idempotente aqui é tentar e engolir ER_DUP_FIELDNAME.
+        try {
+            await db.query("ALTER TABLE admin_holidays ADD COLUMN regiao VARCHAR(30) NOT NULL DEFAULT ''");
+        } catch (e) {
+            if (e.code !== 'ER_DUP_FIELDNAME') console.warn('⚠️ [migration] admin_holidays.regiao:', e.message);
+        }
+        try {
+            // Dedup antes de normalizar: o COALESCE cobre linhas gravadas por uma
+            // versão anterior desta migração, quando a coluna era nullable.
+            await db.query(`
+                DELETE h FROM admin_holidays h
+                JOIN admin_holidays keep
+                  ON keep.date = h.date
+                 AND COALESCE(keep.regiao, '') = COALESCE(h.regiao, '')
+                 AND keep.id < h.id
+            `);
+            await db.query("UPDATE admin_holidays SET regiao = '' WHERE regiao IS NULL");
+            await db.query("ALTER TABLE admin_holidays MODIFY COLUMN regiao VARCHAR(30) NOT NULL DEFAULT ''");
+        } catch (e) {
+            console.warn('⚠️ [migration] admin_holidays.regiao NOT NULL:', e.message);
+        }
+        try {
+            await db.query('ALTER TABLE admin_holidays ADD UNIQUE KEY uk_holiday_date (date, regiao)');
+        } catch (e) {
+            if (e.code !== 'ER_DUP_KEYNAME') console.warn('⚠️ [migration] uk_holiday_date:', e.message);
+        }
         await db.query(`
             CREATE TABLE IF NOT EXISTS admin_scheduled_reports (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -747,26 +785,28 @@ router.put('/approval-workflows', adminOnly, async (req, res) => {
 
 router.get('/holidays', adminOnly, async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT * FROM admin_holidays ORDER BY date ASC');
-        res.json(rows.map(h => ({
-            ...h,
-            date: h.date instanceof Date ? h.date.toISOString().slice(0, 10) : h.date,
-        })));
+        res.json(await listHolidays(db));
     } catch (error) {
         res.status(500).json({ error: 'Erro ao listar feriados.' });
     }
 });
 
 router.post('/holidays', adminOnly, async (req, res) => {
-    const { name, date } = req.body;
+    const { name, date, regiao } = req.body;
     if (!name || !date) return res.status(400).json({ error: 'Nome e data são obrigatórios.' });
+
+    const safeRegiao = sanitizeRegiao(regiao);
     try {
         const [result] = await db.query(
-            'INSERT INTO admin_holidays (name, date) VALUES (?, ?)',
-            [name, date]
+            'INSERT INTO admin_holidays (name, date, regiao) VALUES (?, ?, ?)',
+            [name, date, safeRegiao]
         );
-        res.status(201).json({ id: result.insertId, name, date });
+        invalidateHolidayCache();
+        res.status(201).json({ id: result.insertId, name, date, regiao: safeRegiao || null });
     } catch (error) {
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'Já existe feriado cadastrado nesta data para esta região.' });
+        }
         res.status(500).json({ error: 'Erro ao adicionar feriado.' });
     }
 });
@@ -775,6 +815,7 @@ router.delete('/holidays/:id', adminOnly, async (req, res) => {
     const { id } = req.params;
     try {
         await db.query('DELETE FROM admin_holidays WHERE id = ?', [id]);
+        invalidateHolidayCache();
         res.json({ message: 'Feriado removido.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao remover feriado.' });

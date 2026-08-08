@@ -13,6 +13,9 @@ const path = require('path');
 const whatsappService = require('../services/whatsappService');
 const { sendEmail } = require('../services/emailService');
 const { dispatchAsync } = require('../services/notificationDispatcher');
+// Ordens vindas de um relato de ocorrência propagam o estado de volta para o
+// item e o relato (e liberam o equipamento quando tudo conclui).
+const { syncRelatoFromOrderAsync } = require('../services/relatoStatusService');
 
 // Resolve a URL de upload (ex.: https://host/uploads/arquivo.pdf) para o caminho
 // local em public/uploads e devolve { buffer, filename } — ou null se falhar.
@@ -355,6 +358,16 @@ const updateOrder = async (req, res) => {
             anexos:   safeStringifyArray(data.anexos),
         };
 
+        // O vínculo com o relato e com a OS do MC não é editável pela tela
+        // genérica de ordem: o modal da OrdersPage não conhece esses campos e,
+        // ao salvar, apagaria a ligação. Preserva sempre o valor original.
+        if (originalOrder.relatoId) {
+            rawUpdateData.relatoId = originalOrder.relatoId;
+            rawUpdateData.osMc     = originalOrder.osMc;
+            rawUpdateData.origem   = originalOrder.origem;
+            rawUpdateData.tipo     = originalOrder.tipo;
+        }
+
         await connection.query('UPDATE orders SET ? WHERE id = ?', [rawUpdateData, id]);
 
         const originalIsClosed = ['Concluída', 'Ativa'].includes(originalOrder.status);
@@ -392,6 +405,10 @@ const updateOrder = async (req, res) => {
         await connection.commit();
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem atualizada com sucesso.' });
+
+        // Pós-commit: se a ordem veio de um relato e agora está concluída, o
+        // item e possivelmente o relato inteiro fecham junto.
+        if (originalOrder.relatoId) syncRelatoFromOrderAsync(id, req);
 
     } catch (error) {
         await connection.rollback();
@@ -439,6 +456,8 @@ const cancelOrder = async (req, res) => {
         await connection.commit();
         if (req.io) req.io.emit('server:sync', { targets: ['orders', 'expenses'] });
         res.status(200).json({ message: 'Ordem cancelada com sucesso.' });
+
+        if (originalOrder?.relatoId) syncRelatoFromOrderAsync(id, req);
 
     } catch (error) {
         await connection.rollback();

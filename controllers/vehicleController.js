@@ -4,6 +4,11 @@ const fs = require('fs');
 const path = require('path');
 const { ensureComboioPartner, deactivateComboioPartner } = require('../utils/ensureComboioPartner');
 const { openPeriod: openComboioPeriod, closeActivePeriod: closeComboioPeriod } = require('../utils/comboioPeriodo');
+// Transições de estado do veículo: a lógica vive no service para poder rodar
+// dentro da transação de outro fluxo (fechamento de relato de ocorrência).
+const {
+    deallocateFromObraTx, startMaintenanceTx, endMaintenanceTx,
+} = require('../services/vehicleStateService');
 
 // --- FUNÇÕES AUXILIARES ---
 
@@ -442,125 +447,16 @@ const allocateToObra = async (req, res) => {
     }
 };
 
+// Wrapper fino sobre vehicleStateService.deallocateFromObraTx — a lógica vive
+// lá para que o fechamento de relato de ocorrência possa reusá-la dentro da
+// própria transação (ver services/vehicleStateService.js).
 const deallocateFromObra = async (req, res) => {
-    const { id } = req.params; 
-    const { dataSaida, readingType, readingValue, location, shouldFinalizeObra, dataFimObra, observacoes, obraId } = req.body;
-    
+    const { id } = req.params;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        const exitTimestamp = new Date(dataSaida || new Date());
-        const readingVal = parseFloat(readingValue) || 0;
-
-        let targetObraId = obraId ? String(obraId) : null;
-        if (!targetObraId) {
-            const [vRows] = await connection.execute('SELECT obraAtualId FROM vehicles WHERE id = ?', [id]);
-            if (vRows.length > 0) targetObraId = vRows[0].obraAtualId;
-        }
-
-        const [historyRows] = await connection.execute(
-            'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL',
-            [id, 'obra']
-        );
-        
-        let employeeIdToRelease = null;
-
-        if (historyRows && historyRows.length > 0) {
-            const activeHistory = historyRows[0];
-            const historyDetails = parseJsonSafe(activeHistory.details, 'history.details') || {};
-            employeeIdToRelease = historyDetails.employeeId;
-
-            if (!targetObraId && historyDetails.obraId) targetObraId = String(historyDetails.obraId);
-
-            const newDetails = {
-                ...historyDetails,
-                [`${readingType}Saida`]: readingVal,
-                observacoesSaida: observacoes
-            };
-            
-            await connection.execute(
-                'UPDATE vehicle_history SET endDate = ?, details = ? WHERE id = ?',
-                [exitTimestamp, JSON.stringify(newDetails), activeHistory.id]
-            );
-        }
-
-        const vehicleUpdateData = {
-            obraAtualId: null, 
-            status: 'Disponível', 
-            localizacaoAtual: location || 'Pátio', 
-            alocadoEm: null,
-            [readingType]: readingVal, 
-        };
-        
-        const updateFields = Object.keys(vehicleUpdateData);
-        const updateValues = Object.values(vehicleUpdateData);
-        const setClause = updateFields.map(field => `${field} = ?`).join(', ');
-        
-        await connection.execute(
-            `UPDATE vehicles SET ${setClause} WHERE id = ?`,
-            [...updateValues, id]
-        );
-
-        if (employeeIdToRelease) {
-             try {
-                await connection.execute('UPDATE employees SET alocadoEm = NULL WHERE id = ?', [employeeIdToRelease]);
-             } catch (e) { console.warn("Erro ao liberar funcionário", e.message); }
-        }
-        
-        if (targetObraId) {
-            const obraHistoryUpdateFields = ['dataSaida = ?'];
-            const obraHistoryUpdateValues = [exitTimestamp];
-
-            if (readingType === 'odometro') {
-                obraHistoryUpdateFields.push('odometroSaida = ?');
-                obraHistoryUpdateValues.push(readingVal);
-            } else {
-                obraHistoryUpdateFields.push('horimetroSaida = ?');
-                obraHistoryUpdateValues.push(readingVal);
-            }
-
-            if (observacoes) {
-                obraHistoryUpdateFields.push('observacoes = CONCAT(COALESCE(observacoes, ""), " | Saída: ", ?)');
-                obraHistoryUpdateValues.push(observacoes);
-            }
-
-            obraHistoryUpdateValues.push(id); 
-            obraHistoryUpdateValues.push(targetObraId);
-
-            await connection.execute(
-                `UPDATE obras_historico_veiculos 
-                 SET ${obraHistoryUpdateFields.join(', ')} 
-                 WHERE veiculoId = ? AND obraId = ? AND dataSaida IS NULL`,
-                obraHistoryUpdateValues
-            );
-        }
-        
-        if (shouldFinalizeObra && targetObraId) {
-            const obraUpdate = { 
-                status: 'finalizada', 
-                dataFim: new Date(dataFimObra || new Date())
-            };
-            const obraUpdateFields = Object.keys(obraUpdate);
-            const obraUpdateValues = Object.values(obraUpdate);
-            const obraSetClause = obraUpdateFields.map(field => `${field} = ?`).join(', ');
-
-            await connection.execute(
-                `UPDATE obras SET ${obraSetClause} WHERE id = ?`,
-                [...obraUpdateValues, targetObraId]
-            );
-        }
-
-        // Fase 2.6 — Se for comboio, fecha o período de obra ativo
-        try {
-            const [[vRow]] = await connection.execute('SELECT isComboioVehicle FROM vehicles WHERE id = ?', [id]);
-            if (vRow && (vRow.isComboioVehicle == 1 || vRow.isComboioVehicle === true)) {
-                await closeComboioPeriod(connection, id, exitTimestamp);
-            }
-        } catch (e) {
-            console.warn('[comboioPeriodo closePeriod deallocateFromObra]', e.message);
-        }
-
+        await deallocateFromObraTx(connection, id, req.body);
         await connection.commit();
         req.io.emit('server:sync', { targets: ['vehicles', 'obras'] });
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
@@ -1071,52 +967,12 @@ const unassignFromOperational = async (req, res) => {
 };
 
 const startMaintenance = async (req, res) => {
-    const { id } = req.params; 
-    const { status, location } = req.body;
+    const { id } = req.params;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        const now = new Date();
-        
-        await connection.execute('UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND endDate IS NULL', [now, id]);
-
-        const newHistoryEntry = {
-            vehicleId: id,
-            historyType: 'manutencao',
-            startDate: now,
-            endDate: null,
-            details: JSON.stringify({ status: status, location: location })
-        };
-        
-        const historyFields = Object.keys(newHistoryEntry);
-        const historyValues = Object.values(newHistoryEntry);
-        const historyPlaceholders = historyFields.map(() => '?').join(', ');
-        
-        await connection.execute(
-            `INSERT INTO vehicle_history (${historyFields.join(', ')}) VALUES (${historyPlaceholders})`,
-            historyValues
-        );
-        
-        const maintenanceLocation = {
-            type: location === 'Pátio MAK Lajeado' || location === 'Pátio MAK Santa Maria' ? 'Pátio' : 'Outros',
-            details: location,
-        };
-
-        const vehicleUpdateData = {
-            status: status,
-            maintenanceLocation: JSON.stringify(maintenanceLocation),
-            obraAtualId: null,
-            operationalAssignment: null,
-            alocadoEm: JSON.stringify({ type: 'manutencao', location: location, status: status }),
-        };
-        
-        const updateFields = Object.keys(vehicleUpdateData);
-        const updateValues = Object.values(vehicleUpdateData);
-        const setClause = updateFields.map(field => `${field} = ?`).join(', ');
-
-        await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
-
+        await startMaintenanceTx(connection, id, req.body);
         await connection.commit();
         req.io.emit('server:sync', { targets: ['vehicles'] });
         res.status(200).json({ message: 'Status de manutenção atualizado.' });
@@ -1130,28 +986,12 @@ const startMaintenance = async (req, res) => {
 };
 
 const endMaintenance = async (req, res) => {
-    const { id } = req.params; 
-    const { location } = req.body;
+    const { id } = req.params;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        const now = new Date();
-        await connection.execute('UPDATE vehicle_history SET endDate = ? WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL', [now, id, 'manutencao']);
-
-        const vehicleUpdateData = {
-            status: 'Disponível',
-            maintenanceLocation: null,
-            localizacaoAtual: location,
-            alocadoEm: null,
-        };
-        
-        const updateFields = Object.keys(vehicleUpdateData);
-        const updateValues = Object.values(vehicleUpdateData);
-        const setClause = updateFields.map(field => `${field} = ?`).join(', ');
-
-        await connection.execute(`UPDATE vehicles SET ${setClause} WHERE id = ?`, [...updateValues, id]);
-
+        await endMaintenanceTx(connection, id, req.body);
         await connection.commit();
         req.io.emit('server:sync', { targets: ['vehicles'] });
         res.status(200).json({ message: 'Manutenção finalizada.' });

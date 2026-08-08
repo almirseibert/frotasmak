@@ -1,6 +1,7 @@
 // controllers/partnerController.js
 const db = require('../database');
-const { parseJsonSafe } = require('../utils/parseJsonSafe'); 
+const { parseJsonSafe } = require('../utils/parseJsonSafe');
+const { OFICINA_INTERNA_PARTNER_ID } = require('../utils/ensureOficinaInternaPartner');
 
 // --- Função Auxiliar para Conversão de JSON ---
 const parsePartnerJsonFields = (partner) => {
@@ -105,7 +106,11 @@ const createPartner = async (req, res) => {
         'status_operacional',
         'tipo_parceiro',
         'envia_por_whatsapp',
-        'envia_por_email'
+        'envia_por_email',
+        // Oficina: fornecedor que executa serviço de manutenção. Continua com
+        // tipo_parceiro='fornecedor' — mudar o tipo o tiraria do seletor de
+        // fornecedor da Ordem de Compra/Serviço, que filtra por esse valor.
+        'is_oficina'
     ];
 
     const data = req.body;
@@ -120,6 +125,7 @@ const createPartner = async (req, res) => {
 
     // Sanitiza tipo_parceiro: garante valor válido no ENUM ('posto', 'fornecedor', 'comboio')
     partnerData.tipo_parceiro = sanitizeTipoParceiro(partnerData.tipo_parceiro, 'posto');
+    if ('is_oficina' in partnerData) partnerData.is_oficina = partnerData.is_oficina ? 1 : 0;
     if ('tipoPessoa' in partnerData) partnerData.tipoPessoa = sanitizeTipoPessoa(partnerData.tipoPessoa);
     if ('cnpj' in partnerData && partnerData.cnpj) partnerData.cnpj = normalizeDocumento(partnerData.cnpj);
     if ('representanteLegalCpf' in partnerData && partnerData.representanteLegalCpf) partnerData.representanteLegalCpf = normalizeDocumento(partnerData.representanteLegalCpf);
@@ -167,6 +173,16 @@ const createPartner = async (req, res) => {
 const updatePartner = async (req, res) => {
     const { id } = req.params;
 
+    // A oficina própria é um partner-espelho criado pelo sistema (ver
+    // utils/ensureOficinaInternaPartner). Se alguém trocasse seu tipo ou
+    // razão social pela tela, a geração de ordens do relato quebraria — e o
+    // boot seguinte sobrescreveria a edição de qualquer forma.
+    if (id === OFICINA_INTERNA_PARTNER_ID) {
+        return res.status(409).json({
+            error: 'A oficina própria da MAK é gerenciada pelo sistema e não pode ser editada aqui.',
+        });
+    }
+
     const allowedPartnerFields = [
         'razaoSocial',
         'nomeFantasia',
@@ -186,7 +202,11 @@ const updatePartner = async (req, res) => {
         'status_operacional',
         'tipo_parceiro',
         'envia_por_whatsapp',
-        'envia_por_email'
+        'envia_por_email',
+        // Oficina: fornecedor que executa serviço de manutenção. Continua com
+        // tipo_parceiro='fornecedor' — mudar o tipo o tiraria do seletor de
+        // fornecedor da Ordem de Compra/Serviço, que filtra por esse valor.
+        'is_oficina'
     ];
 
     const data = req.body;
@@ -202,6 +222,7 @@ const updatePartner = async (req, res) => {
     if ('tipo_parceiro' in partnerData) {
         partnerData.tipo_parceiro = sanitizeTipoParceiro(partnerData.tipo_parceiro, 'posto');
     }
+    if ('is_oficina' in partnerData) partnerData.is_oficina = partnerData.is_oficina ? 1 : 0;
     if ('tipoPessoa' in partnerData) partnerData.tipoPessoa = sanitizeTipoPessoa(partnerData.tipoPessoa);
     if ('cnpj' in partnerData && partnerData.cnpj) partnerData.cnpj = normalizeDocumento(partnerData.cnpj);
     if ('representanteLegalCpf' in partnerData && partnerData.representanteLegalCpf) partnerData.representanteLegalCpf = normalizeDocumento(partnerData.representanteLegalCpf);
@@ -284,6 +305,11 @@ const updatePartnerStatus = async (req, res) => {
 // --- DELETE: Deletar um parceiro ---
 const deletePartner = async (req, res) => {
     try {
+        if (req.params.id === OFICINA_INTERNA_PARTNER_ID) {
+            return res.status(409).json({
+                error: 'A oficina própria da MAK é gerenciada pelo sistema e não pode ser excluída.',
+            });
+        }
         await db.execute('DELETE FROM partners WHERE id = ?', [req.params.id]);
         req.io.emit('server:sync', { targets: ['partners'] });
         res.status(204).end();
