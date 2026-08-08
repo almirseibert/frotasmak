@@ -52,9 +52,11 @@ const whatsappService = {
         }
     },
 
-    async reiniciar() {
+    // hard = true apaga a sessão (exige novo QR). O padrão preserva a sessão e
+    // só reinicia o Chromium — resolve a maioria das travas sem repareamento.
+    async reiniciar(hard = false) {
         if (!WA_URL || !WA_KEY) throw new Error('Serviço WhatsApp não configurado.');
-        const { data } = await axios.post(`${WA_URL}/restart`, {}, { headers: waHeaders() });
+        const { data } = await axios.post(`${WA_URL}/restart`, { hard: !!hard }, { headers: waHeaders() });
         return data;
     },
 

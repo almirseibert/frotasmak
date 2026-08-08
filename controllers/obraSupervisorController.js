@@ -137,6 +137,64 @@ exports.getDashboardData = async (req, res) => {
     }
 };
 
+// Visão contratual global: valor de contrato por obra, somado tanto para obras
+// ativas quanto finalizadas (o dashboard/financial-history só enxergam 'ativa').
+// Usado pela aba "Visão contratual" de Desempenho do Negócio para responder
+// "quanto valia o contrato das obras que finalizamos neste ano".
+exports.getContractsOverview = async (req, res) => {
+    try {
+        const year = parseInt(req.query.year, 10) || new Date().getFullYear();
+
+        const [allObras] = await db.query(
+            "SELECT * FROM obras WHERE (tipo_registro IS NULL OR tipo_registro != 'centro_custo') ORDER BY nome ASC"
+        );
+
+        let contracts = [];
+        try { const [r] = await db.query('SELECT * FROM obra_contracts'); contracts = r || []; } catch (e) {}
+        const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
+
+        const obrasComValor = allObras
+            .map(obra => {
+                const contract = contractMap[obra.id] || {};
+                if (contract.is_hidden === 1) return null;
+                const valorTotalContrato = parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
+                return {
+                    id: String(obra.id),
+                    nome: obra.nome,
+                    status: obra.status,
+                    regiao: obra.regiao,
+                    responsavel: contract.responsavel_nome || obra.responsavel || 'A Definir',
+                    dataFim: obra.dataFim,
+                    valorTotalContrato,
+                };
+            })
+            .filter(Boolean);
+
+        const ativas = obrasComValor.filter(o => o.status === 'ativa');
+        const finalizadas = obrasComValor.filter(o => o.status === 'finalizada');
+        const finalizadasNoAno = finalizadas.filter(o => o.dataFim && new Date(o.dataFim).getFullYear() === year);
+
+        const sumValor = (arr) => arr.reduce((acc, o) => acc + o.valorTotalContrato, 0);
+
+        res.json({
+            ano: year,
+            resumo: {
+                valorContratadoAtivas: sumValor(ativas),
+                qtdAtivas: ativas.length,
+                valorContratadoFinalizadasAno: sumValor(finalizadasNoAno),
+                qtdFinalizadasAno: finalizadasNoAno.length,
+                valorContratadoTotalHistorico: sumValor(obrasComValor),
+                qtdTotalHistorico: obrasComValor.length,
+            },
+            obrasFinalizadasNoAno: finalizadasNoAno.sort((a, b) => b.valorTotalContrato - a.valorTotalContrato),
+            obrasAtivas: ativas.sort((a, b) => b.valorTotalContrato - a.valorTotalContrato),
+        });
+    } catch (error) {
+        console.error('Erro Contracts Overview:', error);
+        res.status(500).json({ message: 'Erro interno.', debug: error.message });
+    }
+};
+
 exports.getObraDetails = async (req, res) => {
     const { id } = req.params;
     try {
@@ -558,7 +616,10 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     // da frota alocada HOJE (scopedVehicles), o aproveitamento PODE ultrapassar
     // 100% quando passou mais máquina do que a frota atual comporta — e isso é
     // esperado, não é bug.
-    const produtivoIds = allVehicles.map(v => v.id);
+    // Sucata NÃO entra no numerador — alinha com scopedVehicles (que remove sucata)
+    // e com o drill-down por dia. Antes o total diário incluía horas de sucata e
+    // ficava acima da soma das máquinas.
+    const produtivoIds = allVehicles.filter(v => v.estado_calculado !== 'sucata').map(v => v.id);
     const prodFilter = () => produtivoIds.length
         ? { frag: ` AND l.vehicleId IN (${produtivoIds.map(() => '?').join(',')})`, params: [...produtivoIds] }
         : { frag: ' AND 1=0', params: [] }; // sem máquina produtiva → zera numeradores
@@ -846,7 +907,20 @@ exports.getAnalyticsDayDetail = async (req, res) => {
             LEFT JOIN obras o ON o.id = l.obraId
             WHERE DATE(l.date) = ?${condObra}
         `, params);
-        const logsMap = new Map(logs.map(r => [String(r.vehicleId), { horas: parseFloat(r.totalHours) || 0, obraNome: r.obraNome }]));
+        // ACUMULA por veículo — um veículo pode ter mais de um apontamento no
+        // mesmo dia (duas obras). Antes o Map sobrescrevia e o total subcontava.
+        const logsMap = new Map();
+        logs.forEach(r => {
+            const key = String(r.vehicleId);
+            const horas = parseFloat(r.totalHours) || 0;
+            const cur = logsMap.get(key);
+            if (cur) {
+                cur.horas += horas;
+                if (r.obraNome && !cur.obras.includes(r.obraNome)) cur.obras.push(r.obraNome);
+            } else {
+                logsMap.set(key, { horas, obras: r.obraNome ? [r.obraNome] : [] });
+            }
+        });
 
         const isBusiness = _isBusinessDay(date);
 
@@ -862,7 +936,7 @@ exports.getAnalyticsDayDetail = async (req, res) => {
                 registroInterno: v.registroInterno,
                 modelo: v.modelo,
                 tipo: v.tipo,
-                obraNome: log?.obraNome || null,
+                obraNome: log && log.obras.length ? log.obras.join(' / ') : null,
                 horas: log?.horas || 0,
                 status,
             };
@@ -885,6 +959,288 @@ exports.getAnalyticsDayDetail = async (req, res) => {
         });
     } catch (error) {
         console.error("Erro no drill-down de dia:", error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// ==================================================================================
+// HISTÓRICO FINANCEIRO (série mensal: receita produzida × custo × margem)
+// ==================================================================================
+/**
+ * Série mensal de faturamento/custo/margem do portfólio (ou de uma obra).
+ *
+ * Definições (mesma convenção dos cards do dashboard):
+ *   - Receita produzida = valor produzido ESTIMADO, não faturamento real emitido.
+ *     Por obra: valorProduzido = min(horasExec / horasContratadas, 1) × valorContrato.
+ *     O teto de 100% é respeitado de forma ACUMULADA — a receita do mês é o delta
+ *     do produzido acumulado. Depois que a obra bate 100%, meses seguintes produzem
+ *     R$ 0 de receita contratual (horas em zona de aditivo não viram receita aqui).
+ *   - Custo = SUM(expenses.amount) no mês. `createdAt` é a data de LANÇAMENTO da
+ *     despesa (não necessariamente a de incorrência) — é a única data confiável da
+ *     tabela. Custo pode "estourar" a receita num mês em que a obra já fechou 100%
+ *     mas ainda gera despesa: margem negativa nesse mês é sinal real, não bug.
+ *   - Obras ocultas (is_hidden) e centros de custo ficam de fora.
+ */
+exports.getFinancialHistory = async (req, res) => {
+    try {
+        let { startDate, endDate, obraId } = req.query;
+
+        // Janela padrão: últimos 12 meses (mês corrente + 11 anteriores).
+        if (!endDate) endDate = todayBRT();
+        if (!startDate) {
+            let ey = parseInt(endDate.slice(0, 4), 10);
+            let sm = parseInt(endDate.slice(5, 7), 10) - 11;
+            let sy = ey;
+            while (sm <= 0) { sm += 12; sy--; }
+            startDate = `${sy}-${String(sm).padStart(2, '0')}-01`;
+        }
+        const startYm = startDate.slice(0, 7);
+        const endYm = endDate.slice(0, 7);
+
+        const isObra = obraId && obraId !== 'all' && obraId !== 'geral';
+
+        // 1) Obras + contrato (valor e horas contratadas, com fallback legado)
+        const [obrasRows] = await db.query(
+            `SELECT o.id, o.nome, o.regiao, o.valorTotalContrato, o.horasContratadasPorTipo,
+                    c.total_value, c.total_hours_contracted, c.is_hidden
+               FROM obras o
+               LEFT JOIN obra_contracts c ON c.obra_id = o.id
+              WHERE o.status = 'ativa'
+                AND (o.tipo_registro IS NULL OR o.tipo_registro != 'centro_custo')
+                ${isObra ? 'AND o.id = ?' : ''}`,
+            isObra ? [obraId] : []
+        );
+
+        const obraMap = {};
+        obrasRows.forEach(o => {
+            if (o.is_hidden === 1) return;
+            const valorTotal = parseFloat(o.total_value) || parseFloat(o.valorTotalContrato) || 0;
+            const horasContr = parseFloat(o.total_hours_contracted) || sumLegacyHours(o.horasContratadasPorTipo);
+            const regiao = (o.regiao && String(o.regiao).trim()) || 'Sem região';
+            obraMap[String(o.id)] = { nome: o.nome, valorTotal, horasContr, regiao };
+        });
+        const obraIds = Object.keys(obraMap);
+
+        // Escopo de custo: MESMO universo de obras da receita (ativas, não ocultas,
+        // não centro de custo). Sem isso, a margem misturaria custo de obras que não
+        // geram receita neste painel.
+        const custoScope = isObra
+            ? { cond: ' AND obraId = ?', params: [obraId] }
+            : (obraIds.length
+                ? { cond: ` AND obraId IN (${obraIds.map(() => '?').join(',')})`, params: [...obraIds] }
+                : { cond: ' AND 1=0', params: [] });
+
+        // 2) Horas mensais por obra — histórico COMPLETO (para respeitar o teto de 100%)
+        const horasPorObra = {};
+        if (obraIds.length) {
+            const ph = obraIds.map(() => '?').join(',');
+            const [horasRows] = await db.query(
+                `SELECT obraId, DATE_FORMAT(date, '%Y-%m') AS ym, SUM(totalHours) AS horas
+                   FROM daily_work_logs
+                  WHERE obraId IN (${ph})
+                  GROUP BY obraId, ym`,
+                obraIds
+            );
+            horasRows.forEach(r => {
+                (horasPorObra[String(r.obraId)] = horasPorObra[String(r.obraId)] || [])
+                    .push({ ym: r.ym, horas: parseFloat(r.horas) || 0 });
+            });
+        }
+
+        // Produzido acumulado-capado numa janela [sYm,eYm] → por mês, por obra e por região.
+        const computeProduced = (sYm, eYm) => {
+            const porYm = {};
+            const horasYm = {};
+            const porObra = {};
+            const receitaRegiao = {};
+            for (const oid of obraIds) {
+                const { valorTotal, horasContr, regiao } = obraMap[oid];
+                const arr = (horasPorObra[oid] || []).slice().sort((a, b) => a.ym.localeCompare(b.ym));
+                let cumH = 0, cumProdPrev = 0, obraReceita = 0, obraHoras = 0;
+                for (const { ym, horas } of arr) {
+                    cumH += horas;
+                    const cumProd = horasContr > 0 ? Math.min(cumH / horasContr, 1) * valorTotal : 0;
+                    const deltaProd = cumProd - cumProdPrev;
+                    cumProdPrev = cumProd;
+                    if (ym >= sYm && ym <= eYm) {
+                        porYm[ym] = (porYm[ym] || 0) + deltaProd;
+                        horasYm[ym] = (horasYm[ym] || 0) + horas;
+                        obraReceita += deltaProd;
+                        obraHoras += horas;
+                    }
+                }
+                porObra[oid] = { nome: obraMap[oid].nome, receita: obraReceita, horas: obraHoras };
+                receitaRegiao[regiao] = (receitaRegiao[regiao] || 0) + obraReceita;
+            }
+            return { porYm, horasYm, porObra, receitaRegiao };
+        };
+
+        // Custo total de uma janela de datas (mesmo escopo de obras da receita).
+        const custoTotalWindow = async (sDate, eDate) => {
+            const [r] = await db.query(
+                `SELECT SUM(amount) AS total FROM expenses
+                  WHERE createdAt BETWEEN ? AND ?${custoScope.cond}`,
+                [sDate + ' 00:00:00', eDate + ' 23:59:59', ...custoScope.params]
+            );
+            return Math.round(parseFloat(r[0]?.total) || 0);
+        };
+
+        // 3) Janela atual (produzido por mês + horas por mês)
+        const cur = computeProduced(startYm, endYm);
+        const produzidoPorYm = cur.porYm;
+        const horasPorYm = cur.horasYm;
+
+        // 4) Custo mensal (expenses.createdAt) dentro da janela
+        const custoPorYm = {};
+        {
+            const [custoRows] = await db.query(
+                `SELECT DATE_FORMAT(createdAt, '%Y-%m') AS ym, SUM(amount) AS custo
+                   FROM expenses
+                  WHERE createdAt BETWEEN ? AND ?${custoScope.cond}
+                  GROUP BY ym`,
+                [startDate + ' 00:00:00', endDate + ' 23:59:59', ...custoScope.params]
+            );
+            custoRows.forEach(r => { custoPorYm[r.ym] = parseFloat(r.custo) || 0; });
+        }
+
+        // 5) Série contígua de meses no range
+        const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+        const series = [];
+        let y = parseInt(startYm.slice(0, 4), 10);
+        let m = parseInt(startYm.slice(5, 7), 10);
+        const ey = parseInt(endYm.slice(0, 4), 10);
+        const em = parseInt(endYm.slice(5, 7), 10);
+        while (y < ey || (y === ey && m <= em)) {
+            const ym = `${y}-${String(m).padStart(2, '0')}`;
+            const receita = Math.round(produzidoPorYm[ym] || 0);
+            const custo = Math.round(custoPorYm[ym] || 0);
+            const margem = receita - custo;
+            series.push({
+                ym,
+                label: `${MESES[m - 1]}/${String(y).slice(2)}`,
+                receita_produzida: receita,
+                custo,
+                margem,
+                margem_pct: receita > 0 ? Math.round((margem / receita) * 1000) / 10 : null,
+                horas: Math.round((horasPorYm[ym] || 0) * 10) / 10,
+            });
+            m++;
+            if (m > 12) { m = 1; y++; }
+        }
+
+        const totais = series.reduce((a, s) => ({
+            receita_produzida: a.receita_produzida + s.receita_produzida,
+            custo: a.custo + s.custo,
+            horas: a.horas + s.horas,
+        }), { receita_produzida: 0, custo: 0, horas: 0 });
+        totais.margem = totais.receita_produzida - totais.custo;
+        totais.margem_pct = totais.receita_produzida > 0
+            ? Math.round((totais.margem / totais.receita_produzida) * 1000) / 10
+            : null;
+
+        // 6) Comparação com período anterior de MESMO tamanho (em meses)
+        const N = series.length;
+        let peY = parseInt(startYm.slice(0, 4), 10);
+        let peM = parseInt(startYm.slice(5, 7), 10) - 1;
+        if (peM < 1) { peM = 12; peY--; }
+        const prevEndYm = `${peY}-${String(peM).padStart(2, '0')}`;
+        let psY = peY, psM = peM - (N - 1);
+        while (psM < 1) { psM += 12; psY--; }
+        const prevStartYm = `${psY}-${String(psM).padStart(2, '0')}`;
+
+        const prev = computeProduced(prevStartYm, prevEndYm);
+        const prevReceita = Math.round(Object.values(prev.porYm).reduce((a, b) => a + b, 0));
+        const prevHoras = Math.round(Object.values(prev.horasYm).reduce((a, b) => a + b, 0) * 10) / 10;
+        const prevStartDate = `${prevStartYm}-01`;
+        const prevEndDate = `${prevEndYm}-${String(new Date(peY, peM, 0).getDate()).padStart(2, '0')}`;
+        const prevCusto = await custoTotalWindow(prevStartDate, prevEndDate);
+        const prevMargem = prevReceita - prevCusto;
+        const anterior = {
+            range: { startYm: prevStartYm, endYm: prevEndYm },
+            receita_produzida: prevReceita,
+            custo: prevCusto,
+            margem: prevMargem,
+            margem_pct: prevReceita > 0 ? Math.round((prevMargem / prevReceita) * 1000) / 10 : null,
+            horas: prevHoras,
+        };
+        const pctVar = (c, p) => (p ? Math.round(((c - p) / Math.abs(p)) * 1000) / 10 : null);
+        const comparativo = {
+            anterior,
+            delta: {
+                receita_produzida: totais.receita_produzida - anterior.receita_produzida,
+                receita_pct: pctVar(totais.receita_produzida, anterior.receita_produzida),
+                custo: totais.custo - anterior.custo,
+                custo_pct: pctVar(totais.custo, anterior.custo),
+                margem: totais.margem - anterior.margem,
+                margem_pct_pp: (totais.margem_pct != null && anterior.margem_pct != null)
+                    ? Math.round((totais.margem_pct - anterior.margem_pct) * 10) / 10 : null,
+                horas: Math.round((totais.horas - anterior.horas) * 10) / 10,
+                horas_pct: pctVar(totais.horas, anterior.horas),
+            },
+        };
+
+        // 7) Composição de custo por categoria (janela atual)
+        const custoPorCategoria = [];
+        {
+            const [rows] = await db.query(
+                `SELECT COALESCE(NULLIF(TRIM(category), ''), 'Sem categoria') AS categoria, SUM(amount) AS total
+                   FROM expenses
+                  WHERE createdAt BETWEEN ? AND ?${custoScope.cond}
+                  GROUP BY categoria ORDER BY total DESC`,
+                [startDate + ' 00:00:00', endDate + ' 23:59:59', ...custoScope.params]
+            );
+            rows.forEach(r => {
+                const total = Math.round(parseFloat(r.total) || 0);
+                custoPorCategoria.push({
+                    categoria: r.categoria,
+                    total,
+                    pct: totais.custo > 0 ? Math.round((total / totais.custo) * 1000) / 10 : null,
+                });
+            });
+        }
+
+        // 8) Corte por região (Lajeado × Santa Maria × …)
+        const custoRegiaoMap = {};
+        {
+            const condAliased = custoScope.cond.replace(/\bobraId\b/g, 'e.obraId');
+            const [rows] = await db.query(
+                `SELECT COALESCE(NULLIF(TRIM(o.regiao), ''), 'Sem região') AS regiao, SUM(e.amount) AS total
+                   FROM expenses e JOIN obras o ON o.id = e.obraId
+                  WHERE e.createdAt BETWEEN ? AND ?${condAliased}
+                  GROUP BY regiao`,
+                [startDate + ' 00:00:00', endDate + ' 23:59:59', ...custoScope.params]
+            );
+            rows.forEach(r => { custoRegiaoMap[r.regiao] = Math.round(parseFloat(r.total) || 0); });
+        }
+        const regioes = Array.from(new Set([...Object.keys(cur.receitaRegiao), ...Object.keys(custoRegiaoMap)]));
+        const porRegiao = regioes.map(reg => {
+            const receita = Math.round(cur.receitaRegiao[reg] || 0);
+            const custo = custoRegiaoMap[reg] || 0;
+            const margem = receita - custo;
+            return {
+                regiao: reg,
+                receita_produzida: receita,
+                custo,
+                margem,
+                margem_pct: receita > 0 ? Math.round((margem / receita) * 1000) / 10 : null,
+            };
+        }).sort((a, b) => b.receita_produzida - a.receita_produzida);
+
+        res.json({
+            range: { startDate, endDate },
+            obraId: isObra ? obraId : 'all',
+            series,
+            totais,
+            comparativo,
+            custoPorCategoria,
+            porRegiao,
+            obras: obrasRows
+                .filter(o => o.is_hidden !== 1)
+                .map(o => ({ id: String(o.id), nome: o.nome }))
+                .sort((a, b) => (a.nome || '').localeCompare(b.nome || '')),
+        });
+    } catch (error) {
+        console.error('Erro no Histórico Financeiro:', error);
         res.status(500).json({ error: error.message });
     }
 };
