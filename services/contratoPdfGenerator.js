@@ -1,6 +1,6 @@
 // services/contratoPdfGenerator.js
-// Geração server-side do PDF de Contrato de Prestação de Serviço / Locação de
-// Equipamento com Operador (terceirizados). Reaproveita o cache de logo do
+// Geração server-side do PDF de Contrato de Prestação de Serviços com
+// fornecimento de equipamentos e operadores (terceirizados). Reaproveita o cache de logo do
 // pdfGenerator de abastecimento.
 
 const PDFDocument = require('pdfkit');
@@ -132,7 +132,7 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         doc.font('Helvetica-Bold').fontSize(15)
             .text('CONTRATO DE PRESTAÇÃO DE SERVIÇOS', 0, 48, { align: 'right', width: pageWidth - margin });
         doc.font('Helvetica').fontSize(11)
-            .text('Locação de equipamento com operador', 0, 68, { align: 'right', width: pageWidth - margin });
+            .text('Com fornecimento de equipamentos e operadores', 0, 68, { align: 'right', width: pageWidth - margin });
         doc.font('Helvetica-Bold').fontSize(11)
             .text(`Nº ${contrato.numero || '—'}`, 0, 84, { align: 'right', width: pageWidth - margin });
 
@@ -158,6 +158,16 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         const locadorCidade = sanitizeText(locador.cidade);
         const locadorCep = sanitizeText(locador.cep);
         const tipoMaquina = sanitizeText(contrato.tipoMaquina) || '________________';
+        // "Caminhão, Escavadeira 23T, Rolo" → "Caminhão, Escavadeira 23T e Rolo"
+        const tipoMaquinaLista = (() => {
+            const partes = String(tipoMaquina)
+                .replace(/ e /gi, ',')
+                .split(/[,;]/)
+                .map((t) => t.trim())
+                .filter(Boolean);
+            if (partes.length <= 1) return String(tipoMaquina).trim();
+            return `${partes.slice(0, -1).join(', ')} e ${partes[partes.length - 1]}`;
+        })();
         const obraNome = sanitizeText(obra.nome || obra.nome_obra) || '________________';
 
         // Pessoa física × jurídica muda a qualificação da CONTRATADA (CPF vs CNPJ).
@@ -211,21 +221,23 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
             `${locadorNome}${locadorQualif}${contratadaEnderecoTexto}` +
             `${locadorTelefone ? `, telefone ${locadorTelefone}` : ''}${contratadaRepTexto}, ` +
             `doravante denominada simplesmente CONTRATADA, convencionam o presente contrato de ` +
-            `locação de máquina e prestação de serviços, mediante as seguintes cláusulas e condições:`
+            `prestação de serviços com fornecimento de equipamentos e operadores, mediante as ` +
+            `seguintes cláusulas e condições:`
         );
 
         // ── Objeto ───────────────────────────────────────────────────
         heading('CLÁUSULA 1ª — DO OBJETO');
         paragraph(
-            `O presente contrato tem por objeto a locação de equipamento para prestação de serviços ` +
-            `(incluindo operador) do tipo ${tipoMaquina}, pela CONTRATADA, ` +
-            `na obra "${obraNome}", ` +
-            `mediante equipamento próprio com operador.`
+            `O presente contrato tem por objeto a prestação de serviços pela CONTRATADA na obra ` +
+            `"${obraNome}". Para a execução integral dos serviços contratados, a CONTRATADA ` +
+            `fornecerá, sob sua exclusiva responsabilidade, os veículos e equipamentos necessários ` +
+            `(${tipoMaquinaLista}), bem como toda a mão de obra especializada (operadores) exigida ` +
+            `para a sua correta operação.`
         );
         paragraph(
-            `a) A CONTRATADA deverá fornecer, às suas expensas, operador da máquina devidamente ` +
-            `habilitado e treinado, combustível, manutenção, reposição de óleos e graxas e transporte ` +
-            `até o local da prestação dos serviços.`
+            `a) A CONTRATADA deverá fornecer, às suas expensas, os operadores devidamente ` +
+            `habilitados e treinados, combustível, manutenção, reposição de óleos e graxas e transporte ` +
+            `dos equipamentos até o local da prestação dos serviços.`
         );
         paragraph(`b) O período de transporte da máquina não será computado como hora trabalhada.`);
         paragraph(`c) Os trabalhos poderão ser supervisionados por técnicos contratados pela CONTRATANTE.`);
@@ -371,7 +383,7 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
             `em virtude da presente prestação de serviços;`
         );
         paragraph(`e) iniciar os serviços solicitados em prazo máximo de até ${prazoInicioServico} horas após a autorização;`);
-        paragraph(`f) não sublocar ou terceirizar os serviços;`);
+        paragraph(`f) não subcontratar ou terceirizar os serviços;`);
         paragraph(`g) manter, durante toda a execução do contrato, as condições de habilitação e qualificação exigidas por lei;`);
         paragraph(
             `h) apresentar, sempre que solicitado pela CONTRATANTE, documentos inerentes ao contrato, em ` +
