@@ -666,4 +666,31 @@ cron.schedule('*/5 * * * *', async () => {
     }
 });
 
+// ====================================================================
+// CRON A CADA MINUTO — Liberação automática de ordens reservadas
+// Revela as ordens cujo reveal_at já venceu. Emite server:sync apenas
+// quando algo mudou, para não invalidar o cache do frontend a cada minuto.
+//
+// Compara com um Date do Node em vez de NOW(): as conexões do pool herdam o
+// fuso do servidor MySQL, e reveal_at é gravado a partir de um Date do Node
+// pelo mesmo pool — Date × Date é consistente, Date × NOW() pode errar horas.
+// ====================================================================
+cron.schedule('* * * * *', async () => {
+    try {
+        const agora = new Date();
+        const [r] = await db.query(
+            `UPDATE refuelings
+                SET is_hidden = 0, revealed_at = ?, reveal_at = NULL
+              WHERE is_hidden = 1 AND reveal_at IS NOT NULL AND reveal_at <= ?`,
+            [agora, agora]
+        );
+        if (r.affectedRows > 0) {
+            console.log(`🔓 [CRON] ${r.affectedRows} ordem(ns) reservada(s) liberada(s).`);
+            if (global.io) global.io.emit('server:sync', { targets: ['refuelings'] });
+        }
+    } catch (e) {
+        console.error('❌ [CRON] Erro na liberação de ordens reservadas:', e.message);
+    }
+});
+
 module.exports = cron;

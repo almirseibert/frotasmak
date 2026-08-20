@@ -29,4 +29,7 @@ router.put('/:id/liberar', refuelingController.liberarOrdemBloqueada);
 // Rota para negar (excluir) ordem bloqueada (admin)
 router.delete('/:id/negar', refuelingController.negarOrdemBloqueada);
 
+// Rota para liberar/reagendar ordem reservada (só o emissor)
+router.put('/:id/revelar', refuelingController.revelarOrdemOculta);
+
 module.exports = router;

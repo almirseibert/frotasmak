@@ -26,7 +26,7 @@ const authMiddleware = async (req, res, next) => {
         // Busca dados atualizados do usuário no banco para garantir que não foi bloqueado recentemente
         // e para pegar as flags de permissão de abastecimento mais recentes.
         const [users] = await db.query(
-            'SELECT id, email, role, user_type, canAccessRefueling, canAccessAnaliseGerencial, bloqueado_abastecimento FROM users WHERE id = ?',
+            'SELECT id, email, role, user_type, canAccessRefueling, canAccessAnaliseGerencial, bloqueado_abastecimento, can_create_hidden_orders FROM users WHERE id = ?',
             [decoded.id]
         );
 
@@ -47,7 +47,8 @@ const authMiddleware = async (req, res, next) => {
             user_type: user.user_type || user.role,
             canAccessRefueling: user.canAccessRefueling === 1,
             canAccessAnaliseGerencial: user.canAccessAnaliseGerencial === 1,
-            bloqueado_abastecimento: user.bloqueado_abastecimento === 1
+            bloqueado_abastecimento: user.bloqueado_abastecimento === 1,
+            can_create_hidden_orders: user.can_create_hidden_orders === 1
         };
 
         // 5. VERIFICAÇÃO DE ACESSO AO MÓDULO SUPERVISOR

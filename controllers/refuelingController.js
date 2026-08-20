@@ -151,7 +151,11 @@ const parseRefuelingRows = (rows) => {
         pricePerLiterArla: row.pricePerLiterArla ? parseFloat(row.pricePerLiterArla) : 0,
         outrosValor: row.outrosValor ? parseFloat(row.outrosValor) : 0,
         outrosGeraValor: !!row.outrosGeraValor,
-        invoiceNumber: row.invoiceNumber || null
+        invoiceNumber: row.invoiceNumber || null,
+        // Ordem reservada — só chega até aqui para o próprio emissor (ver getAllRefuelings)
+        isHidden: !!row.is_hidden,
+        hiddenByUserId: row.hidden_by_user_id || null,
+        revealAt: row.reveal_at || null
     }));
 };
 
@@ -301,9 +305,21 @@ const sendOrderEmail = async (req, res) => {
 
 // --- CRUD ---
 
+// Ordens reservadas só aparecem para quem as emitiu. Este é o ÚNICO ponto de
+// ocultação do sistema: o endpoint alimenta praticamente todas as telas do
+// frontend, então filtrar aqui cobre listas, relatórios, dashboard e histórico
+// de uma vez — e, ao contrário de um filtro no cliente, também não vaza o
+// registro na aba Network. Agregações de valor (despesa da obra, saldo no
+// posto, média de consumo) rodam por SQL próprio e continuam contando a ordem.
+const HIDDEN_VISIBILITY_CLAUSE =
+    '(is_hidden = 0 OR (hidden_by_user_id IS NOT NULL AND hidden_by_user_id = ?))';
+
 const getAllRefuelings = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM refuelings ORDER BY id DESC');
+        const [rows] = await db.execute(
+            `SELECT * FROM refuelings WHERE ${HIDDEN_VISIBILITY_CLAUSE} ORDER BY id DESC`,
+            [req.user?.id || null]
+        );
         res.json(parseRefuelingRows(rows));
     } catch (error) {
         console.error('Erro GET refuelings:', error);
@@ -313,7 +329,12 @@ const getAllRefuelings = async (req, res) => {
 
 const getRefuelingById = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM refuelings WHERE id = ?', [req.params.id]);
+        // 404 (e não 403) quando a ordem é reservada de outro usuário: um 403
+        // confirmaria a existência do registro para quem chutasse o id.
+        const [rows] = await db.execute(
+            `SELECT * FROM refuelings WHERE id = ? AND ${HIDDEN_VISIBILITY_CLAUSE}`,
+            [req.params.id, req.user?.id || null]
+        );
         if (rows.length === 0) return res.status(404).json({ error: 'Não encontrado' });
         res.json(parseRefuelingRows(rows)[0]);
     } catch (error) {
@@ -384,6 +405,16 @@ const createRefuelingOrder = async (req, res) => {
     await connection.beginTransaction();
 
     try {
+        // ─── Ordem reservada: valida a permissão no servidor ───
+        // Nunca confiar no frontend. E falhar em vez de criar visível: quem pediu
+        // ordem reservada acredita que ela ficará oculta — criar visível em silêncio
+        // seria o pior desfecho possível.
+        const querOcultar = !!data.isHidden;
+        if (querOcultar && req.user?.can_create_hidden_orders !== true) {
+            await connection.rollback();
+            return res.status(403).json({ error: 'Sem permissão para emitir ordem reservada.' });
+        }
+
         const id = crypto.randomUUID();
         const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
         const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
@@ -399,6 +430,25 @@ const createRefuelingOrder = async (req, res) => {
                 const pad = n => String(n).padStart(2, '0');
                 const brt = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }));
                 dataAbastecimento = new Date(`${dateStr}T${pad(brt.getHours())}:${pad(brt.getMinutes())}:${pad(brt.getSeconds())}-03:00`);
+            }
+        }
+
+        // ─── Agendamento de liberação da ordem reservada ───
+        // Vem de um <input type="datetime-local">, que não carrega fuso — interpreta
+        // em BRT, mesmo tratamento dado a `data.date` acima. Data inválida ou no
+        // passado: ignora o agendamento e mantém a ordem reservada com liberação
+        // manual (nunca criar visível quem pediu reservada).
+        let revealAtDate = null;
+        let revealAtIgnorado = false;
+        if (querOcultar && data.revealAt) {
+            const raw = String(data.revealAt).trim();
+            const temFuso = /([zZ]|[+-]\d{2}:?\d{2})$/.test(raw);
+            const comSegundos = /T\d{2}:\d{2}$/.test(raw) ? `${raw}:00` : raw;
+            const parsed = new Date(temFuso ? comSegundos : `${comSegundos}-03:00`);
+            if (!isNaN(parsed.getTime()) && parsed.getTime() > Date.now()) {
+                revealAtDate = parsed;
+            } else {
+                revealAtIgnorado = true;
             }
         }
 
@@ -436,7 +486,7 @@ const createRefuelingOrder = async (req, res) => {
 
             if (!isWeekendOrHoliday && !allowMultiple && !isOutsourcedVehicle) {
                 const [openRows] = await connection.execute(
-                    `SELECT id, authNumber, status
+                    `SELECT id, authNumber, status, is_hidden, hidden_by_user_id
                        FROM refuelings
                       WHERE vehicleId = ?
                         AND status NOT IN ('Concluída','Concluida','Cancelada','Negada','Baixada')
@@ -447,12 +497,23 @@ const createRefuelingOrder = async (req, res) => {
                 if (openRows.length > 0) {
                     await connection.rollback();
                     connection.release();
+                    // A regra NUNCA ignora ordens reservadas — permitir uma 2ª ordem aberta
+                    // no mesmo veículo geraria risco de abastecimento duplo no posto.
+                    // Só a mensagem muda: para terceiros, sem número nem status.
+                    const bloqueia = openRows[0];
+                    const ocultaDeTerceiro = bloqueia.is_hidden == 1 && bloqueia.hidden_by_user_id !== req.user?.id;
+                    if (ocultaDeTerceiro) {
+                        return res.status(409).json({
+                            error: 'Este veículo está temporariamente indisponível para emissão de nova ordem. Verifique com a administração.',
+                            code: 'VEHICLE_TEMPORARILY_BLOCKED'
+                        });
+                    }
                     return res.status(409).json({
-                        error: `Já existe ordem em aberto Nº ${openRows[0].authNumber} (${openRows[0].status}) para este veículo. Conclua ou cancele antes de emitir outra.`,
+                        error: `Já existe ordem em aberto Nº ${bloqueia.authNumber} (${bloqueia.status}) para este veículo. Conclua ou cancele antes de emitir outra.`,
                         code: 'DUPLICATE_OPEN_ORDER',
-                        openOrderId: openRows[0].id,
-                        openOrderAuthNumber: openRows[0].authNumber,
-                        openOrderStatus: openRows[0].status
+                        openOrderId: bloqueia.id,
+                        openOrderAuthNumber: bloqueia.authNumber,
+                        openOrderStatus: bloqueia.status
                     });
                 }
             }
@@ -547,6 +608,15 @@ const createRefuelingOrder = async (req, res) => {
             invoiceNumber: data.invoiceNumber || null
         };
 
+        // Só acrescenta as colunas de reserva quando a ordem é reservada — assim o
+        // INSERT do caminho normal permanece exatamente como era.
+        if (querOcultar) {
+            refuelingData.is_hidden = 1;
+            refuelingData.hidden_by_user_id = req.user.id;
+            refuelingData.hidden_at = new Date();
+            refuelingData.reveal_at = revealAtDate; // null = liberação apenas manual
+        }
+
         const fields = Object.keys(refuelingData);
         const values = Object.values(refuelingData);
         const placeholders = fields.map(() => '?').join(', ');
@@ -599,7 +669,10 @@ const createRefuelingOrder = async (req, res) => {
         req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes', 'partner_fuel_credits'] });
 
         // Ordem salva bloqueada (leitura ou orçamento) → alerta admins (pop-up + som).
-        if (motivoLeitura || bloqueadoOrcamento) {
+        // Ordem reservada não dispara o alerta: o texto carrega o número da ordem e
+        // faria broadcast dela para todos os admins. Quem libera é o próprio emissor,
+        // pelo painel "Ordens Reservadas".
+        if ((motivoLeitura || bloqueadoOrcamento) && !querOcultar) {
             req.io.emit('admin:notificacao', {
                 tipo: 'ordem_bloqueada',
                 mensagem: motivoLeitura
@@ -620,6 +693,9 @@ const createRefuelingOrder = async (req, res) => {
         } else if (bloqueadoOrcamento) {
             mensagemRetorno = `Ordem Nº ${newAuthNumber} salva, mas bloqueada por orçamento (≥20% do contrato). Aguarde liberação do Administrador.`;
         }
+        if (querOcultar && revealAtIgnorado) {
+            mensagemRetorno += ' A data de liberação informada é inválida ou já passou — a ordem ficará reservada até você liberá-la manualmente.';
+        }
 
         res.status(201).json({
             id,
@@ -627,6 +703,9 @@ const createRefuelingOrder = async (req, res) => {
             bloqueadoOrcamento: !!bloqueadoOrcamento,
             bloqueadoLeitura: !!motivoLeitura,
             motivoBloqueioLeitura: motivoLeitura || null,
+            isHidden: querOcultar,
+            revealAt: revealAtDate,
+            revealAtIgnorado,
             message: mensagemRetorno
         });
     } catch (error) {
@@ -1122,6 +1201,62 @@ const liberarOrdemBloqueada = async (req, res) => {
     }
 };
 
+// ─── Ordem reservada: liberar (ou reagendar a liberação) ───
+// Só o próprio emissor pode chamar. Não estender para admins: a ordem é reservada
+// justamente em relação aos demais usuários, admins inclusive.
+const revelarOrdemOculta = async (req, res) => {
+    const { id } = req.params;
+    const userId = req.user?.id || null;
+
+    // 404 genérico em qualquer falha de dono/estado — um 403 confirmaria a
+    // existência da ordem para quem chutasse o id.
+    const naoEncontrado = () => res.status(404).json({ error: 'Não encontrado' });
+
+    try {
+        const [[ordem]] = await db.execute(
+            'SELECT id, authNumber, is_hidden, hidden_by_user_id FROM refuelings WHERE id = ?',
+            [id]
+        );
+        if (!ordem || ordem.is_hidden != 1 || !userId || ordem.hidden_by_user_id !== userId) {
+            return naoEncontrado();
+        }
+
+        // Body opcional { revealAt }: data futura reagenda em vez de liberar agora.
+        const raw = req.body?.revealAt ? String(req.body.revealAt).trim() : '';
+        if (raw) {
+            const temFuso = /([zZ]|[+-]\d{2}:?\d{2})$/.test(raw);
+            const comSegundos = /T\d{2}:\d{2}$/.test(raw) ? `${raw}:00` : raw;
+            const parsed = new Date(temFuso ? comSegundos : `${comSegundos}-03:00`);
+            if (isNaN(parsed.getTime()) || parsed.getTime() <= Date.now()) {
+                return res.status(400).json({ error: 'Data de liberação inválida ou no passado.' });
+            }
+            await db.execute('UPDATE refuelings SET reveal_at = ? WHERE id = ? AND hidden_by_user_id = ?', [parsed, id, userId]);
+            return res.json({
+                message: `Liberação da ordem Nº ${ordem.authNumber} agendada.`,
+                authNumber: ordem.authNumber,
+                revealAt: parsed
+            });
+        }
+
+        const [result] = await db.execute(
+            `UPDATE refuelings
+                SET is_hidden = 0, revealed_at = ?, reveal_at = NULL
+              WHERE id = ? AND is_hidden = 1 AND hidden_by_user_id = ?`,
+            [new Date(), id, userId]
+        );
+        if (result.affectedRows === 0) return naoEncontrado();
+
+        req.io.emit('server:sync', { targets: ['refuelings'] });
+        res.json({
+            message: `Ordem Nº ${ordem.authNumber} liberada — agora visível para todos os usuários.`,
+            authNumber: ordem.authNumber
+        });
+    } catch (error) {
+        console.error('Erro ao liberar ordem reservada:', error);
+        res.status(500).json({ error: 'Erro ao liberar ordem reservada.' });
+    }
+};
+
 module.exports = {
     getAllRefuelings,
     getRefuelingById,
@@ -1131,6 +1266,7 @@ module.exports = {
     deleteRefuelingOrder,
     liberarOrdemBloqueada,
     negarOrdemBloqueada,
+    revelarOrdemOculta,
     upload,
     uploadOrderPdf,
     sendOrderEmail

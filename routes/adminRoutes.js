@@ -1101,6 +1101,16 @@ router.get('/export/:module', adminOnly, async (req, res) => {
     const query = EXPORT_TABLES[module];
     if (!query) return res.status(404).json({ error: 'Módulo de exportação não encontrado.' });
     try {
+        // Ordens de abastecimento reservadas não entram no dump de outro usuário —
+        // sem isso, qualquer admin veria pelo backup o que a listagem esconde.
+        if (module === 'refuelings') {
+            const [rows] = await db.query(
+                `SELECT * FROM refuelings
+                  WHERE is_hidden = 0 OR (hidden_by_user_id IS NOT NULL AND hidden_by_user_id = ?)`,
+                [req.user?.id || null]
+            );
+            return res.json(rows);
+        }
         const [rows] = await db.query(query);
         res.json(rows);
     } catch (error) {

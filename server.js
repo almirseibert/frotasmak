@@ -55,6 +55,19 @@ const http = require('http');
         { table: 'refuelings',             column: 'reserved_amount',                  def: 'DECIMAL(12,2) DEFAULT NULL' },
         { table: 'refuelings',             column: 'reserved_price',                   def: 'DECIMAL(8,3) DEFAULT NULL' },
         { table: 'refuelings',             column: 'is_full_tank',                     def: 'TINYINT(1) DEFAULT 0' },
+        // ── Ordens de abastecimento reservadas ──
+        // Ordem emitida por usuário autorizado (users.can_create_hidden_orders) que NÃO
+        // aparece na listagem para os demais usuários até ser liberada — manualmente pelo
+        // emissor ou automaticamente quando reveal_at vence (cron de 1 min).
+        // Em todo o resto é uma ordem normal: consome authNumber, empenha saldo no posto,
+        // é enviada ao posto na hora e gera despesa para a obra.
+        { table: 'refuelings',             column: 'is_hidden',                        def: 'TINYINT(1) DEFAULT 0' },
+        // VARCHAR(255) para casar exatamente com o tipo de users.id
+        { table: 'refuelings',             column: 'hidden_by_user_id',                def: 'VARCHAR(255) DEFAULT NULL' },
+        { table: 'refuelings',             column: 'hidden_at',                        def: 'DATETIME DEFAULT NULL' },
+        { table: 'refuelings',             column: 'reveal_at',                        def: 'DATETIME DEFAULT NULL' },
+        { table: 'refuelings',             column: 'revealed_at',                      def: 'DATETIME DEFAULT NULL' },
+        { table: 'users',                  column: 'can_create_hidden_orders',         def: 'TINYINT(1) DEFAULT 0' },
     ];
 
     for (const { table, column, def } of migrations) {
@@ -79,6 +92,13 @@ const http = require('http');
         await db.query('ALTER TABLE `comboio_transactions` ADD INDEX `idx_authNumber` (`authNumber`)');
     } catch (e) {
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_authNumber:', e.message);
+    }
+
+    // Índice para o filtro de ordens reservadas (GET /refuelings e cron de liberação)
+    try {
+        await db.query('ALTER TABLE `refuelings` ADD INDEX `idx_hidden` (`is_hidden`, `reveal_at`)');
+    } catch (e) {
+        if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_hidden:', e.message);
     }
 
     // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' ─────
