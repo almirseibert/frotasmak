@@ -16,11 +16,25 @@ const http = require('http');
         { table: 'users',                  column: 'tentativas_falhas_abastecimento', def: 'INT DEFAULT 0' },
         { table: 'users',                  column: 'bloqueado_abastecimento',         def: 'TINYINT(1) DEFAULT 0' },
         { table: 'users',                  column: 'page_permissions',                def: 'JSON DEFAULT NULL' },
+        { table: 'users',                  column: 'canAccessAnaliseGerencial',       def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        // ── Mensageiro interno (chat estilo MSN) ──
+        // display_name: nome exibido no chat (fallback para users.name)
+        // chat_status: status MSN persistido (disponivel|ausente|ocupado|volto_logo|invisivel|offline)
+        // chat_status_msg: recado pessoal de texto livre
+        // chat_last_seen: último momento online (para "visto por último")
+        { table: 'users',                  column: 'display_name',                    def: 'VARCHAR(120) DEFAULT NULL' },
+        { table: 'users',                  column: 'chat_status',                     def: "VARCHAR(20) NOT NULL DEFAULT 'offline'" },
+        { table: 'users',                  column: 'chat_status_msg',                 def: 'VARCHAR(140) DEFAULT NULL' },
+        { table: 'users',                  column: 'chat_last_seen',                  def: 'DATETIME DEFAULT NULL' },
+        // chat_notif_prefs: preferências de notificação do chat (JSON) — eventos,
+        // DND, horário de silêncio, mute por conversa, prévia de texto.
+        { table: 'users',                  column: 'chat_notif_prefs',                def: 'JSON DEFAULT NULL' },
         { table: 'comboio_transactions',   column: 'authNumber',                      def: 'INT UNSIGNED DEFAULT NULL' },
         { table: 'obras',                  column: 'tipo_registro',                   def: "ENUM('obra','centro_custo') DEFAULT 'obra'" },
         // FASE 1.3 — Campos adicionais em obras
         { table: 'obras',                  column: 'orgao_contratante',               def: "VARCHAR(50) DEFAULT NULL" },
         { table: 'obras',                  column: 'regiao',                          def: "ENUM('Lajeado','Santa Maria') DEFAULT NULL" },
+        // NOTA: obras.created_at é adicionada em IIFE dedicado (com backfill one-time), não aqui.
         // FASE 0.4 — Sub-tipos e médias de consumo
         { table: 'vehicles',               column: 'sub_tipo',                        def: 'VARCHAR(100) DEFAULT NULL' },
         { table: 'vehicles',               column: 'media_consumo',                   def: 'DECIMAL(10,3) DEFAULT NULL' },
@@ -35,6 +49,20 @@ const http = require('http');
         // FASE 2.9 — Canais de envio de ordem para parceiros (posto)
         { table: 'partners',               column: 'envia_por_whatsapp',               def: 'TINYINT(1) DEFAULT 0' },
         { table: 'partners',               column: 'envia_por_email',                  def: 'TINYINT(1) DEFAULT 0' },
+        // Cadastro do terceiro/parceiro: nome fantasia (exibição no sistema, razão
+        // social vai por extenso só no contrato), bairro/CEP e tipo de pessoa
+        // (juridica → CNPJ / fisica → CPF), que muda a redação do contrato.
+        { table: 'partners',               column: 'nomeFantasia',                     def: 'VARCHAR(160) DEFAULT NULL' },
+        { table: 'partners',               column: 'bairro',                           def: 'VARCHAR(120) DEFAULT NULL' },
+        { table: 'partners',               column: 'cep',                              def: 'VARCHAR(12) DEFAULT NULL' },
+        { table: 'partners',               column: 'tipoPessoa',                       def: "VARCHAR(10) DEFAULT 'juridica'" },
+        // Representante legal do terceiro (assinante), opcional. Se preenchido, o
+        // gerador de contrato usa como fallback do representante da CONTRATADA.
+        { table: 'partners',               column: 'representanteLegalNome',            def: 'VARCHAR(160) DEFAULT NULL' },
+        { table: 'partners',               column: 'representanteLegalCpf',             def: 'VARCHAR(20) DEFAULT NULL' },
+        // Chave Pix do terceiro/parceiro — apenas cadastro informativo, sem uso em
+        // transações pelo sistema.
+        { table: 'partners',               column: 'chavePix',                          def: 'VARCHAR(140) DEFAULT NULL' },
         // FASE 2.10 — Colunas de movimentação de pneus
         { table: 'tire_transactions',      column: 'employeeName',                     def: 'VARCHAR(255) NULL' },
         { table: 'tire_transactions',      column: 'odometer',                         def: 'DECIMAL(10,1) NULL' },
@@ -44,10 +72,16 @@ const http = require('http');
         // Fotos das distribuições feitas pelo operador do comboio direto na obra
         // (horímetro, RE/placa, medidor zerado, medidor com litragem). JSON com URLs.
         { table: 'comboio_transactions',   column: 'fotos',                            def: 'JSON DEFAULT NULL' },
+        // Drenagem: destino do combustível retirado do veículo de origem.
+        // 'comboio' (devolve ao tanque do comboio), 'transfusao' (abastece outro
+        // equipamento) ou 'eliminado' (combustível contaminado, descartado).
+        { table: 'comboio_transactions',   column: 'destino',                          def: "VARCHAR(20) DEFAULT NULL" },
         { table: 'partners',               column: 'vehicle_id',                       def: 'VARCHAR(36) DEFAULT NULL' },
         // Campo KM/Hr atual no modal de OS/OC
         { table: 'orders',                 column: 'kmHrAtual',                        def: 'DECIMAL(12,1) DEFAULT NULL' },
         { table: 'orders',                 column: 'kmHrUnit',                         def: "VARCHAR(10) DEFAULT NULL" },
+        // Caixa de observações livre da ordem de compra/serviço
+        { table: 'orders',                 column: 'observacoes',                      def: 'TEXT DEFAULT NULL' },
         // ── Saldo pré-pago em postos (controle de crédito por parceiro) ──
         // reserved_amount: valor empenhado quando a ordem foi criada (NULL em ordens antigas / fill-up sem valor)
         // reserved_price: preço usado no empenho (auditoria)
@@ -68,6 +102,33 @@ const http = require('http');
         { table: 'refuelings',             column: 'reveal_at',                        def: 'DATETIME DEFAULT NULL' },
         { table: 'refuelings',             column: 'revealed_at',                      def: 'DATETIME DEFAULT NULL' },
         { table: 'users',                  column: 'can_create_hidden_orders',         def: 'TINYINT(1) DEFAULT 0' },
+        // Liga o refueling-espelho (ajuste negativo da origem / abastecimento do
+        // receptor) à transação de drenagem que o gerou, para permitir reversão
+        // na exclusão e o desconto de litragem no cálculo de médias.
+        { table: 'refuelings',             column: 'drenagemTransactionId',            def: 'VARCHAR(36) DEFAULT NULL' },
+        // ── Módulo de Planejamento de Obras (pré-obra) ──
+        // Ciclo de vida: radar → planejada → mobilizacao → ativa → finalizada.
+        // 'dataFimPrevisto' já existia no schema (órfã) e foi adotada; aqui só o par de início.
+        { table: 'obras',                  column: 'dataInicioPrevisto',               def: 'DATE DEFAULT NULL' },
+        { table: 'obras',                  column: 'origemInfo',                       def: 'VARCHAR(255) DEFAULT NULL' },
+        { table: 'obras',                  column: 'confiancaInfo',                    def: "ENUM('rumor','plano_oficial','contrato_assinado') DEFAULT NULL" },
+        { table: 'obras',                  column: 'obsPlanejamento',                  def: 'TEXT DEFAULT NULL' },
+        // Plano de trabalho por SUBGRUPO (vehicles.sub_tipo) — contratos diferenciam
+        // ex. Escavadeira 13t vs 26t. Campos antigos (…PorTipo) seguem como fallback.
+        { table: 'obras',                  column: 'horasContratadasPorSubTipo',       def: 'JSON DEFAULT NULL' },
+        { table: 'obras',                  column: 'valoresPorSubTipo',                def: 'JSON DEFAULT NULL' },
+        // ── Geolocalização / Mapa Operacional (cidades IBGE do RS) ──
+        // cidade_ibge liga obra/funcionário ao município do RS (código IBGE 7 díg.)
+        // para posicionar no mapa (centroide da cidade) e casar proximidade.
+        { table: 'obras',                  column: 'cidade_ibge',                      def: 'VARCHAR(7) DEFAULT NULL' },
+        // Atributos do colaborador usados na sugestão de equipe:
+        // equipamentos_aptos = JSON array dos tipos de equipamento que sabe operar;
+        // is_lider_obra = apto a liderar obra (designação de líder por lógica).
+        { table: 'employees',              column: 'cidade_ibge',                      def: 'VARCHAR(7) DEFAULT NULL' },
+        { table: 'employees',              column: 'equipamentos_aptos',               def: 'JSON DEFAULT NULL' },
+        { table: 'employees',              column: 'is_lider_obra',                    def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        // NOTA: admin_holidays.regiao é migrada em routes/adminRoutes.js (initAdminTables),
+        // logo após o CREATE TABLE — aqui correria antes da tabela existir.
     ];
 
     for (const { table, column, def } of migrations) {
@@ -101,14 +162,25 @@ const http = require('http');
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_hidden:', e.message);
     }
 
-    // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' ─────
+    // Backfill idempotente: drenagens antigas eram sempre "para o comboio".
+    try {
+        await db.query(
+            "UPDATE comboio_transactions SET destino = 'comboio' WHERE type = 'drenagem' AND (destino IS NULL OR destino = '')"
+        );
+    } catch (e) {
+        console.warn('[migration] backfill comboio_transactions.destino:', e.message);
+    }
+
+    // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' e 'locador' ─────
     // Causa do erro: "Data truncated for column 'tipo_parceiro' at row 1"
     // ao distribuir combustível de comboio (qualquer gravação que tentasse
     // 'comboio' falhava porque o ENUM só tinha 'posto' e 'fornecedor').
+    // 'locador' (Equip. Terceirizados) foi adicionado depois: sem ele no ENUM,
+    // o cadastro de Locador caía no fallback 'posto' e aparecia na aba errada.
     try {
         await db.query(`
             ALTER TABLE \`partners\`
-            MODIFY COLUMN \`tipo_parceiro\` ENUM('posto','fornecedor','comboio') DEFAULT 'posto'
+            MODIFY COLUMN \`tipo_parceiro\` ENUM('posto','fornecedor','comboio','locador') DEFAULT 'posto'
         `);
         // Garante que nenhum registro fique com tipo nulo/vazio
         await db.query(`UPDATE partners SET tipo_parceiro = 'posto' WHERE tipo_parceiro IS NULL OR tipo_parceiro = ''`);
@@ -483,6 +555,30 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Tabela de refresh tokens (renovação silenciosa de sessão)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS refresh_tokens (
+                id         VARCHAR(36)  NOT NULL PRIMARY KEY,
+                user_id    VARCHAR(64)  NOT NULL,
+                token_hash CHAR(64)     NOT NULL,
+                expires_at DATETIME     NOT NULL,
+                revoked    TINYINT(1)   NOT NULL DEFAULT 0,
+                created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_token_hash (token_hash),
+                INDEX idx_user (user_id),
+                INDEX idx_expires (expires_at)
+            )
+        `);
+        console.log('✅ refresh_tokens: tabela ok.');
+    } catch (e) {
+        console.warn('⚠️ [migration] refresh_tokens:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Garante partner-espelho para todo veículo-comboio existente
 // ====================================================================
 (async () => {
@@ -526,6 +622,20 @@ const http = require('http');
         console.log('✅ Migração solicitacao_erros_log concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] solicitacao_erros_log:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Rastreamento de entrega das ordens de abastecimento
+// Cria order_notifications. O DDL fica em services/orderDelivery.js para que
+// o serviço também consiga se auto-criar caso rode antes desta migração.
+// ====================================================================
+(async () => {
+    try {
+        await require('./services/orderDelivery').ensureTable();
+        console.log('✅ Migração order_notifications concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] order_notifications:', e.message);
     }
 })();
 
@@ -700,6 +810,227 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Terceirizados: contrato de locação nos veículos + pagamentos
+// ====================================================================
+(async () => {
+    const addColumn = async (sql, label) => {
+        // Deadlock é transitório: as IIFEs de migração rodam concorrentes e várias
+        // trancam metadados de `vehicles` (ALTERs aqui + FK de vehicle_documents).
+        // Numa base zerada, deixar o deadlock passar faz a coluna nascer faltando
+        // e derruba o save de veículo. Por isso retentamos antes de desistir.
+        for (let tentativa = 1; tentativa <= 4; tentativa++) {
+            try {
+                await db.query(sql);
+                return;
+            } catch (e) {
+                if (e.code === 'ER_DUP_FIELDNAME') return; // já existe — ok
+                const transitorio = e.code === 'ER_LOCK_DEADLOCK' || e.code === 'ER_LOCK_WAIT_TIMEOUT';
+                if (transitorio && tentativa < 4) {
+                    await new Promise(r => setTimeout(r, 200 * tentativa)); // backoff
+                    continue;
+                }
+                console.warn(`⚠️ [migration] ${label}${transitorio ? ` (após ${tentativa} tentativas)` : ''}:`, e.message);
+                return;
+            }
+        }
+    };
+    try {
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locadorId VARCHAR(36) DEFAULT NULL`, 'vehicles.locadorId');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoHorasContratadas DECIMAL(12,2) DEFAULT NULL`, 'vehicles.locacaoHorasContratadas');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoValorTotal DECIMAL(14,2) DEFAULT NULL`, 'vehicles.locacaoValorTotal');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoVigenciaInicio DATE DEFAULT NULL`, 'vehicles.locacaoVigenciaInicio');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoVigenciaFim DATE DEFAULT NULL`, 'vehicles.locacaoVigenciaFim');
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceirizado_pagamentos (
+                id               VARCHAR(36)  PRIMARY KEY,
+                locadorId        VARCHAR(36)  NOT NULL,
+                vehicleId        VARCHAR(36)  DEFAULT NULL,
+                data             DATE         DEFAULT NULL,
+                valor            DECIMAL(14,2) NOT NULL DEFAULT 0,
+                descricao        VARCHAR(500) DEFAULT NULL,
+                created_by_email VARCHAR(255) DEFAULT NULL,
+                created_at       TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_tercpag_locador (locadorId),
+                INDEX idx_tercpag_vehicle (vehicleId)
+            )
+        `);
+        console.log('✅ Migração terceirizado_pagamentos concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] terceirizado_pagamentos:', e.message);
+    }
+})();
+
+// ── Contratos de terceirizados (1 contrato = 1 terceiro/locador + 1 obra) ─────
+// Valor FECHADO. Horas executadas = acompanhamento físico (não viram débito).
+// Saldo a pagar = valorTotal − diesel abatido − adiantamentos.
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceiro_contratos (
+                id                VARCHAR(36)   PRIMARY KEY,
+                numero            VARCHAR(30)   NOT NULL,
+                locadorId         VARCHAR(36)   NOT NULL,
+                obraId            VARCHAR(36)   NOT NULL,
+                tipoMaquina       VARCHAR(120)  DEFAULT NULL,
+                horasContratadas  DECIMAL(12,2) NOT NULL DEFAULT 0,
+                valorHora         DECIMAL(14,2) NOT NULL DEFAULT 0,
+                valorTotal        DECIMAL(14,2) NOT NULL DEFAULT 0,
+                vigenciaInicio    DATE          DEFAULT NULL,
+                vigenciaFim       DATE          DEFAULT NULL,
+                status            VARCHAR(20)   NOT NULL DEFAULT 'ativo',
+                observacoes       VARCHAR(1000) DEFAULT NULL,
+                maquinas          JSON          DEFAULT NULL,
+                pdfUrl            VARCHAR(500)  DEFAULT NULL,
+                created_by_email  VARCHAR(255)  DEFAULT NULL,
+                created_at        TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_terccontrato_numero (numero),
+                INDEX idx_terccontrato_locador (locadorId),
+                INDEX idx_terccontrato_obra (obraId)
+            )
+        `);
+        // Adiantamentos passam a poder apontar para um contrato específico.
+        try {
+            await db.query(`ALTER TABLE terceirizado_pagamentos ADD COLUMN contratoId VARCHAR(36) DEFAULT NULL`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        // Máquinas vinculadas ao contrato (JSON array de vehicleId). 1 máquina : 1 contrato.
+        try {
+            await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN maquinas JSON DEFAULT NULL`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        // Plano de trabalho estilo Obra: tipo de contrato ('horas' | 'fechado') e
+        // itens contratados por subgrupo ([{ type, hours, price }]). horasContratadas
+        // e valorTotal continuam sendo os AGREGADOS (soma), consumidos pelo cálculo de saldo.
+        try {
+            await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN contractType VARCHAR(20) NOT NULL DEFAULT 'horas'`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        try {
+            await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN itensContratados JSON DEFAULT NULL`);
+        } catch (err) {
+            if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+        }
+        // Cláusulas jurídicas parametrizáveis (extraídas de contrato real de terceiro,
+        // ver services/contratoPdfGenerator.js): prazos e percentuais que hoje eram
+        // texto fixo ou simplesmente ausentes do PDF gerado.
+        const clausulasJuridicas = [
+            { column: 'prazoPagamentoDias',              def: 'INT NOT NULL DEFAULT 30' },
+            { column: 'percentualJurosMora',              def: 'DECIMAL(5,2) NOT NULL DEFAULT 1.00' },
+            { column: 'percentualMultaMora',              def: 'DECIMAL(5,2) NOT NULL DEFAULT 1.00' },
+            { column: 'prazoSubstituicaoHoras',           def: 'INT NOT NULL DEFAULT 48' },
+            { column: 'prazoInicioServicoHoras',          def: 'INT NOT NULL DEFAULT 48' },
+            { column: 'percentualMultaInadimplemento',    def: 'DECIMAL(5,2) NOT NULL DEFAULT 0.50' },
+            { column: 'avisoPrevioRescisaoDias',          def: 'INT NOT NULL DEFAULT 2' },
+            { column: 'foroComarca',                      def: "VARCHAR(60) NOT NULL DEFAULT 'Santa Maria'" },
+            // Prazo de vigência em meses contados da assinatura. Parametrizado na
+            // criação; a cláusula do PDF passa a usar "X meses" em vez das datas.
+            { column: 'prazoVigenciaMeses',              def: 'INT DEFAULT NULL' },
+            // Qualificação do representante legal (assinante) da CONTRATADA — sustenta o
+            // contrato como título executivo extrajudicial (arts. 783/784, III, CPC).
+            { column: 'contratadaRepresentanteNome',         def: 'VARCHAR(160) DEFAULT NULL' },
+            { column: 'contratadaRepresentanteQualificacao', def: 'VARCHAR(200) DEFAULT NULL' },
+            { column: 'contratadaRepresentanteCpf',          def: 'VARCHAR(20) DEFAULT NULL' },
+        ];
+        for (const { column, def } of clausulasJuridicas) {
+            try {
+                await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN ${column} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+            }
+        }
+        // Contrato ASSINADO (documento oficial vigente). Diferente do pdfUrl, que é a
+        // MINUTA regenerável dos dados: o assinado é um PDF enviado por upload, imutável.
+        // Enquanto houver assinado vigente, minuta e edição ficam bloqueadas (contrato
+        // "congelado"). Colunas espelho abaixo = o vigente; histórico em terceiro_contrato_docs.
+        const colunasAssinado = [
+            { column: 'contratoAssinadoUrl',  def: 'VARCHAR(500) DEFAULT NULL' },
+            { column: 'contratoAssinadoNome', def: 'VARCHAR(255) DEFAULT NULL' },
+            { column: 'contratoAssinadoEm',   def: 'TIMESTAMP NULL DEFAULT NULL' },
+            { column: 'contratoAssinadoPor',  def: 'VARCHAR(255) DEFAULT NULL' },
+        ];
+        for (const { column, def } of colunasAssinado) {
+            try {
+                await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN ${column} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+            }
+        }
+        // Histórico de documentos assinados: 1 vigente por vez (vigente=1), reenvios
+        // ficam arquivados (vigente=0) para trilha de auditoria.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceiro_contrato_docs (
+                id           VARCHAR(36)  PRIMARY KEY,
+                contratoId   VARCHAR(36)  NOT NULL,
+                url          VARCHAR(500) NOT NULL,
+                nomeOriginal VARCHAR(255) DEFAULT NULL,
+                vigente      TINYINT      NOT NULL DEFAULT 1,
+                enviadoPor   VARCHAR(255) DEFAULT NULL,
+                enviadoEm    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_contratodoc_contrato (contratoId)
+            )
+        `);
+        console.log('✅ Migração terceiro_contratos concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] terceiro_contratos:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Integração ERP (Odoo): fila de sincronização + IDs espelho
+// Ver IMPLANTACAO_ERP_ODOO.md. Idempotente. A fila só é PROCESSADA quando a
+// env ODOO_URL estiver configurada (worker em services/cronService.js).
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS erp_sync_queue (
+                id            VARCHAR(36)  PRIMARY KEY,
+                entity_type   VARCHAR(40)  NOT NULL,
+                entity_id     VARCHAR(64)  NOT NULL,
+                operation     VARCHAR(40)  NOT NULL,
+                payload       JSON         DEFAULT NULL,
+                status        VARCHAR(20)  NOT NULL DEFAULT 'pending',
+                attempts      INT          NOT NULL DEFAULT 0,
+                last_error    TEXT         DEFAULT NULL,
+                odoo_result   JSON         DEFAULT NULL,
+                created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_erp_sync_entity_op (entity_type, entity_id, operation),
+                INDEX idx_erp_sync_status (status)
+            )
+        `);
+        // Colunas-espelho do ID do registro no Odoo (evitam duplicidade de
+        // lançamento). Cada ALTER é tolerante e independente: coluna já
+        // existente (ER_DUP_FIELDNAME) ou tabela ainda ausente (ER_NO_SUCH_TABLE)
+        // não abortam as demais.
+        const espelhosOdoo = [
+            { table: 'partners',                col: 'odoo_partner_id',  def: 'INT DEFAULT NULL' },
+            { table: 'obras',                   col: 'odoo_analytic_id', def: 'INT DEFAULT NULL' },
+            { table: 'orders',                  col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+            { table: 'terceirizado_pagamentos', col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+            { table: 'expenses',                col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+            { table: 'fines',                   col: 'odoo_move_id',     def: 'INT DEFAULT NULL' },
+        ];
+        for (const { table, col, def } of espelhosOdoo) {
+            try {
+                await db.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME' && err.code !== 'ER_NO_SUCH_TABLE') {
+                    console.warn(`⚠️ [migration] ${table}.${col}:`, err.message);
+                }
+            }
+        }
+        console.log('✅ Migração erp_sync_queue + colunas odoo_* concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] erp_sync_queue:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Log de e-mails enviados pelo sistema (auditoria de envios)
 // ====================================================================
 (async () => {
@@ -751,6 +1082,121 @@ const http = require('http');
 })();
 
 // ====================================================================
+// MIGRAÇÃO — Mensageiro interno (chat direto estilo MSN)
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS messages (
+                id            VARCHAR(36)  PRIMARY KEY,
+                sender_id     VARCHAR(64)  NOT NULL,
+                recipient_id  VARCHAR(64)  NOT NULL,
+                body          TEXT         NOT NULL,
+                type          VARCHAR(16)  NOT NULL DEFAULT 'text',
+                read_at       DATETIME     DEFAULT NULL,
+                created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_messages_pair    (sender_id, recipient_id, created_at),
+                INDEX idx_messages_unread  (recipient_id, read_at)
+            )
+        `);
+        console.log('✅ Migração messages (chat) concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] messages:', e.message);
+    }
+
+    // ── Fase 1: confiabilidade de entrega ──
+    // delivered_at : marca de entrega (destinatário conectado / conectou depois)
+    // client_msg_id: id gerado no cliente → idempotência de reenvio (fila offline)
+    // edited_at    : marca de edição (Fase 2, coluna criada aqui por conveniência)
+    // deleted_at   : soft delete (Fase 2)
+    const msgCols = [
+        { column: 'delivered_at',  def: 'DATETIME DEFAULT NULL' },
+        { column: 'client_msg_id', def: 'VARCHAR(64) DEFAULT NULL' },
+        { column: 'edited_at',     def: 'DATETIME DEFAULT NULL' },
+        { column: 'deleted_at',    def: 'DATETIME DEFAULT NULL' },
+        // ── Fase 2: produtividade ──
+        // reply_to  : id da mensagem citada (reply/quote)
+        // pinned_at/by: mensagem fixada na conversa (por par)
+        { column: 'reply_to',      def: 'VARCHAR(36) DEFAULT NULL' },
+        { column: 'pinned_at',     def: 'DATETIME DEFAULT NULL' },
+        { column: 'pinned_by',     def: 'VARCHAR(64) DEFAULT NULL' },
+        // ── Fase 4: anexos (reusa POST /api/upload) ──
+        { column: 'attachment_url',  def: 'VARCHAR(500) DEFAULT NULL' },
+        { column: 'attachment_name', def: 'VARCHAR(255) DEFAULT NULL' },
+        { column: 'attachment_mime', def: 'VARCHAR(100) DEFAULT NULL' },
+        { column: 'attachment_size', def: 'INT DEFAULT NULL' },
+    ];
+    for (const { column, def } of msgCols) {
+        try {
+            await db.query(`ALTER TABLE \`messages\` ADD COLUMN IF NOT EXISTS \`${column}\` ${def}`);
+        } catch (e) {
+            if (e.code === 'ER_PARSE_ERROR') {
+                try { await db.query(`ALTER TABLE \`messages\` ADD COLUMN \`${column}\` ${def}`); }
+                catch (e2) { if (e2.code !== 'ER_DUP_FIELDNAME') console.warn(`[migration] messages.${column}:`, e2.message); }
+            } else if (e.code !== 'ER_DUP_FIELDNAME') {
+                console.warn(`[migration] messages.${column}:`, e.message);
+            }
+        }
+    }
+    // Idempotência de reenvio: um mesmo (remetente, client_msg_id) só entra uma vez.
+    try {
+        await db.query('ALTER TABLE `messages` ADD UNIQUE INDEX `uniq_sender_clientmsg` (`sender_id`, `client_msg_id`)');
+    } catch (e) {
+        if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] uniq_sender_clientmsg:', e.message);
+    }
+
+    // ── Fase 2: reações às mensagens (uma por usuário+emoji+mensagem) ──
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS message_reactions (
+                id          VARCHAR(36) PRIMARY KEY,
+                message_id  VARCHAR(36) NOT NULL,
+                user_id     VARCHAR(64) NOT NULL,
+                emoji       VARCHAR(16) NOT NULL,
+                created_at  DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uniq_reaction (message_id, user_id, emoji),
+                INDEX idx_reaction_msg (message_id)
+            )
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] message_reactions:', e.message);
+    }
+
+    // ── Fase 5: governança ──
+    // Auditoria de ações do chat (não é apagada pela retenção).
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS chat_audit_log (
+                id         VARCHAR(36) PRIMARY KEY,
+                actor_id   VARCHAR(64) NOT NULL,
+                peer_id    VARCHAR(64) DEFAULT NULL,
+                action     VARCHAR(24) NOT NULL,
+                message_id VARCHAR(36) DEFAULT NULL,
+                at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_audit_actor (actor_id, at),
+                INDEX idx_audit_peer  (peer_id, at)
+            )
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] chat_audit_log:', e.message);
+    }
+    // Bloqueios entre usuários (user_id bloqueou blocked_id).
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS chat_blocks (
+                user_id    VARCHAR(64) NOT NULL,
+                blocked_id VARCHAR(64) NOT NULL,
+                created_at DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, blocked_id),
+                INDEX idx_block_blocked (blocked_id)
+            )
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] chat_blocks:', e.message);
+    }
+})();
+
+// ====================================================================
 // MIGRAÇÃO — Vínculos entre veículos (cavalo↔reboque, máquina↔acessório)
 // ====================================================================
 (async () => {
@@ -772,6 +1218,58 @@ const http = require('http');
         console.log('✅ Migração vehicle_links concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] vehicle_links:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — created_at em obras (ordenação "Abertura mais recente")
+// Guardada por existência da coluna: o backfill roda UMA vez só. Se rodasse
+// a cada boot, corromperia o created_at de obras que ativam depois (quando o
+// dataInicio real é preenchido, ele sobrescreveria a data de criação).
+// ====================================================================
+(async () => {
+    try {
+        const [col] = await db.query(
+            `SELECT COUNT(*) AS c FROM information_schema.columns
+             WHERE table_schema = DATABASE() AND table_name = 'obras' AND column_name = 'created_at'`
+        );
+        if (col[0].c > 0) return; // coluna já existe — não re-executa o backfill
+
+        await db.query('ALTER TABLE obras ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+        // Backfill único: obras com início real herdam essa data como "abertura".
+        // As pré-ativas (dataInicio null) ficam com o CURRENT_TIMESTAMP do ALTER.
+        await db.query('UPDATE obras SET created_at = dataInicio WHERE dataInicio IS NOT NULL');
+        console.log('✅ Migração obras.created_at + backfill concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] obras.created_at:', e.message);
+    }
+})();
+
+// ====================================================================
+// BACKFILL — obras.dataInicio = MIN(date) dos lançamentos de horas.
+// Corrige registros em que dataInicio divergiu do primeiro dia realmente
+// trabalhado (ex.: data digitada no cadastro ou congelada por lógica antiga).
+// Fonte única de verdade passa a ser o MIN(date). Idempotente: a cláusula
+// WHERE zera o efeito assim que todas as obras estão reconciliadas.
+// Não mexe em obras sem lançamentos (mantêm o valor atual; a tela usa a Data Prevista).
+// ====================================================================
+(async () => {
+    try {
+        const [r] = await db.query(`
+            UPDATE obras o
+            JOIN (
+                SELECT obraId, MIN(date) AS minDate
+                  FROM daily_work_logs
+                 GROUP BY obraId
+            ) l ON l.obraId = o.id
+            SET o.dataInicio = l.minDate
+            WHERE o.dataInicio IS NULL OR o.dataInicio <> l.minDate
+        `);
+        if (r.affectedRows > 0) {
+            console.log(`✅ Backfill obras.dataInicio (MIN dos logs): ${r.affectedRows} obra(s) reconciliada(s).`);
+        }
+    } catch (e) {
+        console.warn('⚠️ [migration] backfill obras.dataInicio:', e.message);
     }
 })();
 
@@ -889,6 +1387,202 @@ const http = require('http');
         console.log('✅ Migração partner_fuel_credit_entries + v_partner_fuel_balance concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] partner_fuel_credit_entries:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Relato de Ocorrência e Manutenção de Frota (FRM-MAN-001)
+// ====================================================================
+// Digitalização da ficha de papel que o operador preenche apontando os
+// problemas do equipamento e a gravidade de cada um (A/B/C/D). O gestor de
+// frota digita a ficha, faz a triagem (quem executa cada serviço) e "fecha" o
+// relato informando o número da OS do sistema MC — daí o sistema gera as
+// ordens de serviço agrupadas por executor, tira o equipamento da obra e
+// monta o cronograma em dias úteis.
+//
+// Tabelas novas em vez de estender `manutencoes_programadas`: aquela é uma
+// linha = um defeito em texto livre, sem cabeçalho, gravidade, executor nem
+// prazo. As duas tabelas legadas seguem intactas e em uso.
+//
+// Sem FOREIGN KEYs, seguindo a convenção de manutencoes_programadas/lavagens
+// (integridade garantida na aplicação).
+// ====================================================================
+(async () => {
+    try {
+        // --- Cabeçalho: seções 1, 2, 5 e 6 da ficha ---
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relatos_ocorrencia (
+                id                    VARCHAR(36)   PRIMARY KEY,
+                numero                INT           NOT NULL,
+                relatorNome           VARCHAR(150)  NOT NULL,
+                relatorEmployeeId     VARCHAR(255)  DEFAULT NULL,
+                relatorFuncao         VARCHAR(120)  DEFAULT NULL,
+                filialCidade          VARCHAR(120)  DEFAULT NULL,
+                dataRelato            DATE          NOT NULL,
+                vehicleId             VARCHAR(255)  NOT NULL,
+                veiculoModelo         VARCHAR(150)  DEFAULT NULL,
+                veiculoPlaca          VARCHAR(20)   DEFAULT NULL,
+                veiculoFrota          VARCHAR(60)   DEFAULT NULL,
+                hodometro             DECIMAL(12,1) DEFAULT NULL,
+                horimetro             DECIMAL(12,1) DEFAULT NULL,
+                observacoesGerais     TEXT          DEFAULT NULL,
+                assinaturaColaborador VARCHAR(150)  DEFAULT NULL,
+                assinaturaSupervisor  VARCHAR(150)  DEFAULT NULL,
+                recebidoEm            DATE          DEFAULT NULL,
+                responsavelManutencao VARCHAR(150)  DEFAULT NULL,
+                providenciaAdotada    TEXT          DEFAULT NULL,
+                concluidoEm           DATE          DEFAULT NULL,
+                status                VARCHAR(30)   NOT NULL DEFAULT 'Rascunho',
+                osMc                  VARCHAR(60)   DEFAULT NULL,
+                osMcRegistradaEm      DATETIME      DEFAULT NULL,
+                osMcRegistradaPor     JSON          DEFAULT NULL,
+                obraOrigemId          VARCHAR(255)  DEFAULT NULL,
+                saidaObraFeita        TINYINT(1)    NOT NULL DEFAULT 0,
+                vehicleStatusAnterior VARCHAR(50)   DEFAULT NULL,
+                localManutencao       VARCHAR(150)  DEFAULT NULL,
+                dataConclusaoPrevista DATE          DEFAULT NULL,
+                fechadoEm             DATETIME      DEFAULT NULL,
+                fechadoPor            JSON          DEFAULT NULL,
+                anexos                JSON          DEFAULT NULL,
+                createdBy             JSON          DEFAULT NULL,
+                createdAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updatedAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_relato_numero (numero),
+                INDEX idx_relato_vehicle (vehicleId),
+                INDEX idx_relato_status  (status),
+                INDEX idx_relato_osmc    (osMc)
+            )
+        `);
+
+        // --- Itens: seção 4 (a grade) + triagem do gestor + cronograma ---
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relato_ocorrencia_itens (
+                id                    VARCHAR(36)   PRIMARY KEY,
+                relatoId              VARCHAR(36)   NOT NULL,
+                sequencia             INT           NOT NULL,
+                itemComponente        VARCHAR(180)  NOT NULL,
+                descricaoProblema     TEXT          NOT NULL,
+                gravidade             CHAR(1)       NOT NULL,
+                executorTipo          VARCHAR(20)   DEFAULT NULL,
+                executorPartnerId     VARCHAR(255)  DEFAULT NULL,
+                executorNome          VARCHAR(180)  DEFAULT NULL,
+                servicoDescricao      TEXT          DEFAULT NULL,
+                quantidade            DECIMAL(12,2) NOT NULL DEFAULT 1,
+                inventoryItemId       VARCHAR(36)   DEFAULT NULL,
+                valorEstimado         DECIMAL(12,2) DEFAULT NULL,
+                slaDiasUteis          INT           DEFAULT NULL,
+                ordemSequencia        INT           DEFAULT NULL,
+                dataInicioPrevista    DATE          DEFAULT NULL,
+                dataConclusaoPrevista DATE          DEFAULT NULL,
+                dataConclusaoReal     DATE          DEFAULT NULL,
+                status                VARCHAR(30)   NOT NULL DEFAULT 'Em Análise',
+                motivoCancelamento    TEXT          DEFAULT NULL,
+                observacoes           TEXT          DEFAULT NULL,
+                createdAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updatedAt             DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_relato_seq (relatoId, sequencia),
+                INDEX idx_item_relato   (relatoId),
+                INDEX idx_item_status   (status),
+                INDEX idx_item_executor (executorPartnerId)
+            )
+        `);
+
+        // --- Ligação item ↔ ordem gerada ---
+        // Tabela de ligação (e não itens.orderId) porque um item pode virar
+        // compra de peça num fornecedor + mão de obra em outro, e porque o
+        // UNIQUE(itemId, orderId) é a rede de segurança contra geração dupla.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relato_item_ordens (
+                id        VARCHAR(36)  PRIMARY KEY,
+                relatoId  VARCHAR(36)  NOT NULL,
+                itemId    VARCHAR(36)  NOT NULL,
+                orderId   VARCHAR(255) NOT NULL,
+                papel     VARCHAR(20)  NOT NULL DEFAULT 'servico',
+                createdAt DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uk_item_order (itemId, orderId),
+                INDEX idx_rio_relato (relatoId),
+                INDEX idx_rio_order  (orderId)
+            )
+        `);
+
+        // --- Legenda de gravidade + prazo (SLA) por gravidade ---
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS relato_sla_config (
+                gravidade        CHAR(1)      PRIMARY KEY,
+                label            VARCHAR(120) NOT NULL,
+                descricao        VARCHAR(255) DEFAULT NULL,
+                slaDiasUteis     INT          NOT NULL,
+                bloqueiaOperacao TINYINT(1)   NOT NULL DEFAULT 0,
+                ordemPrioridade  INT          NOT NULL DEFAULT 99,
+                updatedAt        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+        // Seed com os textos exatos da legenda impressa na ficha. INSERT IGNORE:
+        // não sobrescreve prazos que o admin já tenha ajustado.
+        await db.query(`
+            INSERT IGNORE INTO relato_sla_config
+                (gravidade, label, descricao, slaDiasUteis, bloqueiaOperacao, ordemPrioridade)
+            VALUES
+                ('A', 'IMPOSSIBILITA TRABALHAR',  'Veículo parado / uso proibido. Risco iminente ou falha total.',  2, 1, 1),
+                ('B', 'PODE QUEBRAR EM BREVE',    'Uso restrito, reparo urgente. Falha provável a curto prazo.',    5, 0, 2),
+                ('C', 'PODE TRABALHAR ASSIM',     'Operação normal, agendar reparo. Não compromete a segurança.',  10, 0, 3),
+                ('D', 'EMBELEZAMENTO / ESTÉTICA', 'Sem urgência, corrigir quando possível. Aparência, acabamento.', 30, 0, 4)
+        `);
+
+        // Numeração do relato, no mesmo padrão de purchaseOrderCounter.
+        await db.query(
+            "INSERT IGNORE INTO counters (name, lastNumber) VALUES ('relatoOcorrenciaCounter', 0)"
+        );
+
+        // --- Colunas novas em orders e partners ---
+        // orders.tipo    → separa ordem de compra de ordem de serviço (antes a
+        //                  distinção só existia no texto livre do item).
+        // orders.relatoId/osMc/origem → vínculo com o relato e com a OS do MC.
+        //   osMc é cópia desnormalizada de relatos_ocorrencia.osMc (a fonte de
+        //   verdade) para a OrdersPage filtrar sem join e para sair no PDF.
+        // partners.is_oficina → oficina externa; continua tipo_parceiro
+        //   'fornecedor' de propósito, senão o SearchableSupplierSelect da
+        //   OrdersPage (que filtra === 'fornecedor') deixaria de listá-la.
+        // partners.is_interno → o partner-espelho da oficina própria da MAK.
+        const colunasRelato = [
+            { table: 'orders',   col: 'tipo',       def: "VARCHAR(20) DEFAULT 'compra'" },
+            { table: 'orders',   col: 'relatoId',   def: 'VARCHAR(36) DEFAULT NULL' },
+            { table: 'orders',   col: 'osMc',       def: 'VARCHAR(60) DEFAULT NULL' },
+            { table: 'orders',   col: 'origem',     def: "VARCHAR(30) DEFAULT 'manual'" },
+            { table: 'partners', col: 'is_oficina', def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+            { table: 'partners', col: 'is_interno', def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        ];
+        for (const { table, col, def } of colunasRelato) {
+            try {
+                await db.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') console.warn(`⚠️ [migration] ${table}.${col}:`, err.message);
+            }
+        }
+        for (const [nome, ddl] of [
+            ['idx_orders_relato', 'ALTER TABLE orders ADD INDEX idx_orders_relato (relatoId)'],
+            ['idx_orders_osmc',   'ALTER TABLE orders ADD INDEX idx_orders_osmc (osMc)'],
+        ]) {
+            try {
+                await db.query(ddl);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_KEYNAME') console.warn(`⚠️ [migration] ${nome}:`, err.message);
+            }
+        }
+        // Backfill idempotente das ordens que já existiam.
+        await db.query("UPDATE orders SET tipo = 'compra' WHERE tipo IS NULL");
+        await db.query("UPDATE orders SET origem = 'manual' WHERE origem IS NULL");
+
+        // Partner-espelho da oficina própria. Fica aqui dentro (e não num IIFE
+        // próprio) porque depende das colunas is_oficina/is_interno criadas
+        // logo acima — os IIFEs de migração rodam em paralelo, sem ordem
+        // garantida entre si.
+        const { ensureOficinaInternaPartner } = require('./utils/ensureOficinaInternaPartner');
+        await ensureOficinaInternaPartner(db);
+
+        console.log('✅ Migração relatos_ocorrencia (FRM-MAN-001) concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] relatos_ocorrencia:', e.message);
     }
 })();
 
@@ -1036,6 +1730,7 @@ const comboioTransactionRoutes = require('./routes/comboioTransactionRoutes');
 const agendaRoutes = require('./routes/agendaRoutes');
 const diarioDeBordoRoutes = require('./routes/diarioDeBordoRoutes');
 const orderRoutes = require('./routes/orderRoutes');
+const orderNotificationRoutes = require('./routes/orderNotificationRoutes');
 const counterRoutes = require('./routes/counterRoutes');
 const inactivityAlertRoutes = require('./routes/inactivityAlertRoutes');
 const registrationRequestRoutes = require('./routes/registrationRequestRoutes');
@@ -1063,6 +1758,11 @@ const notificationLogRoutes    = require('./routes/notificationLogRoutes');
 const suggestionRoutes         = require('./routes/suggestionRoutes');
 const vehicleLinkRoutes        = require('./routes/vehicleLinkRoutes');
 const comboioReportRoutes      = require('./routes/comboioReportRoutes');
+const terceirizadoPagamentoRoutes = require('./routes/terceirizadoPagamentoRoutes');
+const terceiroContratoRoutes      = require('./routes/terceiroContratoRoutes');
+const chatRoutes                  = require('./routes/chatRoutes');
+const holidayRoutes               = require('./routes/holidayRoutes');
+const relatoRoutes                = require('./routes/relatoRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -1148,6 +1848,23 @@ apiRouter.post('/upload', upload.single('file'), (req, res) => {
   }
 });
 
+// ✅ Contatos internos ativos (leitura) — usado no seletor de Responsável da Obra.
+// A gestão completa (CRUD) continua restrita a admin em /admin/internal-contacts.
+apiRouter.get('/internal-contacts', async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            `SELECT id, nome, cargo, setor, whatsapp, email
+             FROM internal_contacts
+             WHERE ativo = 1
+             ORDER BY nome ASC`
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('❌ Erro ao listar contatos internos:', error);
+        res.status(500).json({ error: 'Erro ao listar contatos internos.' });
+    }
+});
+
 // ✅ Rotas Protegidas
 apiRouter.use('/vehicles', vehicleRoutes);
 apiRouter.use('/obras', obraRoutes);
@@ -1178,6 +1895,7 @@ apiRouter.use('/washings', washingRoutes);
 apiRouter.use('/agenda', agendaRoutes);
 apiRouter.use('/inventory', inventoryRoutes);
 apiRouter.use('/whatsapp', whatsappRoutes);
+apiRouter.use('/orderNotifications', orderNotificationRoutes);
 apiRouter.use('/sigasul', sigasulRoutes);
 apiRouter.use('/vehicle-type-configs', vehicleTypeConfigRoutes);
 apiRouter.use('/vehicle-taxonomy', vehicleTaxonomyRoutes);
@@ -1186,6 +1904,13 @@ apiRouter.use('/notification-log', notificationLogRoutes);
 apiRouter.use('/suggestions', suggestionRoutes);
 apiRouter.use('/vehicle-links', vehicleLinkRoutes);
 apiRouter.use('/comboio-report', comboioReportRoutes);
+apiRouter.use('/terceirizadoPagamentos', terceirizadoPagamentoRoutes);
+apiRouter.use('/terceiroContratos', terceiroContratoRoutes);
+apiRouter.use('/chat', chatRoutes);
+// Leitura de feriados sem exigir admin (o CRUD segue em /admin/holidays).
+apiRouter.use('/holidays', holidayRoutes);
+// Relato de Ocorrência e Manutenção de Frota (FRM-MAN-001).
+apiRouter.use('/relatos', relatoRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware
@@ -1227,17 +1952,117 @@ app.use((err, req, res, next) => {
 // ====================================================================
 // SOCKET.IO - EVENTOS E CONEXÕES
 // ====================================================================
-io.on('connection', (socket) => {
-  console.log(`🔌 Cliente Socket.io conectado: ${socket.id} | IP: ${socket.handshake.address}`);
+const jwt = require('jsonwebtoken');
+const presence = require('./services/presenceService');
 
-  socket.on('disconnect', () => {
-    console.log(`❌ Cliente Socket.io desconectado: ${socket.id}`);
-  });
+// Handshake opcional com JWT: se o cliente enviar um token válido em
+// `auth.token` (ou query.token), associa o socket ao usuário e entra na sala
+// `user:<id>` — necessário para o mensageiro interno (mensagens direcionadas e
+// presença). Clientes sem token continuam conectando (só recebem broadcasts).
+io.use((socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+    if (token) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      socket.userId = decoded.id;
+    }
+  } catch (e) {
+    // Token inválido/expirado — não bloqueia a conexão, apenas não autentica.
+    console.warn('⚠️ Socket handshake sem auth válido:', e.message);
+  }
+  next();
+});
+
+io.on('connection', (socket) => {
+  console.log(`🔌 Cliente Socket.io conectado: ${socket.id}${socket.userId ? ` | user:${socket.userId}` : ''}`);
+
+  // ── Presença / mensageiro ──
+  if (socket.userId) {
+    const uid = socket.userId;
+    socket.join('user:' + uid);
+
+    // Status inicial: usa o último status salvo do usuário (fallback disponível).
+    db.query('SELECT chat_status, chat_status_msg FROM users WHERE id = ?', [uid])
+      .then(([rows]) => {
+        const saved = rows[0] || {};
+        const initialStatus = saved.chat_status && saved.chat_status !== 'offline'
+          ? saved.chat_status : 'disponivel';
+        const { wasOffline, entry } = presence.addSocket(uid, socket.id, initialStatus);
+        if (entry) entry.statusMsg = saved.chat_status_msg || null;
+
+        // Envia ao recém-conectado a lista de quem já está online.
+        socket.emit('presence:sync', presence.snapshot());
+
+        // Avisa os demais que este usuário ficou online (se transição).
+        if (wasOffline) {
+          socket.broadcast.emit('presence:update', {
+            userId: uid,
+            status: presence.publicStatus(uid),
+            statusMsg: presence.publicStatusMsg(uid),
+          });
+        }
+      })
+      .catch(err => console.warn('⚠️ presença connect:', err.message));
+
+    // Entrega em lote: mensagens recebidas enquanto o usuário estava offline
+    // passam a "entregues" agora que ele conectou; avisa cada remetente.
+    (async () => {
+      try {
+        const [pend] = await db.query(
+          `SELECT id, sender_id FROM messages
+            WHERE recipient_id = ? AND delivered_at IS NULL AND deleted_at IS NULL`,
+          [uid]
+        );
+        if (pend.length) {
+          await db.query(
+            'UPDATE messages SET delivered_at = NOW() WHERE recipient_id = ? AND delivered_at IS NULL',
+            [uid]
+          );
+          pend.forEach(m => {
+            io.to('user:' + m.sender_id).emit('chat:delivered', { id: m.id, to: uid });
+          });
+        }
+      } catch (err) { console.warn('⚠️ delivered batch:', err.message); }
+    })();
+
+    // "Digitando…" — relay efêmero (sem persistência) para o destinatário.
+    socket.on('chat:typing', ({ to } = {}) => {
+      if (to) io.to('user:' + to).emit('chat:typing', { from: uid });
+    });
+    socket.on('chat:stopTyping', ({ to } = {}) => {
+      if (to) io.to('user:' + to).emit('chat:stopTyping', { from: uid });
+    });
+
+    // Usuário troca o próprio status/recado.
+    socket.on('chat:setStatus', ({ status, statusMsg } = {}) => {
+      presence.setStatus(uid, status, statusMsg);
+      // Persiste a escolha para próximas sessões.
+      db.query('UPDATE users SET chat_status = ?, chat_status_msg = ? WHERE id = ?',
+        [status || 'disponivel', statusMsg || null, uid]).catch(() => {});
+      io.emit('presence:update', {
+        userId: uid,
+        status: presence.publicStatus(uid),
+        statusMsg: presence.publicStatusMsg(uid),
+      });
+    });
+
+    socket.on('disconnect', () => {
+      const { nowOffline } = presence.removeSocket(uid, socket.id);
+      if (nowOffline) {
+        db.query('UPDATE users SET chat_last_seen = NOW() WHERE id = ?', [uid]).catch(() => {});
+        socket.broadcast.emit('presence:update', { userId: uid, status: 'offline', statusMsg: null });
+      }
+      console.log(`❌ Cliente Socket.io desconectado: ${socket.id} | user:${uid}`);
+    });
+  } else {
+    socket.on('disconnect', () => {
+      console.log(`❌ Cliente Socket.io desconectado: ${socket.id}`);
+    });
+  }
 
   // Evento de teste (opcional, para debug)
   socket.on('ping', (callback) => {
-    console.log(`📡 Ping recebido de ${socket.id}`);
-    callback({ status: 'pong', timestamp: new Date().toISOString() });
+    if (typeof callback === 'function') callback({ status: 'pong', timestamp: new Date().toISOString() });
   });
 });
 

@@ -8,6 +8,7 @@ const whatsappService = require('../services/whatsappService');
 const bcrypt = require('bcrypt');
 const { v4: uuidv4 } = require('uuid');
 const { EVENT_CATALOG, isKnownEvent } = require('../services/notificationEvents');
+const { listHolidays, invalidateHolidayCache, sanitizeRegiao } = require('../utils/businessDays');
 
 router.use(authMiddleware);
 
@@ -68,6 +69,43 @@ const initAdminTables = async () => {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         `);
+        // Feriados: regiao '' = nacional; preenchida = municipal/estadual, válida
+        // só naquela região (mesmos valores de obras.regiao). Consumida por
+        // utils/businessDays.loadHolidaySet, que reexpõe '' como null na API.
+        //
+        // A coluna é NOT NULL DEFAULT '' de propósito: em índice UNIQUE o MySQL
+        // trata cada NULL como distinto, então com regiao NULL daria para
+        // cadastrar o mesmo feriado nacional várias vezes — e feriado duplicado
+        // quebraria a contagem de dias úteis, que é justamente o que a chave
+        // uk_holiday_date existe para impedir.
+        //
+        // MySQL não aceita `ADD COLUMN IF NOT EXISTS` (isso é MariaDB) — a forma
+        // idempotente aqui é tentar e engolir ER_DUP_FIELDNAME.
+        try {
+            await db.query("ALTER TABLE admin_holidays ADD COLUMN regiao VARCHAR(30) NOT NULL DEFAULT ''");
+        } catch (e) {
+            if (e.code !== 'ER_DUP_FIELDNAME') console.warn('⚠️ [migration] admin_holidays.regiao:', e.message);
+        }
+        try {
+            // Dedup antes de normalizar: o COALESCE cobre linhas gravadas por uma
+            // versão anterior desta migração, quando a coluna era nullable.
+            await db.query(`
+                DELETE h FROM admin_holidays h
+                JOIN admin_holidays keep
+                  ON keep.date = h.date
+                 AND COALESCE(keep.regiao, '') = COALESCE(h.regiao, '')
+                 AND keep.id < h.id
+            `);
+            await db.query("UPDATE admin_holidays SET regiao = '' WHERE regiao IS NULL");
+            await db.query("ALTER TABLE admin_holidays MODIFY COLUMN regiao VARCHAR(30) NOT NULL DEFAULT ''");
+        } catch (e) {
+            console.warn('⚠️ [migration] admin_holidays.regiao NOT NULL:', e.message);
+        }
+        try {
+            await db.query('ALTER TABLE admin_holidays ADD UNIQUE KEY uk_holiday_date (date, regiao)');
+        } catch (e) {
+            if (e.code !== 'ER_DUP_KEYNAME') console.warn('⚠️ [migration] uk_holiday_date:', e.message);
+        }
         await db.query(`
             CREATE TABLE IF NOT EXISTS admin_scheduled_reports (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -159,12 +197,17 @@ router.get('/users', adminOnly, async (req, res) => {
             SELECT u.id, u.name, u.email, u.role, u.user_type, u.status,
                    u.canAccessRefueling AS podeAcessarAbastecimento,
                    u.bloqueado_abastecimento, u.tentativas_falhas_abastecimento,
-                   u.group_id, g.name AS group_name
+                   u.group_id, g.name AS group_name, u.page_permissions
             FROM users u
             LEFT JOIN access_groups g ON u.group_id = g.id
             ORDER BY u.name ASC
         `);
-        res.json(rows.map(u => ({ ...u, podeAcessarAbastecimento: !!u.podeAcessarAbastecimento })));
+        const parsePages = (raw) => {
+            if (Array.isArray(raw)) return raw;
+            if (typeof raw === 'string') { try { const v = JSON.parse(raw); return Array.isArray(v) ? v : null; } catch { return null; } }
+            return null;
+        };
+        res.json(rows.map(u => ({ ...u, podeAcessarAbastecimento: !!u.podeAcessarAbastecimento, page_permissions: parsePages(u.page_permissions) })));
     } catch (error) {
         console.error('Erro ao listar usuários:', error);
         res.status(500).json({ error: 'Erro ao listar usuários.' });
@@ -173,11 +216,13 @@ router.get('/users', adminOnly, async (req, res) => {
 
 // Criar novo usuário
 router.post('/users', adminOnly, async (req, res) => {
-    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling } = req.body;
+    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling, page_permissions } = req.body;
     if (!name || !email || !password) {
         return res.status(400).json({ error: 'Nome, e-mail e senha são obrigatórios.' });
     }
     const canRefuel = !!(podeAcessarAbastecimento || canAccessRefueling);
+    const customPages = Array.isArray(page_permissions) && page_permissions.length > 0
+        ? JSON.stringify(page_permissions) : null;
     try {
         const [existing] = await db.query('SELECT id FROM users WHERE email = ?', [email]);
         if (existing.length > 0) return res.status(409).json({ error: 'E-mail já cadastrado.' });
@@ -187,9 +232,9 @@ router.post('/users', adminOnly, async (req, res) => {
         const role = user_type || 'viewer';
 
         await db.query(
-            `INSERT INTO users (id, name, email, password, role, user_type, status, canAccessRefueling, group_id, data_criacao)
-             VALUES (?, ?, ?, ?, ?, ?, 'ativo', ?, ?, NOW())`,
-            [id, name, email, hashed, role, role, canRefuel ? 1 : 0, group_id || null]
+            `INSERT INTO users (id, name, email, password, role, user_type, status, canAccessRefueling, group_id, page_permissions, data_criacao)
+             VALUES (?, ?, ?, ?, ?, ?, 'ativo', ?, ?, ?, NOW())`,
+            [id, name, email, hashed, role, role, canRefuel ? 1 : 0, group_id || null, customPages]
         );
         res.status(201).json({ id, message: 'Usuário criado com sucesso.' });
     } catch (error) {
@@ -201,7 +246,7 @@ router.post('/users', adminOnly, async (req, res) => {
 // Atualizar usuário (PATCH — usado pelo UserEditModal)
 router.patch('/users/:id', adminOnly, async (req, res) => {
     const { id } = req.params;
-    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling, active } = req.body;
+    const { name, email, password, user_type, group_id, podeAcessarAbastecimento, canAccessRefueling, active, page_permissions } = req.body;
     const canRefuel = podeAcessarAbastecimento !== undefined ? podeAcessarAbastecimento
                     : canAccessRefueling !== undefined ? canAccessRefueling : undefined;
     try {
@@ -214,6 +259,12 @@ router.patch('/users/:id', adminOnly, async (req, res) => {
         if (group_id !== undefined) { sets.push('group_id = ?');           params.push(group_id || null); }
         if (canRefuel !== undefined){ sets.push('canAccessRefueling = ?'); params.push(canRefuel ? 1 : 0); }
         if (active !== undefined)   { sets.push('status = ?');             params.push(active ? 'ativo' : 'inativo'); }
+        // page_permissions: array não-vazio = override individual; null/[] = volta ao padrão do role.
+        if (page_permissions !== undefined) {
+            const custom = Array.isArray(page_permissions) && page_permissions.length > 0
+                ? JSON.stringify(page_permissions) : null;
+            sets.push('page_permissions = ?'); params.push(custom);
+        }
         if (password) {
             const hashed = await bcrypt.hash(password, 10);
             sets.push('password = ?');
@@ -734,26 +785,28 @@ router.put('/approval-workflows', adminOnly, async (req, res) => {
 
 router.get('/holidays', adminOnly, async (req, res) => {
     try {
-        const [rows] = await db.query('SELECT * FROM admin_holidays ORDER BY date ASC');
-        res.json(rows.map(h => ({
-            ...h,
-            date: h.date instanceof Date ? h.date.toISOString().slice(0, 10) : h.date,
-        })));
+        res.json(await listHolidays(db));
     } catch (error) {
         res.status(500).json({ error: 'Erro ao listar feriados.' });
     }
 });
 
 router.post('/holidays', adminOnly, async (req, res) => {
-    const { name, date } = req.body;
+    const { name, date, regiao } = req.body;
     if (!name || !date) return res.status(400).json({ error: 'Nome e data são obrigatórios.' });
+
+    const safeRegiao = sanitizeRegiao(regiao);
     try {
         const [result] = await db.query(
-            'INSERT INTO admin_holidays (name, date) VALUES (?, ?)',
-            [name, date]
+            'INSERT INTO admin_holidays (name, date, regiao) VALUES (?, ?, ?)',
+            [name, date, safeRegiao]
         );
-        res.status(201).json({ id: result.insertId, name, date });
+        invalidateHolidayCache();
+        res.status(201).json({ id: result.insertId, name, date, regiao: safeRegiao || null });
     } catch (error) {
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'Já existe feriado cadastrado nesta data para esta região.' });
+        }
         res.status(500).json({ error: 'Erro ao adicionar feriado.' });
     }
 });
@@ -762,6 +815,7 @@ router.delete('/holidays/:id', adminOnly, async (req, res) => {
     const { id } = req.params;
     try {
         await db.query('DELETE FROM admin_holidays WHERE id = ?', [id]);
+        invalidateHolidayCache();
         res.json({ message: 'Feriado removido.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao remover feriado.' });

@@ -1,5 +1,6 @@
 const db = require('../database');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
+const { todayBRT } = require('../utils/dateBRT');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -496,7 +497,7 @@ const getProjecaoObra = async (req, res) => {
         // Quinzenas: janelas fixas de 15 dias a partir da data de início operacional
         const quinzenas = [];
         if (dataInicio) {
-            const today = new Date().toISOString().slice(0, 10);
+            const today = todayBRT();
             let horasAcum = 0;
             let faturAcum = 0;
 
@@ -557,18 +558,31 @@ const getProjecaoObra = async (req, res) => {
         const diasParaFinalizar = ritmoHorasPorDia > 0 ? Math.ceil(horasRestantes / ritmoHorasPorDia) : null;
         const percentConcluido  = horasContratadas > 0 ? (totalHoras / horasContratadas) * 100 : 0;
 
-        // Custo de combustível (diesel) vinculado à obra
-        const [refuelRows] = await db.query(`
-            SELECT COALESCE(SUM(r.litrosLiberados), 0)              AS total_litros,
-                   COALESCE(SUM(r.litrosLiberados * r.pricePerLiter), 0) AS total_custo
-              FROM refuelings r
-             WHERE r.obraId = ?
-               AND r.litrosLiberados IS NOT NULL
-               AND r.pricePerLiter  IS NOT NULL
+        // Custo de combustível (diesel) da obra.
+        // Fonte única de verdade: a tabela `expenses` (categoria 'Combustível'),
+        // que consolida TODOS os fluxos de combustível — ordens de abastecimento,
+        // comboio (saída/drenagem/descarte), lançamentos automáticos e manuais.
+        // É exatamente o mesmo número exibido no painel de Gestão de Obras.
+        //
+        // Antes, este cálculo recomputava o custo apenas a partir de `refuelings`
+        // (litros × preço, com resgate do preço do comboio), o que subestimava o
+        // total: ignorava abastecimentos lançados por outros fluxos e zerava o
+        // custo das saídas de comboio cujo preço de entrada não fosse resolvido.
+        const [[custoRow]] = await db.query(`
+            SELECT COALESCE(SUM(amount), 0) AS total
+              FROM expenses
+             WHERE obraId = ? AND category = 'Combustível'
         `, [obraId]);
+        const totalCustoCombust = parseFloat(custoRow.total) || 0;
 
-        const totalLitros       = parseFloat(refuelRows[0]?.total_litros  || 0);
-        const totalCustoCombust = parseFloat(refuelRows[0]?.total_custo   || 0);
+        // Litros consumidos (informativo) — somados dos abastecimentos vinculados
+        // à obra. Serve só para exibição; o custo NÃO deriva mais daqui.
+        const [[litrosRow]] = await db.query(`
+            SELECT COALESCE(SUM(litrosLiberados), 0) AS total
+              FROM refuelings
+             WHERE obraId = ? AND litrosLiberados IS NOT NULL
+        `, [obraId]);
+        const totalLitros = parseFloat(litrosRow.total) || 0;
 
         // % combustível sobre faturamento já realizado
         const percentCombust = totalFaturamentoRS > 0
@@ -605,7 +619,7 @@ const getProjecaoObra = async (req, res) => {
                 percentualAtual:       Math.round(percentCombust     * 10)  / 10,
                 projecaoFinalPercent:  Math.round(projecaoFinalPercent * 10) / 10,
                 alertaCritico:         projecaoFinalPercent > 20,
-                semDados:              totalLitros === 0,
+                semDados:              totalCustoCombust === 0 && totalLitros === 0,
             },
         });
     } catch (e) {

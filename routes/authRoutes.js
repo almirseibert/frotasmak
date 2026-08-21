@@ -3,10 +3,15 @@ const router = express.Router();
 const authController = require('../controllers/authController');
 const authMiddleware = require('../middlewares/authMiddleware');
 const db = require('../database');
+const { getEffectivePages, normalizePagePermissions } = require('../utils/permissions');
 
 // --- ROTAS PÚBLICAS ---
 router.post('/login', authController.login);
 router.post('/register', authController.register);
+// Renovação silenciosa de sessão e logout (revogação). Públicas de propósito:
+// o access token pode já estar expirado quando o cliente as chama.
+router.post('/refresh', authController.refresh);
+router.post('/logout', authController.logout);
 
 // --- ROTAS PROTEGIDAS ---
 // 🚨 Rota comentada para corrigir o TypeError (a função validatePassword não existe no controller)
@@ -22,11 +27,12 @@ router.get('/me', authMiddleware, async (req, res) => {
     try {
         // CORREÇÃO: Busca campos novos de bloqueio e tentativas
         const [rows] = await db.query(
-            `SELECT id, name, email, role, user_type, status, 
-                    canAccessRefueling, 
-                    bloqueado_abastecimento, 
-                    tentativas_falhas_abastecimento 
-             FROM users WHERE id = ?`, 
+            `SELECT id, name, email, role, user_type, status,
+                    canAccessRefueling, canAccessAnaliseGerencial,
+                    bloqueado_abastecimento,
+                    tentativas_falhas_abastecimento,
+                    page_permissions
+             FROM users WHERE id = ?`,
             [userId]
         );
         const user = rows[0];
@@ -38,9 +44,14 @@ router.get('/me', authMiddleware, async (req, res) => {
             ...user,
             role: user.role || user.user_type, // Garante compatibilidade
             canAccessRefueling: user.canAccessRefueling === 1,
+            canAccessAnaliseGerencial: user.canAccessAnaliseGerencial === 1,
             bloqueado_abastecimento: user.bloqueado_abastecimento === 1, // Garante booleano
-            tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento || 0
+            tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento || 0,
+            page_permissions: normalizePagePermissions(user.page_permissions)
         };
+
+        // Fonte única: o servidor calcula as páginas efetivas e o front consome.
+        userProfile.effectivePages = getEffectivePages(userProfile);
 
         res.json(userProfile);
 

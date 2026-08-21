@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
 const { recalcFuelAverage } = require('../utils/recalcFuelAverage');
 const { vehicleGroups } = require('../utils/vehicleRules');
+const { ymdBRT } = require('../utils/dateBRT');
 const { notifyComboioEntrada } = require('../services/orderNotifier');
 const fuelCredits = require('../utils/partnerFuelCredits');
 const { dispatchAsync, insertLog } = require('../services/notificationDispatcher');
@@ -17,7 +18,7 @@ const nodemailer = require('nodemailer');
 // Reusa o orderNotifier (mesmo pipeline da entrada de comboio): gera o PDF
 // uma vez, anexa por e-mail e manda link pelo WhatsApp — respeitando os
 // checkboxes envia_por_whatsapp / envia_por_email do partner. Fire-and-forget.
-const dispatchOrderToPartner = async (refuelingId) => {
+const dispatchOrderToPartner = async (refuelingId, opts = {}) => {
     try {
         const [[r]] = await db.execute(
             `SELECT r.id, r.authNumber, r.data, r.partnerId, r.partnerName,
@@ -72,6 +73,7 @@ const dispatchOrderToPartner = async (refuelingId) => {
                 outros: r.outros,
                 outrosValor: r.outrosValor,
                 issuer,
+                isAlteracao: !!opts.isAlteracao,
             },
         }).then(result => {
             console.log(`[orderNotifier] ordem #${r.authNumber}:`, JSON.stringify(result));
@@ -327,6 +329,21 @@ const getAllRefuelings = async (req, res) => {
     }
 };
 
+// Abastecimentos de UM veículo (aba "Abastecimento" no histórico do veículo).
+// Escopado por vehicleId para não trafegar a tabela inteira no modal.
+const getRefuelingsByVehicle = async (req, res) => {
+    try {
+        const [rows] = await db.execute(
+            `SELECT * FROM refuelings WHERE vehicleId = ? AND ${HIDDEN_VISIBILITY_CLAUSE} ORDER BY id DESC`,
+            [req.params.vehicleId, req.user?.id || null]
+        );
+        res.json(parseRefuelingRows(rows));
+    } catch (error) {
+        console.error('Erro GET refuelings por veículo:', error);
+        res.status(500).json({ error: 'Erro ao buscar abastecimentos do veículo.' });
+    }
+};
+
 const getRefuelingById = async (req, res) => {
     try {
         // 404 (e não 403) quando a ordem é reservada de outro usuário: um 403
@@ -468,8 +485,11 @@ const createRefuelingOrder = async (req, res) => {
                 '01-01', '04-21', '05-01', '09-07',
                 '10-12', '11-02', '11-15', '12-25'
             ]);
-            const dow = dataAbastecimento.getDay();
-            const mmdd = dataAbastecimento.toISOString().slice(5, 10);
+            // Dia da semana / MM-DD calculados no fuso de Brasília (não UTC),
+            // senão ordens do fim da tarde caíam no dia seguinte.
+            const ymd = ymdBRT(dataAbastecimento); // 'YYYY-MM-DD' em BRT
+            const dow = new Date(`${ymd}T12:00:00-03:00`).getDay();
+            const mmdd = ymd.slice(5, 10);
             const isWeekendOrHoliday = dow === 0 || dow === 6 || FERIADOS_BR_FIXOS.has(mmdd);
 
             const [vehicleRows] = await connection.execute(
@@ -733,9 +753,17 @@ const updateRefuelingOrder = async (req, res) => {
             const dateStr = data.date.toString().replace(' ', 'T');
             updateData.data = new Date(dateStr);
         }
-        if (data.editedBy) updateData.editedBy = JSON.stringify(data.editedBy);
+        // Registra quem editou (o frontend envia o usuário em createdBy).
+        const editorInfo = data.editedBy || data.createdBy;
+        if (editorInfo) updateData.editedBy = JSON.stringify(editorInfo);
         if (data.status) updateData.status = data.status;
-        
+
+        if (data.vehicleId !== undefined) updateData.vehicleId = data.vehicleId;
+        if (data.employeeId !== undefined) updateData.employeeId = data.employeeId || null;
+        if (data.isFillUp !== undefined) updateData.isFillUp = data.isFillUp ? 1 : 0;
+        if (data.needsArla !== undefined) updateData.needsArla = data.needsArla ? 1 : 0;
+        if (data.isFillUpArla !== undefined) updateData.isFillUpArla = data.isFillUpArla ? 1 : 0;
+
         if (data.litrosLiberados !== undefined) updateData.litrosLiberados = safeNum(data.litrosLiberados, true);
         if (data.litrosAbastecidos !== undefined) updateData.litrosAbastecidos = safeNum(data.litrosAbastecidos, true);
         if (data.litrosAbastecidosArla !== undefined) updateData.litrosAbastecidosArla = safeNum(data.litrosAbastecidosArla, true);
@@ -840,6 +868,17 @@ const updateRefuelingOrder = async (req, res) => {
 
         await connection.commit();
         req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles', 'partner_fuel_credits'] });
+
+        // Reenvia a ordem ao posto (WhatsApp/e-mail conforme configurado) com um
+        // alerta de "ORDEM ALTERADA — desconsiderar a anterior". Só reenvia se a
+        // ordem estiver em estado enviável (não bloqueada e não terminal); ordens
+        // bloqueadas aguardam a liberação do admin, que dispara o envio.
+        const finalStatus = updateData.status || oldRefueling.status;
+        const sendableStatuses = ['Aberta', 'Concluída', 'Concluida', 'Confirmada'];
+        if (sendableStatuses.includes(finalStatus)) {
+            dispatchOrderToPartner(id, { isAlteracao: true });
+        }
+
         res.json({ message: 'Ordem atualizada.' });
     } catch (error) {
         await connection.rollback();
@@ -855,7 +894,7 @@ const FUEL_PCT_THRESHOLDS = [50, 75, 90, 100];
 
 const checkObraFuelPercent = async (obraId) => {
     const [[obra]] = await db.query(
-        'SELECT nome, valorTotalContrato, responsavel_email FROM obras WHERE id = ?',
+        'SELECT nome, valorTotalContrato, responsavel, responsavel_email, responsavel_whatsapp FROM obras WHERE id = ?',
         [obraId]
     );
     if (!obra) return;
@@ -899,8 +938,13 @@ const checkObraFuelPercent = async (obraId) => {
             obraId,
         };
 
-        // Disparo via notification_targets configurados no admin
-        dispatchAsync('combustivel_obra_20pct', payload, { obraId });
+        // Disparo via notification_targets configurados no admin,
+        // mais o responsável da obra por WhatsApp (contato interno).
+        const extraContacts = [];
+        if (obra.responsavel_whatsapp) {
+            extraContacts.push({ channel: 'whatsapp', contact: obra.responsavel_whatsapp, name: obra.responsavel || 'Responsável da Obra' });
+        }
+        dispatchAsync('combustivel_obra_20pct', payload, { obraId, extraContacts });
 
         // Envio direto ao responsável da obra (se tiver email configurado)
         if (obra.responsavel_email) {
@@ -1259,6 +1303,7 @@ const revelarOrdemOculta = async (req, res) => {
 
 module.exports = {
     getAllRefuelings,
+    getRefuelingsByVehicle,
     getRefuelingById,
     createRefuelingOrder,
     updateRefuelingOrder,

@@ -16,4 +16,7 @@ router.delete('/:id', orderController.deleteOrder);
 // Rota de cancelamento
 router.put('/:id/cancel', orderController.cancelOrder);
 
+// Dispara e-mail/WhatsApp ao fornecedor com o PDF gerado (chamada pós-save)
+router.post('/:id/notify', orderController.notifyOrder);
+
 module.exports = router;

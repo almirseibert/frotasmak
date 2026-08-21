@@ -2,9 +2,14 @@ const cron = require('node-cron');
 const db = require('../database');
 const whatsappService = require('./whatsappService');
 const { dispatchAsync } = require('./notificationDispatcher');
+const { ymdBRT } = require('../utils/dateBRT');
 const { syncJourneyEvents, syncPositions, syncDailySummary } = require('./sigasulSyncService');
 const { processYesterday: processConfrontoYesterday } = require('./confrontoService');
 const { processYesterday: processDiscrepanciaYesterday } = require('./discrepanciaService');
+const erpSyncService = require('./erpSyncService');
+const orderDelivery = require('./orderDelivery');
+const orderRetryService = require('./orderRetryService');
+const { sendEmail } = require('./emailService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -46,11 +51,8 @@ const getTzDateStr = (daysToAdd = 0) => {
 
 const formatDateDb = (dbDate) => {
     if (!dbDate) return null;
-    try {
-        const d = new Date(dbDate);
-        if(isNaN(d.getTime())) return null;
-        return d.toISOString().split('T')[0];
-    } catch(e) { return null; }
+    // Formata em BRT (GMT-3), fuso oficial da rotina diária — não em UTC.
+    return ymdBRT(dbDate);
 };
 
 // Formatação Padrão de WhatsApp (Padronização Frotas MAK)
@@ -593,6 +595,29 @@ cron.schedule('0 2 * * 0', () => {
 });
 
 // ====================================================================
+// CRON DIÁRIO — Retenção de mensagens do chat
+// Remove mensagens mais antigas que N meses (system_settings.chat_retention_months).
+// N ausente ou <= 0 desativa a limpeza. Reações órfãs são removidas junto.
+// A auditoria (chat_audit_log) NÃO é afetada.
+// ====================================================================
+cron.schedule('0 4 * * *', async () => {
+    try {
+        const [rows] = await db.query("SELECT value FROM system_settings WHERE `key` = 'chat_retention_months'");
+        const months = rows.length ? parseInt(rows[0].value, 10) : 0;
+        if (!Number.isFinite(months) || months <= 0) return; // desativado
+        const [del] = await db.query(
+            'DELETE FROM messages WHERE created_at < DATE_SUB(NOW(), INTERVAL ? MONTH)',
+            [months]
+        );
+        // Limpa reações que apontam para mensagens que não existem mais.
+        await db.query('DELETE r FROM message_reactions r LEFT JOIN messages m ON m.id = r.message_id WHERE m.id IS NULL');
+        if (del.affectedRows) console.log(`🧹 [cron] Retenção chat: ${del.affectedRows} mensagens > ${months} meses removidas.`);
+    } catch (e) {
+        console.error('❌ [CRON] Erro na retenção do chat:', e.message);
+    }
+});
+
+// ====================================================================
 // CRON DIÁRIO — Sync resumo diário Siga Sul + Rotação de logs WhatsApp
 // ====================================================================
 cron.schedule('0 3 * * *', async () => {
@@ -641,25 +666,82 @@ cron.schedule('45 6 * * *', async () => {
 // estar na tela de configurações.
 // ====================================================================
 let _waEstavaDesconectado = false;
+let _waDesconectadoDesde = null;   // timestamp do início da queda atual
+let _waEscalonadoEm = null;        // última vez que escalamos por e-mail
 
-cron.schedule('*/5 * * * *', async () => {
-    if (!global.io) return;
+// Depois de quanto tempo fora escalar por e-mail. Socket sozinho não basta:
+// se ninguém estiver com o sistema aberto, o alerta cai no vazio — que é
+// exatamente o cenário "ficamos no escuro" que estamos combatendo.
+const MIN_ATE_ESCALAR = 10;
+const MIN_ENTRE_ESCALONAMENTOS = 60;
+
+const escalarQuedaWhatsapp = async (statusAtual, minutosFora) => {
+    try {
+        const [admins] = await db.query(
+            "SELECT email FROM users WHERE role IN ('admin', 'master') AND email IS NOT NULL AND email <> ''"
+        );
+        const destinatarios = admins.map(a => a.email).filter(Boolean);
+        if (destinatarios.length === 0) return;
+
+        const pendencias = await orderDelivery.contarPendencias({ dias: 2 });
+        await sendEmail({
+            to: destinatarios.join(','),
+            subject: `🚨 WhatsApp do Frotas MAK fora do ar há ${minutosFora} min`,
+            text: [
+                `O serviço de WhatsApp está com status "${statusAtual}" há aproximadamente ${minutosFora} minutos.`,
+                ``,
+                `Enquanto isso, as ordens de abastecimento NÃO estão sendo entregues aos postos.`,
+                `Envios pendentes/falhos nas últimas 48h: ${pendencias}.`,
+                ``,
+                `Ação: acesse Admin → Comunicação → WhatsApp e reconecte (leitura do QR Code).`,
+                `As ordens que falharam são reenviadas automaticamente assim que a conexão voltar.`,
+            ].join('\n'),
+        });
+        console.warn(`📧 [CRON-WA] Escalonamento por e-mail enviado a ${destinatarios.length} admin(s).`);
+    } catch (e) {
+        console.error('❌ [CRON-WA] Falha ao escalar queda por e-mail:', e.message);
+    }
+};
+
+// A cada 2 min (era 5): quanto antes detectarmos, menos ordens caem no vazio.
+cron.schedule('*/2 * * * *', async () => {
     try {
         const { status } = await whatsappService.getStatus();
         const desconectado = status !== 'PRONTO' && status !== 'AUTENTICANDO' && status !== 'AUTENTICADO';
 
         if (desconectado && !_waEstavaDesconectado) {
-            // Acabou de desconectar — já notificado pelo getStatus() acima via whatsappService
             _waEstavaDesconectado = true;
+            _waDesconectadoDesde = Date.now();
+            _waEscalonadoEm = null;
             console.warn('⚠️ [CRON-WA] WhatsApp desconectado — alerta emitido para admins.');
         } else if (!desconectado && _waEstavaDesconectado) {
-            // Reconectou — avisa o frontend para limpar o alerta
             _waEstavaDesconectado = false;
-            global.io.emit('whatsapp:reconectado');
+            _waDesconectadoDesde = null;
+            _waEscalonadoEm = null;
+            if (global.io) global.io.emit('whatsapp:reconectado');
             console.log('✅ [CRON-WA] WhatsApp reconectado — limpeza de alerta emitida.');
         } else if (desconectado) {
-            // Continua desconectado — re-emite para admins que entraram depois
-            global.io.emit('admin:notificacao', { tipo: 'whatsapp_desconectado' });
+            const minutosFora = Math.round((Date.now() - (_waDesconectadoDesde || Date.now())) / 60000);
+            if (global.io) {
+                global.io.emit('admin:notificacao', { tipo: 'whatsapp_desconectado', minutosFora });
+            }
+            // Escalonamento por e-mail — canal independente do WhatsApp caído.
+            const podeEscalar = minutosFora >= MIN_ATE_ESCALAR &&
+                (!_waEscalonadoEm || (Date.now() - _waEscalonadoEm) >= MIN_ENTRE_ESCALONAMENTOS * 60000);
+            if (podeEscalar) {
+                _waEscalonadoEm = Date.now();
+                await escalarQuedaWhatsapp(status, minutosFora);
+            }
+        }
+
+        // Fila de retentativa — roda sempre; o próprio serviço decide o que é
+        // elegível conforme o status da sessão.
+        await orderRetryService.processarFila();
+
+        // Mantém o contador de pendências visível para quem estiver na tela.
+        if (global.io) {
+            const pendencias = await orderDelivery.contarPendencias({ dias: 2 });
+            if (pendencias > 0) global.io.emit('ordens:pendencias_envio', { total: pendencias });
         }
     } catch (e) {
         console.error('❌ [CRON-WA] Erro ao verificar status WhatsApp:', e.message);
@@ -690,6 +772,21 @@ cron.schedule('* * * * *', async () => {
         }
     } catch (e) {
         console.error('❌ [CRON] Erro na liberação de ordens reservadas:', e.message);
+    }
+});
+
+// ====================================================================
+// [ERP-SYNC] Processa a fila de sincronização com o Odoo (contas a pagar).
+// INERTE até a env ODOO_URL estar configurada (isConfigured() = false →
+// processQueue() retorna sem fazer nada). A cada 2 minutos.
+// Ver IMPLANTACAO_ERP_ODOO.md.
+// ====================================================================
+cron.schedule('*/2 * * * *', async () => {
+    if (!erpSyncService.isConfigured()) return;
+    try {
+        await erpSyncService.processQueue();
+    } catch (e) {
+        console.error('❌ [ERP-SYNC] Erro no processamento da fila:', e.message);
     }
 });
 

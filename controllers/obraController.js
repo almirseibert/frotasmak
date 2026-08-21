@@ -22,10 +22,23 @@ const parseJsonSafe = (field, key, defaultValue = null) => {
     }
 };
 
+// Ciclo de vida de planejamento: radar → planejada → mobilizacao → ativa → finalizada
+const VALID_OBRA_STATUSES = ['radar', 'planejada', 'mobilizacao', 'ativa', 'finalizada'];
+const PRE_ACTIVE_STATUSES = ['radar', 'planejada', 'mobilizacao'];
+
+// Contrato de horas preenchido (objeto ou JSON string com pelo menos 1 chave)
+const temContratoDeHoras = (val) => {
+    if (!val) return false;
+    try {
+        const obj = typeof val === 'string' ? JSON.parse(val) : val;
+        return !!obj && Object.keys(obj).length > 0;
+    } catch { return false; }
+};
+
 const parseObraJsonFields = (obra) => {
     if (!obra) return null;
     const newObra = { ...obra };
-    const fieldsToParse = ['horasContratadasPorTipo', 'valoresPorTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
+    const fieldsToParse = ['horasContratadasPorTipo', 'valoresPorTipo', 'horasContratadasPorSubTipo', 'valoresPorSubTipo', 'sectors', 'alocadoEm', 'ultimaAlteracao'];
     fieldsToParse.forEach(field => {
         if (obra.hasOwnProperty(field)) {
             newObra[field] = parseJsonSafe(obra[field], field);
@@ -119,20 +132,39 @@ const createObra = async (req, res) => {
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);
+    if (data.horasContratadasPorSubTipo) data.horasContratadasPorSubTipo = JSON.stringify(data.horasContratadasPorSubTipo);
+    if (data.valoresPorSubTipo) data.valoresPorSubTipo = JSON.stringify(data.valoresPorSubTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
-    
+
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
     if (data.responsavel === '') data.responsavel = null;
+    if (data.responsavel_whatsapp === '') data.responsavel_whatsapp = null;
     if (data.fiscal === '') data.fiscal = null;
+    if (data.dataInicioPrevisto === '') data.dataInicioPrevisto = null;
+    if (data.dataFimPrevisto === '') data.dataFimPrevisto = null;
 
     if (data.kmContratadoPrancha === '') data.kmContratadoPrancha = 0;
     if (data.valorKmPrancha === '') data.valorKmPrancha = 0;
     if (data.valorTotalContrato === '') data.valorTotalContrato = 0;
 
-    data.status = 'ativa';
+    // Status pré-obra (radar/planejada/mobilizacao) permitido no cadastro;
+    // default mantém o comportamento atual ('ativa').
+    data.status = (VALID_OBRA_STATUSES.includes(data.status) && data.status !== 'finalizada')
+        ? data.status
+        : 'ativa';
+    // dataInicio NÃO é editável: é reconciliado como MIN(date) dos lançamentos de horas.
+    // Enquanto não houver lançamento, fica NULL e a tela usa a Data Prevista (dataInicioPrevisto).
+    data.dataInicio = null;
+    if (PRE_ACTIVE_STATUSES.includes(data.status)) {
+        // Radar = apenas criada; registrar contrato de horas já promove para 'planejada'.
+        if (data.status === 'radar' &&
+            (temContratoDeHoras(data.horasContratadasPorSubTipo) || temContratoDeHoras(data.horasContratadasPorTipo))) {
+            data.status = 'planejada';
+        }
+    }
 
     const fields = Object.keys(data);
     const values = Object.values(data);
@@ -168,9 +200,13 @@ const updateObra = async (req, res) => {
     delete data.realizadoPorTipo;
     delete data.totalHorasRealizadas;
     delete data.id;
+    // dataInicio é derivado dos logs (MIN(date)) — nunca gravado pela edição de obra.
+    delete data.dataInicio;
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);
+    if (data.horasContratadasPorSubTipo) data.horasContratadasPorSubTipo = JSON.stringify(data.horasContratadasPorSubTipo);
+    if (data.valoresPorSubTipo) data.valoresPorSubTipo = JSON.stringify(data.valoresPorSubTipo);
     if (data.sectors) data.sectors = JSON.stringify(data.sectors);
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     if (data.ultimaAlteracao) data.ultimaAlteracao = JSON.stringify(data.ultimaAlteracao);
@@ -178,7 +214,26 @@ const updateObra = async (req, res) => {
     if (data.latitude === '') data.latitude = null;
     if (data.longitude === '') data.longitude = null;
     if (data.responsavel === '') data.responsavel = null;
+    if (data.responsavel_whatsapp === '') data.responsavel_whatsapp = null;
     if (data.fiscal === '') data.fiscal = null;
+    if (data.dataInicioPrevisto === '') data.dataInicioPrevisto = null;
+    if (data.dataFimPrevisto === '') data.dataFimPrevisto = null;
+
+    if (data.status !== undefined && !VALID_OBRA_STATUSES.includes(data.status)) {
+        return res.status(400).json({ error: `Status inválido. Use: ${VALID_OBRA_STATUSES.join(', ')}.` });
+    }
+
+    // Radar → planejada automático quando o contrato de horas é registrado na edição.
+    if (temContratoDeHoras(data.horasContratadasPorSubTipo) || temContratoDeHoras(data.horasContratadasPorTipo)) {
+        try {
+            const [curRows] = await db.query('SELECT status FROM obras WHERE id = ?', [id]);
+            if (curRows[0]?.status === 'radar' && (data.status === undefined || data.status === 'radar')) {
+                data.status = 'planejada';
+            }
+        } catch (e) {
+            console.warn('⚠️ [planejamento] Falha ao checar promoção radar→planejada:', e.message);
+        }
+    }
 
     const fields = Object.keys(data);
     const values = Object.values(data);
@@ -212,11 +267,14 @@ const updateObra = async (req, res) => {
             const marcos = [30, 50, 70];
             for (const m of marcos) {
                 if (pctAntes < m && pctDepois >= m) {
-                    const [r] = await db.query('SELECT nome, responsavel, responsavel_email FROM obras WHERE id = ?', [id]);
+                    const [r] = await db.query('SELECT nome, responsavel, responsavel_email, responsavel_whatsapp FROM obras WHERE id = ?', [id]);
                     const obraNome = r[0]?.nome || '—';
                     // Notifica o responsável da própria obra, além dos destinos globais
                     // configurados em notification_targets para o evento.
                     const extraContacts = [];
+                    if (r[0]?.responsavel_whatsapp) {
+                        extraContacts.push({ channel: 'whatsapp', contact: r[0].responsavel_whatsapp, name: r[0].responsavel || 'Responsável da Obra' });
+                    }
                     if (r[0]?.responsavel_email) {
                         extraContacts.push({ channel: 'email', contact: r[0].responsavel_email, name: r[0].responsavel || 'Responsável da Obra' });
                     }

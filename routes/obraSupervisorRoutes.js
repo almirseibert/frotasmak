@@ -6,6 +6,7 @@ const authMiddleware = require('../middlewares/authMiddleware');
 router.use(authMiddleware);
 
 router.get('/dashboard', controller.getDashboardData);
+router.get('/contracts-overview', controller.getContractsOverview);
 router.get('/obra/:id', controller.getObraDetails);
 router.post('/crm', controller.addCrmLog);
 router.post('/contract', controller.upsertContract);
@@ -17,6 +18,9 @@ router.get('/allocations', controller.getAllocationForecast);
 // Rotas de BI (Análise de Produtividade)
 router.get('/analytics', controller.getAnalyticsData);
 router.get('/analytics/dia', controller.getAnalyticsDayDetail);
+
+// Histórico financeiro (série mensal: receita produzida × custo × margem)
+router.get('/financial-history', controller.getFinancialHistory);
 
 // Novas Rotas para guardar e ler os Tickets Médios globais
 router.get('/tickets', controller.getTicketMedio);

@@ -20,6 +20,10 @@ let qrRaw        = null;
 let client       = null;
 let reconnectTimer = null;
 
+// Falhas de autenticação seguidas. Zerado ao autenticar com sucesso.
+let falhasAuthConsecutivas = 0;
+const MAX_FALHAS_AUTH = 3;
+
 // ─── PUPPETEER ARGS ───────────────────────────────────────────────────────────
 const isWindows = process.platform === 'win32';
 const PUPPETEER_ARGS = [
@@ -36,17 +40,90 @@ const PUPPETEER_ARGS = [
     ...(!isWindows ? ['--disable-dev-shm-usage', '--no-zygote'] : []),
 ];
 
+// ─── CAMINHO DA SESSÃO ────────────────────────────────────────────────────────
+// PRECISA apontar para um volume persistente em produção. Se ficar dentro do
+// filesystem do container (o default relativo antigo), TODO redeploy apaga a
+// sessão e o WhatsApp cai exigindo leitura de QR Code — que era exatamente o
+// motivo das ordens de abastecimento não chegarem aos postos após cada deploy.
+const SESSION_PATH = process.env.WA_SESSION_PATH
+    ? path.resolve(process.env.WA_SESSION_PATH)
+    : path.join(__dirname, '.wwebjs_auth');
+
+const BOOT_TIME = new Date().toISOString();
+
+console.log(`📁 [SISTEMA] Sessão do WhatsApp em: ${SESSION_PATH}`);
+if (!process.env.WA_SESSION_PATH) {
+    console.log('ℹ️ [SISTEMA] WA_SESSION_PATH não definido — usando o caminho padrão. Confirme que ele está DENTRO do volume persistente.');
+}
+
 // ─── FUNÇÃO DE LIMPEZA PROFUNDA ───────────────────────────────────────────────
-function limparPastaSessao() {
-    const authPath = path.join(__dirname, '.wwebjs_auth');
+// Registro persistente dos eventos de sessão. Fica DENTRO do volume, ao lado da
+// sessão, para sobreviver a restarts — é a única forma de responder depois
+// "quem apagou a sessão e por quê" sem depender do log volátil do container.
+// Fica DENTRO da pasta da sessão — é o único diretório que sabemos estar no
+// volume persistente. limparPastaSessao() o preserva ao apagar o resto.
+const EVENTS_LOG = path.join(SESSION_PATH, 'wa-session-events.log');
+
+function registrarEventoSessao(evento) {
+    try {
+        const linha = `${new Date().toISOString()} ${evento}\n`;
+        fs.mkdirSync(SESSION_PATH, { recursive: true });
+        fs.appendFileSync(EVENTS_LOG, linha);
+    } catch (_) { /* diagnóstico nunca pode derrubar o serviço */ }
+}
+
+// APAGAR A SESSÃO É DESTRUTIVO: obriga a ler o QR Code de novo, e enquanto
+// ninguém lê, nenhuma ordem de abastecimento chega aos postos. Só deve
+// acontecer quando a sessão está comprovadamente morta (logout/despareamento)
+// ou por decisão explícita de um humano.
+function limparPastaSessao(motivo = 'não informado') {
+    const authPath = SESSION_PATH;
+    registrarEventoSessao(`SESSAO_APAGADA motivo=${motivo}`);
     if (fs.existsSync(authPath)) {
-        console.log('🧹 [SISTEMA] Deletando pasta de sessão corrompida...');
+        console.warn(`🧹 [SISTEMA] APAGANDO a pasta de sessão. Motivo: ${motivo}. Será necessário ler o QR Code novamente.`);
+        // Preserva o histórico — é justamente o apagamento que precisamos poder auditar depois.
+        let historico = null;
+        try { historico = fs.readFileSync(EVENTS_LOG, 'utf8'); } catch (_) {}
         try {
             fs.rmSync(authPath, { recursive: true, force: true });
-            console.log('✅ [SISTEMA] Pasta de sessão removida com sucesso.');
+            console.warn('⚠️ [SISTEMA] Sessão removida — o serviço voltará pedindo QR Code.');
         } catch (err) {
             console.error('❌ [SISTEMA] Erro ao deletar pasta de auth:', err);
         }
+        if (historico) {
+            try {
+                fs.mkdirSync(authPath, { recursive: true });
+                fs.writeFileSync(EVENTS_LOG, historico);
+            } catch (_) {}
+        }
+    }
+}
+
+// Quantos itens de sessão existem, ignorando o log de eventos.
+function temSessao() {
+    try {
+        if (!fs.existsSync(SESSION_PATH)) return 0;
+        return fs.readdirSync(SESSION_PATH)
+            .filter(f => f !== path.basename(EVENTS_LOG)).length;
+    } catch (_) { return 0; }
+}
+
+// Diagnóstico de boot: responde objetivamente se a sessão sobreviveu ao restart.
+function diagnosticarSessao() {
+    try {
+        // O log de eventos vive dentro da pasta e NÃO conta como sessão —
+        // senão uma pasta recém-apagada pareceria ter sessão válida.
+        const arquivos = temSessao();
+        if (arquivos === 0) {
+            console.warn('🔎 [SESSÃO] Nenhuma sessão encontrada no disco — este boot exigirá QR Code.');
+            registrarEventoSessao('BOOT sessao=AUSENTE');
+            return;
+        }
+        const st = fs.statSync(SESSION_PATH);
+        console.log(`🔎 [SESSÃO] Sessão encontrada (${arquivos} item(ns), modificada em ${st.mtime.toISOString()}) — deve reconectar sem QR.`);
+        registrarEventoSessao(`BOOT sessao=PRESENTE itens=${arquivos} mtime=${st.mtime.toISOString()}`);
+    } catch (e) {
+        console.warn('🔎 [SESSÃO] Falha ao diagnosticar a sessão:', e.message);
     }
 }
 
@@ -92,7 +169,7 @@ async function initClient() {
     if (execPath) puppeteerConfig.executablePath = execPath;
 
     client = new Client({
-        authStrategy: new LocalAuth({ dataPath: '.wwebjs_auth' }),
+        authStrategy: new LocalAuth({ dataPath: SESSION_PATH }),
         puppeteer: puppeteerConfig,
     });
 
@@ -117,22 +194,45 @@ async function initClient() {
         console.log('🔐 [WHATSAPP] Autenticado com sucesso! Baixando contatos e mensagens...');
         clientStatus = 'AUTENTICANDO';
         qrRaw = null;
+        falhasAuthConsecutivas = 0;
+        registrarEventoSessao('AUTHENTICATED');
     });
 
     client.on('auth_failure', (msg) => {
         console.error('❌ [WHATSAPP] Falha na autenticação:', msg);
         clientStatus = 'DESCONECTADO';
         qrRaw = null;
-        limparPastaSessao();
+        registrarEventoSessao(`AUTH_FAILURE msg=${String(msg).slice(0, 120)}`);
+
+        // Antes apagava na PRIMEIRA falha. Falha de autenticação também ocorre
+        // por motivo transitório (Chromium morto no meio do load, rede), e
+        // apagar já na primeira transformava um soluço em "leia o QR de novo".
+        falhasAuthConsecutivas++;
+        if (falhasAuthConsecutivas >= MAX_FALHAS_AUTH) {
+            limparPastaSessao(`auth_failure ${falhasAuthConsecutivas}x consecutivas`);
+            falhasAuthConsecutivas = 0;
+        } else {
+            console.warn(`⚠️ [WHATSAPP] Sessão PRESERVADA (falha ${falhasAuthConsecutivas}/${MAX_FALHAS_AUTH}). Tentando reconectar com a sessão existente.`);
+        }
         agendarReconexao(5000);
     });
 
     client.on('disconnected', (reason) => {
-        console.log('❌ [WHATSAPP] WhatsApp desconectado pelo celular ou queda de rede!', reason);
+        console.log('❌ [WHATSAPP] WhatsApp desconectado!', reason);
         clientStatus = 'DESCONECTADO';
         qrRaw = null;
-        if (reason === 'NAVIGATION' || reason === 'CONFLICT') {
-             limparPastaSessao();
+        registrarEventoSessao(`DISCONNECTED reason=${reason}`);
+
+        // Só apagamos quando a sessão está de fato morta do lado do WhatsApp.
+        // NAVIGATION é transitório — ocorre em reload/crash do Chromium e no
+        // restart do container. Apagar aí destruía uma sessão perfeitamente
+        // válida, e era isso que fazia o serviço voltar pedindo QR Code.
+        // CONFLICT (outro aparelho assumiu) também não justifica apagar.
+        const SESSAO_MORTA = ['LOGOUT', 'UNPAIRED', 'UNPAIRED_IDLE'];
+        if (SESSAO_MORTA.includes(String(reason).toUpperCase())) {
+            limparPastaSessao(`disconnected reason=${reason}`);
+        } else {
+            console.warn(`⚠️ [WHATSAPP] Sessão PRESERVADA (motivo "${reason}" é transitório). Reconectando sem QR.`);
         }
         agendarReconexao(5000);
     });
@@ -243,7 +343,28 @@ function agendarReconexao(tempo = 10000) {
 // ─── ROTAS DA API PROTEGIDAS ──────────────────────────────────────────────────
 
 app.get('/status', (req, res) => {
-    res.json({ status: clientStatus, qr: qrRaw });
+    // sessaoPersistida responde a pergunta que estava sem resposta: a sessão
+    // sobreviveu ao último restart, ou o serviço voltou do zero?
+    const sessaoPersistida = temSessao() > 0;
+    res.json({
+        status: clientStatus,
+        qr: qrRaw,
+        sessionPath: SESSION_PATH,
+        sessaoPersistida,
+        iniciadoEm: BOOT_TIME,
+    });
+});
+
+// Histórico de eventos da sessão (boot, autenticação, quedas, apagamentos).
+// Fica no volume, então mostra o que aconteceu ANTES do restart atual.
+app.get('/session-events', (req, res) => {
+    try {
+        if (!fs.existsSync(EVENTS_LOG)) return res.json({ arquivo: EVENTS_LOG, eventos: [] });
+        const linhas = fs.readFileSync(EVENTS_LOG, 'utf8').trim().split('\n');
+        res.json({ arquivo: EVENTS_LOG, eventos: linhas.slice(-200) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.post('/send', async (req, res) => {
@@ -351,18 +472,29 @@ app.post('/send', async (req, res) => {
     }
 });
 
+// Reinício. Por padrão PRESERVA a sessão — só reinicializa o Chromium, o que
+// costuma resolver travas do WA Web sem exigir novo QR Code.
+// Envie { "hard": true } para apagar a sessão e forçar novo pareamento.
 app.post('/restart', async (req, res) => {
-    console.log('🔄 Reinício manual solicitado.');
+    const hard = req.body?.hard === true;
+    console.log(`🔄 Reinício manual solicitado (${hard ? 'HARD — apaga sessão' : 'soft — preserva sessão'}).`);
     if (reconnectTimer) clearTimeout(reconnectTimer);
 
-    limparPastaSessao();
+    if (hard) limparPastaSessao('reinício manual (hard) solicitado pelo admin');
 
     setTimeout(() => { initClient(); }, 1000);
 
-    res.json({ success: true, message: 'Sessões limpas. Reiniciando microsserviço...' });
+    res.json({
+        success: true,
+        hard,
+        message: hard
+            ? 'Sessão apagada. Será necessário ler o QR Code novamente.'
+            : 'Reiniciando sem apagar a sessão. Se não reconectar, use o reinício completo.',
+    });
 });
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
+diagnosticarSessao();
 initClient();
 
 app.listen(PORT, '0.0.0.0', () => {
