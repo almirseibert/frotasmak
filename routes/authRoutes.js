@@ -31,7 +31,8 @@ router.get('/me', authMiddleware, async (req, res) => {
                     canAccessRefueling, canAccessAnaliseGerencial,
                     bloqueado_abastecimento,
                     tentativas_falhas_abastecimento,
-                    page_permissions
+                    page_permissions,
+                    can_create_hidden_orders
              FROM users WHERE id = ?`,
             [userId]
         );
@@ -47,7 +48,8 @@ router.get('/me', authMiddleware, async (req, res) => {
             canAccessAnaliseGerencial: user.canAccessAnaliseGerencial === 1,
             bloqueado_abastecimento: user.bloqueado_abastecimento === 1, // Garante booleano
             tentativas_falhas_abastecimento: user.tentativas_falhas_abastecimento || 0,
-            page_permissions: normalizePagePermissions(user.page_permissions)
+            page_permissions: normalizePagePermissions(user.page_permissions),
+            can_create_hidden_orders: user.can_create_hidden_orders === 1
         };
 
         // Fonte única: o servidor calcula as páginas efetivas e o front consome.
