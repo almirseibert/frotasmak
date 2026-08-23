@@ -800,6 +800,7 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
                 modo                      VARCHAR(10)   NOT NULL DEFAULT 'sombra',
                 obras_habilitadas         JSON          DEFAULT NULL,
                 tipos_habilitados         JSON          DEFAULT NULL,
+                veiculos_habilitados      JSON          DEFAULT NULL,
                 confianca_minima_painel   DECIMAL(5,4)  NOT NULL DEFAULT 0.9000,
                 confianca_minima_cupom    DECIMAL(5,4)  NOT NULL DEFAULT 0.9000,
                 tolerancia_leitura_km     DECIMAL(10,2) NOT NULL DEFAULT 1.00,
@@ -825,6 +826,14 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
         try {
             await db.query('ALTER TABLE abastecimento_auto_config MODIFY COLUMN updated_by VARCHAR(64) DEFAULT NULL');
         } catch (e) { /* ignora se já estiver correto */ }
+
+        // Escopo por VEÍCULO, independente da obra. A tabela nasceu só com
+        // `obras_habilitadas`, mas veículo troca de obra o tempo todo nesta
+        // operação: se o escopo fosse só por obra, cada remanejamento tiraria o
+        // veículo do piloto até alguém lembrar de marcar a obra nova. Marcar o
+        // veículo o mantém no piloto onde quer que ele esteja.
+        await addColumnIfMissing(db, 'abastecimento_auto_config', 'veiculos_habilitados',
+            'JSON DEFAULT NULL', 'abastecimentoAuto');
 
         // Semente idempotente da linha única.
         await db.query('INSERT IGNORE INTO abastecimento_auto_config (id) VALUES (1)');

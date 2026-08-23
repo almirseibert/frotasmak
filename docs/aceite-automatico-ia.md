@@ -692,6 +692,71 @@ pedidos resolvidos, então obra que pede pouco leva mais tempo. O arquivo orient
 
 ---
 
+## Ajustes de escopo (2026-08-23)
+
+### Escopo por veículo, não só por obra
+
+O piloto nasceu com escopo só por **obra**, e isso não sobrevive a esta operação: veículo é
+remanejado entre obras o tempo todo. A cada remanejamento o veículo sairia do piloto e só
+voltaria quando alguém lembrasse de marcar a obra nova — perdendo a liberação automática
+justamente no momento em que ela mais vale.
+
+`abastecimento_auto_config` ganhou **`veiculos_habilitados`** (JSON, mesma forma de
+`obras_habilitadas`). O portão G0 passa a aceitar **obra marcada OU veículo marcado**:
+
+| Situação | Resultado |
+|---|---|
+| Nenhuma das duas listas preenchida | fora do piloto (como antes) |
+| Obra da solicitação marcada | dentro |
+| Veículo marcado, em qualquer obra | dentro |
+
+**O filtro `tipos_habilitados` não se aplica ao veículo marcado individualmente.** Escolher um
+veículo a dedo é a instrução mais específica que a tela oferece; deixar um filtro genérico
+derrubá-la faria a marcação não surtir efeito sem nenhuma pista do motivo. O mais específico
+vence — e o parecer diz qual dos dois caminhos valeu ("Veículo marcado individualmente" ou
+"Obra dentro do escopo").
+
+### Só obras ativas na escolha
+
+A lista de obras da tela passa a mostrar apenas `status = 'ativa'`. Exceção deliberada: obra que
+**já está marcada** e encerrou depois continua aparecendo, rotulada `[encerrada]`, para poder ser
+desmarcada. Escondê-la deixaria escopo ativo invisível na tela, que é pior do que uma linha a mais.
+
+Os veículos oferecidos excluem terceirizado, fictício e comboio — o G0 recusa os três de qualquer
+forma, e listá-los seria convidar a marcar um veículo que nunca seria liberado.
+
+### As médias em produção ainda não foram recalculadas
+
+O parecer da IA em produção mostra `Histórico insuficiente: 0 intervalo(s), mínimo 3` para
+**toda** a frota. Não é falta de histórico: `vehicle_fuel_averages` existe e vem de `refuelings`,
+mas as colunas `unidade` / `intervalos_validos` / `intervalos_tanque_cheio` (Fase 1) só são
+preenchidas pelo recálculo novo, e o backfill dos 447 veículos registrado acima rodou no **banco
+de teste**. Em produção nunca rodou, e `NULL` é lido como zero pelo G2.
+
+Enquanto isso não for feito, o G2 devolve `indeterminado` para todas as solicitações e o piloto
+não sai do lugar. Rodar **dentro do container** (na máquina local o `.env.local` desvia para o
+banco de teste):
+
+```bash
+node scripts/recalcMediasConsumo.js --listar
+```
+
+```bash
+node scripts/recalcMediasConsumo.js
+```
+
+**Não existe atalho invertendo h/L → L/h.** Inverter corrige o número mas não preenche `unidade`
+nem `intervalos_validos`, que é o que o portão lê — e o recálculo já é feito a partir de
+`refuelings`, a mesma fonte de onde a média antiga saiu, só que com a leitura certa por grupo e
+com o filtro de plausibilidade. O caminho curto e o caminho certo são o mesmo.
+
+Detalhe que vai importar na calibragem: a consulta do recálculo usa `LIMIT 4` ordens, ou seja, no
+máximo **3 intervalos**. Com `min_intervalos_historico = 3` o mínimo é igual ao teto — basta um
+intervalo descartado por implausibilidade para o veículo nunca passar no G2. Se depois do backfill
+a maioria da frota ficar em 2, o ajuste é baixar o mínimo para 2 na tela, não mexer no código.
+
+---
+
 ## Migrações aplicadas
 
 Todas inline em `server.js`, idempotentes, via `utils/migrations.js`. Verificadas no banco de teste
@@ -707,7 +772,7 @@ alguém ligar pela tela de admin (Fase 3). Defaults semeados:
 | Campo | Valor |
 |---|---|
 | `ativo` / `modo` | 0 / sombra |
-| `obras_habilitadas` / `tipos_habilitados` | NULL (vazio = nenhuma obra no piloto) |
+| `obras_habilitadas` / `tipos_habilitados` / `veiculos_habilitados` | NULL (vazio = nada no piloto) |
 | `confianca_minima_painel` / `_cupom` | 0,90 / 0,90 |
 | `tolerancia_leitura_km` / `_hr` | 1,00 / 1,00 |
 | `tolerancia_media_padrao` | 20,00 % |
@@ -765,11 +830,14 @@ virar ou não para o modo ativo)_
 
 1. **Redeploy do backend** com a correção do `updated_by` — sem ela a tela de parâmetros
    não salva (ver "O 500 que sobrou" acima). O `ALTER TABLE` roda sozinho no boot.
-2. Admin → Frota → Aceite Automático: ligar o motor, deixar em **sombra**, marcar **uma** obra.
-3. Enviar o aviso da **Fase 1** no grupo daquela obra.
-4. Acompanhar por no mínimo 15 dias. O botão do modo ativo destrava sozinho com 20+ pedidos
+2. **Rodar `node scripts/recalcMediasConsumo.js` no container** — sem isso o G2 fica
+   `indeterminado` para a frota inteira (ver "Ajustes de escopo" acima).
+3. Admin → Frota → Aceite Automático: ligar o motor, deixar em **sombra**, marcar **uma** obra
+   e/ou os veículos que devem entrar independentemente de obra.
+4. Enviar o aviso da **Fase 1** no grupo daquela obra.
+5. Acompanhar por no mínimo 15 dias. O botão do modo ativo destrava sozinho com 20+ pedidos
    resolvidos e zero falsos positivos.
-5. Ao virar para ativo, enviar o aviso da **Fase 2** e acompanhar as primeiras ordens pela aba
+6. Ao virar para ativo, enviar o aviso da **Fase 2** e acompanhar as primeiras ordens pela aba
    "IA liberaria".
 
 Para voltar atrás em qualquer momento: desmarcar "Motor ligado". O que já foi emitido é ordem comum,

@@ -97,16 +97,31 @@ const avaliarG0 = (sol, veiculo, config) => {
         return FALHA('G0_elegibilidade', 'Solicitação sem foto do painel.');
     }
 
-    const obras = listaJson(config.obras_habilitadas);
-    if (obras.length === 0) {
-        return FALHA('G0_elegibilidade', 'Nenhuma obra habilitada para o piloto.');
-    }
-    if (!obras.map(String).includes(String(sol.obra_id))) {
-        return FALHA('G0_elegibilidade', 'Obra fora do escopo do piloto.');
+    // ESCOPO DO PILOTO: por obra OU por veículo, e basta um dos dois.
+    //
+    // Só por obra não serve nesta operação: veículo é remanejado entre obras o
+    // tempo todo, e a cada remanejamento ele sairia do piloto até alguém marcar
+    // a obra nova — justamente quando a liberação automática é mais útil. O
+    // veículo marcado individualmente segue no piloto onde quer que esteja.
+    const obras = listaJson(config.obras_habilitadas).map(String);
+    const veiculos = listaJson(config.veiculos_habilitados).map(String);
+
+    if (obras.length === 0 && veiculos.length === 0) {
+        return FALHA('G0_elegibilidade', 'Nenhuma obra ou veículo habilitado para o piloto.');
     }
 
+    const porVeiculo = veiculos.includes(String(veiculo.id));
+    const porObra = obras.includes(String(sol.obra_id));
+    if (!porVeiculo && !porObra) {
+        return FALHA('G0_elegibilidade', 'Veículo e obra fora do escopo do piloto.');
+    }
+
+    // O filtro de tipo estreita o escopo por OBRA. Um veículo escolhido a dedo
+    // é a instrução mais específica que existe na tela: deixar o filtro genérico
+    // derrubá-lo faria a marcação individual não surtir efeito sem nenhuma pista
+    // do motivo. O mais específico vence.
     const tipos = listaJson(config.tipos_habilitados);
-    if (tipos.length > 0 && !tipos.includes(veiculo.tipo)) {
+    if (!porVeiculo && tipos.length > 0 && !tipos.includes(veiculo.tipo)) {
         return FALHA('G0_elegibilidade', `Tipo "${veiculo.tipo}" fora do escopo do piloto.`);
     }
 
@@ -130,7 +145,9 @@ const avaliarG0 = (sol, veiculo, config) => {
         return FALHA('G0_elegibilidade', 'Solicitante está bloqueado para abastecimento.');
     }
 
-    return OK('G0_elegibilidade', 'Dentro do escopo do piloto.');
+    return OK('G0_elegibilidade', porVeiculo
+        ? 'Veículo marcado individualmente no piloto.'
+        : 'Obra dentro do escopo do piloto.');
 };
 
 /**

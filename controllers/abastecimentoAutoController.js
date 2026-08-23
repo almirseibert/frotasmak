@@ -15,6 +15,7 @@ const CAMPOS_EDITAVEIS = {
     modo: 'modo',
     obras_habilitadas: 'json',
     tipos_habilitados: 'json',
+    veiculos_habilitados: 'json',
     confianca_minima_painel: 'fracao',
     confianca_minima_cupom: 'fracao',
     tolerancia_leitura_km: 'numero',
