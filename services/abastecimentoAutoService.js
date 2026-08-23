@@ -55,8 +55,13 @@ const carregarConfig = async (conn = db) => {
     if (cacheConfig && (Date.now() - cacheConfig.at) < TTL_CONFIG_MS) return cacheConfig.valor;
     try {
         const [[linha]] = await conn.query('SELECT * FROM abastecimento_auto_config WHERE id = 1');
-        cacheConfig = { at: Date.now(), valor: linha || null };
-        return cacheConfig.valor;
+        // NÃO cachear resultado vazio. As migrações do boot são IIFEs assíncronas
+        // que rodam em paralelo com o servidor já atendendo requisições: uma
+        // leitura feita nesse intervalo encontra a tabela ainda sem a linha e,
+        // se fosse cacheada, deixaria o motor "sem configuração" por 30 segundos
+        // mesmo depois de a semente ter sido gravada.
+        if (linha) cacheConfig = { at: Date.now(), valor: linha };
+        return linha || null;
     } catch (e) {
         console.warn('[abastecimentoAuto] falha ao ler config:', e.message);
         return null;

@@ -82,12 +82,13 @@ const getConfig = async (req, res) => {
 
 const updateConfig = async (req, res) => {
     try {
+        const corpo = req.body || {};
         const campos = [];
         const valores = [];
 
         for (const [campo, tipo] of Object.entries(CAMPOS_EDITAVEIS)) {
-            if (!(campo in req.body)) continue;
-            const convertido = converter(tipo, req.body[campo]);
+            if (!(campo in corpo)) continue;
+            const convertido = converter(tipo, corpo[campo]);
             if (convertido === null) continue; // valor inválido: ignora em vez de gravar nulo
             campos.push(`${campo} = ?`);
             valores.push(convertido);
@@ -98,20 +99,44 @@ const updateConfig = async (req, res) => {
         }
 
         campos.push('updated_by = ?');
-        valores.push(req.user.id);
+        valores.push(req.user?.id ?? null);
 
         await db.query(`UPDATE abastecimento_auto_config SET ${campos.join(', ')} WHERE id = 1`, valores);
         motor.invalidarConfig();
 
-        const config = await motor.carregarConfig(db);
+        // `carregarConfig` devolve null quando a leitura falha — e a versão
+        // anterior fazia `config.ativo` direto no log logo abaixo, estourando um
+        // TypeError que o catch transformava em "Erro ao salvar configuração.".
+        // O UPDATE acima já tinha gravado, então a tela mostrava erro enquanto o
+        // banco já estava alterado: o pior dos dois mundos. Relemos direto da
+        // tabela como plano B, e só falhamos se nem isso funcionar.
+        let config = await motor.carregarConfig(db);
+        if (!config) {
+            const [[linha]] = await db.query('SELECT * FROM abastecimento_auto_config WHERE id = 1');
+            config = linha || null;
+        }
+        if (!config) {
+            console.error('[abastecimentoAuto] configuração gravada mas não foi possível relê-la.');
+            return res.status(500).json({
+                error: 'A configuração foi salva, mas não foi possível recarregá-la. Atualize a página.',
+                code: 'CONFIG_SALVA_SEM_LEITURA',
+            });
+        }
+
         if (req.io) req.io.emit('server:sync', { targets: ['abastecimento_auto'] });
 
-        console.log(`⚙️ [abastecimentoAuto] configuração alterada por usuário ${req.user.id}: `
+        console.log(`⚙️ [abastecimentoAuto] configuração alterada por usuário ${req.user?.id ?? '(desconhecido)'}: `
             + `ativo=${config.ativo} modo=${config.modo}`);
         res.json({ ...config, credencial_ia_configurada: visao.isConfigured() });
     } catch (error) {
+        // Mensagem genérica escondia a causa e obrigava a reproduzir às cegas.
+        // O código do erro não expõe dado sensível e permite diagnosticar pelo
+        // que aparece no navegador.
         console.error('Erro ao salvar config do aceite automático:', error);
-        res.status(500).json({ error: 'Erro ao salvar configuração.' });
+        res.status(500).json({
+            error: 'Erro ao salvar configuração.',
+            code: error.code || error.name || 'ERRO_DESCONHECIDO',
+        });
     }
 };
 
