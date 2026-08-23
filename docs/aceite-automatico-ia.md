@@ -22,6 +22,10 @@ decide são os portões em código, o modelo só devolve leitura + confiança nu
 | **2** — Visão + motor | aiVisionService + abastecimentoAutoService (modo sombra) | ✅ Concluída | 2026-08-23 |
 | **3** — Interface | Parecer no admin e no app, pré-preenchimento da baixa, tela de parâmetros | ✅ Concluída | 2026-08-23 |
 | **4** — Modo ativo | Núcleo único de emissão, liberação automática real | ✅ Concluída | 2026-08-23 |
+| **Implantação** | Backup, deploy, cadastro em produção, correção do 500, comunicação | ✅ Concluída | 2026-08-23 |
+
+**Situação atual:** código em produção, cadastro aplicado, motor **desligado**. Falta ligar em modo
+sombra numa obra piloto — ver "Próximo passo" no fim deste documento.
 
 ---
 
@@ -571,10 +575,109 @@ foi emitido é ordem normal, indistinguível das demais exceto pela marca `liber
 
 ---
 
+## Implantação (2026-08-23)
+
+### Backup
+
+`F:\Backup_15-03\backups_frotasmak\2026-08-23_1249\`
+
+| Arquivo | Conteúdo |
+|---|---|
+| `codigo/FrotasMak_codigo.tar.gz` | 240 MB — código sem node_modules |
+| `banco/producao_frotasmak_COMPLETO.sql(.gz)` | 717 MB / 103 MB — 113 tabelas, 5,54 M linhas |
+| `banco/producao_vehicles_ANTES.sql` | 340 KB — só `vehicles`, para rollback rápido do cadastro |
+| `banco/db-teste.sql(.gz)` | 233 MB / 35 MB — 117 tabelas, 1,65 M linhas |
+
+Não havia `mysqldump` na máquina, daí `scripts/backupBanco.js`. A primeira versão travou em
+`sigasul_positions` (1,27 milhão de linhas) por paginar com `OFFSET`, que relê tudo a cada lote —
+O(n²). Trocado por paginação por chave: 1min18s contra mais de 30 minutos.
+
+### Deploy
+
+Backend `almirseibert/frotasmak` e frontend `almirseibert/frontend`, ambos em `main`. As migrações
+rodam no boot, então as colunas e tabelas novas só passam a existir depois do deploy — o import do
+CSV funcionou antes disso porque toca apenas colunas de `vehicles` que já existiam.
+
+### Erro 500 ao salvar a configuração — corrigido no mesmo dia
+
+Primeiro uso real da tela de parâmetros em produção devolveu 500 em
+`PUT /api/abastecimento-auto/config`, com a mensagem genérica "Erro ao salvar configuração.".
+
+Diagnóstico: as tabelas existiam, as colunas existiam e o `UPDATE` cru funcionava. Reproduzindo o
+handler inteiro contra produção (via cwd temporário contendo só o `.env` de produção), o caminho
+passava. A causa estava em `updateConfig`, que fazia `config.ativo` no log logo depois de recarregar
+a configuração — e `carregarConfig` devolve `null` quando a leitura falha. O `TypeError` caía no
+catch genérico.
+
+**O `UPDATE` já tinha gravado antes de estourar**: a tela mostrava erro enquanto o banco já estava
+alterado. O pior dos dois mundos, porque convida a repetir a operação.
+
+Por que a leitura falhava: `carregarConfig` cacheava resultado **vazio** por 30 s. As migrações do
+boot são IIFEs assíncronas que rodam em paralelo com o servidor já atendendo requisições; uma leitura
+nesse intervalo encontra a tabela ainda sem a linha e congela "sem configuração" por meio minuto,
+mesmo depois de a semente ter sido gravada.
+
+Correções:
+- `carregarConfig` não cacheia mais resultado vazio;
+- `updateConfig` relê direto da tabela como plano B e só falha com `CONFIG_SALVA_SEM_LEITURA` se nem
+  isso funcionar;
+- blindagem de `req.body` e `req.user` ausentes (400/200 em vez de 500);
+- a resposta de erro passa a trazer `code`, para diagnosticar pelo navegador sem reproduzir às cegas.
+
+### Cadastro de capacidade e média
+
+Aplicado em produção por família de modelo, em duas rodadas:
+
+| | Antes | Depois |
+|---|---|---|
+| Capacidade de tanque | 8 (2%) | **403 (86%)** |
+| Média esperada | 6 (1%) | **438 (94%)** |
+| Tolerância | — | **466 (100%)**, todos em 20% |
+
+Primeira rodada: 160 famílias preenchidas à mão, cobrindo 380 veículos. Segunda: pesquisa web dos 76
+modelos restantes, com 15 famílias preenchidas por especificação de fabricante.
+
+Ficaram deliberadamente em branco 11 semirreboques (reboque não tem motor nem tanque), 16 famílias de
+cadastro genérico sem modelo identificável, e os modelos cuja busca só devolveu faixa ampla demais
+(Mercedes Axor 130–590 L, Volvo VM 280–560 L) — escolher um número dentro de faixa assim seria chute.
+
+A **média de consumo não veio da web**: L/h é operacional, não é especificação de fabricante, e
+número de catálogo não teria relação com a operação em obra. Foi usada a convenção já adotada nas
+famílias preenchidas à mão, por tipo de veículo. A coluna `origem` em
+`docs/capacidades_FALTANTES_preenchido.csv` registra a procedência de cada valor.
+
+**Dois problemas de dado que a importação expôs**, e que vão se repetir a cada rodada:
+
+1. O Excel converteu o modelo IVECO `240E25` em notação científica (`2,40E+27`) ao salvar o CSV.
+2. A marca do RE517 no banco é literalmente `16`; corrigi-la na planilha para `VOLKSWAGEN` é o certo
+   do ponto de vista do dado, mas quebra a chave de junção `marca|família|tipo`.
+
+Por isso `importarCapacidadeModelos.js` ganhou casamento de reserva pelos modelos exatos da coluna
+`modelos_incluidos` — sempre reportado, nunca silencioso. Os dois casos foram recuperados.
+
+### Comunicação
+
+- `docs/guia-equipe-abastecimento.md` — para quem aprova ordens e faz baixas.
+- `docs/post-whatsapp-divulgacao.md` — avisos aos grupos das obras, em **duas fases**.
+
+A divulgação foi dividida porque o texto inicial prometia liberação imediata, o que só é verdade no
+modo ativo. Enviá-lo durante o treinamento faria o operador concluir que o sistema falhou e voltar a
+ligar para o escritório — exatamente o que a mudança quer evitar.
+
+- **Fase 1**, ao habilitar a obra em sombra: a obra foi sorteada para começar, todos os veículos
+  passam a pedir pelo site, e os 15 dias seguintes são de treinamento.
+- **Fase 2**, ao virar para ativo: a ordem sai na hora, a qualquer dia e horário.
+
+Os 15 dias são o mínimo, não uma promessa: a virada também depende de zero falsos positivos e de 20+
+pedidos resolvidos, então obra que pede pouco leva mais tempo. O arquivo orienta a não prometer data.
+
+---
+
 ## Migrações aplicadas
 
-Todas inline em `server.js`, idempotentes, via `utils/migrations.js`. Aplicadas e verificadas no
-banco de teste (`db-teste`) em 2026-08-21, incluindo segunda passada para confirmar idempotência.
+Todas inline em `server.js`, idempotentes, via `utils/migrations.js`. Verificadas no banco de teste
+(`db-teste`) em 2026-08-21, incluindo segunda passada para confirmar idempotência. Aplicadas em
+produção (`frotasmak`) no deploy de 2026-08-23, pelo boot do servidor.
 Ver a tabela na Fase 1 acima.
 
 ## Parâmetros em produção
@@ -595,7 +698,11 @@ alguém ligar pela tela de admin (Fase 3). Defaults semeados:
 | `limite_valor_auto` | R$ 1.500,00 |
 | `modelo_rapido` / `modelo_preciso` | claude-haiku-4-5 / claude-opus-5 |
 
-Ainda não aplicado em produção — só no banco de teste.
+Aplicado em produção no deploy de 2026-08-23, com esses mesmos defaults. **O motor está desligado**
+(`ativo = 0`): nenhuma solicitação é analisada até alguém ligar e marcar ao menos uma obra.
+
+Nenhum limiar foi alterado ainda — a primeira calibragem só faz sentido depois de ver a quebra "o que
+mais retém" com dados reais.
 
 ## Registro de calibragem
 
@@ -616,13 +723,34 @@ virar ou não para o modo ativo)_
   `.env` locais (é injetada pelo Easypanel), então o portão de visão fica `indeterminado` em
   desenvolvimento — o primeiro teste real de leitura de imagem precisa rodar em ambiente com a chave.
 - **Leitura de km gravada em campo de horímetro** em alguns caminhões — ver observação na Fase 1.
-- **Cadastro de capacidade de tanque e média esperada.** Só 8 de 426 veículos têm `fuelCapacity` e
-  nenhum tem `media_consumo`; `vehicle_type_configs` está vazia. Preenchimento por família de modelo
-  via `scripts/exportarModelosVeiculos.js` → CSV → `scripts/importarCapacidadeModelos.js`.
-  186 famílias cobrem 426 veículos, e as 20 primeiras linhas já cobrem boa parte da frota.
+- **Cadastro restante.** 63 veículos ainda sem capacidade de tanque e 28 sem média. Destes, 11 são
+  semirreboques (corretos: reboque não abastece) e o resto é cadastro genérico demais para valer
+  qualquer número. Enquanto assim, esses pedidos continuam indo para conferência humana — que é o
+  desfecho correto. `vehicle_type_configs` segue vazia; a média está no próprio veículo.
+- **Marca do RE517 é `16`** no cadastro, e não `VOLKSWAGEN`. Vale corrigir. Outros veículos podem ter
+  marca/modelo igualmente corrompidos — a coluna `modelos_incluidos` do export ajuda a localizar.
 - **Dados de litragem com erro de digitação.** Há lançamentos de 4216 L numa Fiat Strada e 3169 L
   numa Oroch. Por isso a estimativa de tanque usa percentil 95 e não o máximo. Vale uma varredura
   desses outliers em `refuelings.litrosAbastecidos`.
 - **`fuelCapacity` pré-existente suspeito**: uma S10 cadastrada com 300 L e um Foton com 1000 L
-  apareceram no export. Conferir antes de confiar nos 8 valores já preenchidos.
+  apareceram no export. Eram parte dos 8 valores que já existiam antes; foram preservados pela
+  importação (que não sobrescreve sem `--sobrescrever`) e continuam por conferir.
+- **Excel corrompe códigos de modelo** ao salvar o CSV (`240E25` vira `2,40E+27`). O casamento de
+  reserva por `modelos_incluidos` cobre isso, mas convém conferir a coluna `origem` depois de cada
+  rodada de preenchimento.
 - Demais itens: ver o grupo **C** da revisão no plano de implementação.
+
+---
+
+## Próximo passo
+
+1. **Redeploy do backend** com os commits `f1a00e0` (correção do 500) e `d0fc9a9`.
+2. Admin → Frota → Aceite Automático: ligar o motor, deixar em **sombra**, marcar **uma** obra.
+3. Enviar o aviso da **Fase 1** no grupo daquela obra.
+4. Acompanhar por no mínimo 15 dias. O botão do modo ativo destrava sozinho com 20+ pedidos
+   resolvidos e zero falsos positivos.
+5. Ao virar para ativo, enviar o aviso da **Fase 2** e acompanhar as primeiras ordens pela aba
+   "IA liberaria".
+
+Para voltar atrás em qualquer momento: desmarcar "Motor ligado". O que já foi emitido é ordem comum,
+indistinguível das demais exceto pela marca `liberacao_automatica`.
