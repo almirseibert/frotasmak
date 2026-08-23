@@ -1,0 +1,77 @@
+﻿marca;familia;tipo;unidade;qtd;capacidade_tanque_L;media_esperada;tolerancia_pct;ref_tanque_p95_L;ref_media_historica;veiculos_com_historico;modelos_incluidos;exemplos;origem
+MERCEDES-BENZ;ATEGO;Caçamba Truckado;L/h;4;300;6;20;285;;0;ATEGO 2426 CE / ATEGO 2430 / ATEGO 2730CE;RET8F89 / JBA4E91 / QJS8A50;"tanque: Atego 210-315 L conforme versão; p95 observado 285 L converge para 300 | média: convenção adotada para Caçamba Truckado"
+CATERPILLAR;CATERPILLAR;Escavadeira;L/h;2;;;20;;;0;CATERPILLAR;ESC 1 / TFE-ESC1;cadastro genérico — modelo não identificável
+CHEVROLET;12000;Caçamba Toco;L/h;2;;6;20;;;0;12000;RE442 / RE456;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Toco
+FORD;2629;Caçamba Traçado;L/h;2;275;6;20;;;0;2629;IUN7E00 / IUS2H68;tanque: Ford Cargo 2629 6x4: 275 L | média: convenção adotada para Caçamba Traçado
+FORD;F-4000;Caminhão Carroceria;L/h;2;;6;20;5000;;0;F-4000 / F-4000 COMBOIO CANDIOTA;RE518 / RE546;tanque: não encontrado com segurança | média: convenção adotada para Caminhão Carroceria
+FOTON;3.5;Caminhão Carroceria;L/h;2;;6;20;1000;;0;3.5 11DT 4X2;RE559 / RE558;tanque: não encontrado com segurança | média: convenção adotada para Caminhão Carroceria
+JCB;3CX;Retroescavadeira;L/h;2;160;10;20;;;0;3CX / 3CX 2WS4WD;3CX / JDB8A07;tanque: JCB 3CX: ~150-173 L conforme versão | média: convenção adotada para Retroescavadeira
+MERCEDES;1718;Caçamba Truckado;L/h;2;;6;20;;;0;1718 / 1718 K;IGA7J72 / CPT7E10;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES-BENZ;AXOR;Caçamba Traçado;L/h;2;;6;20;;;0;AXOR 33446X4 / AXOR 4144K6X4;RMI4A52 / GSV0I25;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Traçado
+RANDON;CAÇAMBA;Semirreboques;Km/L;2;;;20;;;0;CAÇAMBA LS;RE812 / RE480;reboque sem motor — não abastece
+VOLVO;VM 270;Caçamba;L/h;2;;6;20;;;0;VM 270 6X2R;TZN-CAM2 / TZN-CAM1;tanque: não encontrado com segurança | média: convenção adotada para Caçamba
+ARTESANAL;TANQUE;Semirreboques;Km/L;1;;;20;;;0;TANQUE 3E;RE614;reboque sem motor — não abastece
+CAT;320;Escavadeira;L/h;1;345;25;20;;;0;320 GC;CAT 320GC VALMIR;tanque: Cat 320: 345 L | média: convenção adotada para Escavadeira
+CATERPILLAR;315DL;Escavadeira;L/h;1;;25;20;;;0;315DL;TBG-ESC1;tanque: não encontrado com segurança | média: convenção adotada para Escavadeira
+CATERPILLAR;D6N;Trator Esteira;L/h;1;299;20;20;;;0;D6N;D6N;tanque: Cat D6N trator de esteira: 299 L | média: convenção adotada para Trator Esteira
+CHEVROLET;D-60;Caminhão Pipa;L/h;1;;6;20;;;0;D-60 PICHE;RE630;tanque: não encontrado com segurança | média: convenção adotada para Caminhão Pipa
+COMPRESSOR GASOLINA PRESSURE;PRPD200AP-021;Utilitários;Km/L;1;;10;20;;;0;PRPD200AP-021;RE 860;tanque: não encontrado com segurança | média: convenção adotada para Utilitários
+DYNACOM;PIOVESAN;Rolo;L/h;1;;;20;;;0;PIOVESAN;TPI-ROL1;cadastro genérico — modelo não identificável
+ESC;312;Escavadeira;L/h;1;;;20;260;;0;312 MPP;ESC 9;cadastro genérico — modelo não identificável
+ESCAVADEIRA;23T;Escavadeira;L/h;1;;;20;;;0;23T;TMS-ESC1;cadastro genérico — modelo não identificável
+ESCAVADEIRA;ZELOMAQUI;Escavadeira;L/h;1;;;20;;;0;ZELOMAQUI;TZE-ESC1;cadastro genérico — modelo não identificável
+FERREIRA RFA CARRETÃO;R/FERREIRA;Semirreboques;Km/L;1;;;20;;;0;R/FERREIRA RFA 02;RE 687;reboque sem motor — não abastece
+FORD;2428E;Caminhão Carroceria;L/h;1;;6;20;;;0;2428E PRANCHA;RE223 CANOAS;tanque: não encontrado com segurança | média: convenção adotada para Caminhão Carroceria
+FORD;2622;Caçamba Truckado;L/h;1;;6;20;;;0;2622 6X4;ISO7I83;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+FORD;2623;Caçamba Traçado;L/h;1;;6;20;;;0;2623;IUA6B57;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Traçado
+FORD;2628;Caçamba Traçado;L/h;1;275;6;20;;;0;2628;ITA0F23;tanque: Ford Cargo 2628: 275 L | média: convenção adotada para Caçamba Traçado
+FORD;815E;Caminhão Carroceria;L/h;1;;6;20;1900;;0;815E COMBOIO LAJEADO;RE686;tanque: não encontrado com segurança | média: convenção adotada para Caminhão Carroceria
+FORD;CARGO;Caçamba;L/h;1;;;20;;;0;CARGO 1622;IGI9G92;cadastro genérico — modelo não identificável
+FORD;CARGO;Caçamba Traçado;L/h;1;;;20;;;0;CARGO 2629 6X4;IUC6C98;cadastro genérico — modelo não identificável
+FORD;F14000;Caminhão Pipa;L/h;1;;6;20;;;0;F14000;RE815;tanque: não encontrado com segurança | média: convenção adotada para Caminhão Pipa
+HYUNDAI;220LC-95;Escavadeira;L/h;1;400;25;20;;;0;220LC-95;220LC-95;tanque: Hyundai R220LC-9S: 400 L | média: convenção adotada para Escavadeira
+HYUNDAI;R 220;Escavadeira;L/h;1;400;25;20;;;0;R 220 LC-9;R220 LC-9 JAVALI;tanque: Hyundai R220: 400 L | média: convenção adotada para Escavadeira
+JCB;JCB;Retroescavadeira;L/h;1;;;20;;;0;JCB;JCB RETRO JOSE;cadastro genérico — modelo não identificável
+KOMATSU;HARTH;Escavadeira;L/h;1;;;20;;;0;HARTH;THA-ESC1;cadastro genérico — modelo não identificável
+KOMATSU;PIOVESAN;Escavadeira;L/h;1;;;20;;;0;PIOVESAN;TPI-ESC1;cadastro genérico — modelo não identificável
+LAVRALE;MOD.150MF;Semirreboques;Km/L;1;;;20;;;0;MOD.150MF;RE421 ROÇADEIRA;reboque sem motor — não abastece
+LIBRELATO;CAÇAMBA;Semirreboques;Km/L;1;;;20;;;0;CAÇAMBA SR3E;RE472;reboque sem motor — não abastece
+LIUGONG;PIOVESAN;Motoniveladora;L/h;1;;;20;;;0;PIOVESAN;TPI-MOT1;cadastro genérico — modelo não identificável
+MERCEDES;1513;Caçamba Truckado;L/h;1;;6;20;;;0;1513;IIP7G44 JAVALI;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES;1518;Caçamba Truckado;L/h;1;;6;20;;;0;1518;IDW7J60;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES;1720;Caçamba Truckado;L/h;1;;6;20;;;0;1720;CTC3384;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES;AXOR;Caçamba Truckado;L/h;1;;6;20;;;0;AXOR;FWX6G91;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES BENZ;1620;Caçamba Truckado;L/h;1;;6;20;;;0;1620;INY0D75;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES BENZ;1728;Caçamba Truckado;L/h;1;;6;20;;;0;1728;MDA0D48;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES BENZ;L 1519;Caçamba Truckado;L/h;1;;6;20;;;0;L 1519;LWX7H71;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES-BENZ;ACTROS;Caçamba Truckado;L/h;1;;6;20;;;0;ACTROS 4144 K;IPI8I37;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+MERCEDES-BENZ;ATRON;Caçamba;L/h;1;;6;20;;;0;ATRON 1319;TZN-CAM4;tanque: não encontrado com segurança | média: convenção adotada para Caçamba
+MERCEDES-BENZ;LS1933;Caçamba Truckado;L/h;1;;6;20;;;0;LS1933;ACL7D30;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+PEDERIVA;23T;Escavadeira;L/h;1;;;20;300;;0;23T;TPD-ESC1;cadastro genérico — modelo não identificável
+RANDOM;SR BA;Caçamba Truckado;L/h;1;;6;20;;;0;SR BA 03E;RMG0G30;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+RANDON;PRANCHA;Semirreboques;Km/L;1;;;20;;;0;PRANCHA LS;RE810;reboque sem motor — não abastece
+RANDON;RANDON;Semirreboques;Km/L;1;;;20;;;0;RANDON SR BA 03E;RE791;reboque sem motor — não abastece
+RODOKINHO;PRANCHA;Semirreboques;Km/L;1;;;20;;;0;PRANCHA;RE537;reboque sem motor — não abastece
+RODOVALE;PRANCHA;Semirreboques;Km/L;1;;;20;;;0;PRANCHA LS;RE224;reboque sem motor — não abastece
+ROLO;COMPACTADOR;Rolo;L/h;1;;;20;;;0;COMPACTADOR;TMS-ROL1;cadastro genérico — modelo não identificável
+SANY;215C;Escavadeira;L/h;1;340;25;20;;;0;215C;TIM-ESC1;tanque: Sany SY215C: 340 L | média: convenção adotada para Escavadeira
+SCANIA;G470;Caçamba;L/h;1;;6;20;;;0;G470 A6X4;TZN-CAM5;tanque: não encontrado com segurança | média: convenção adotada para Caçamba
+STA BARBARA CARRETÃO;R/STA;Semirreboques;Km/L;1;;;20;;;0;R/STA BARBARA PL;RE 663;reboque sem motor — não abastece
+TRATOR;TRATOR;Trator Esteira;L/h;1;;;20;;;0;TRATOR;TAD-TRAT1;cadastro genérico — modelo não identificável
+VOLKSWAGEM;24.250;Caçamba Truckado;L/h;1;275;6;20;;;0;24.250;CYN8D91;tanque: VW Constellation 24.250: 275 L | média: convenção adotada para Caçamba Truckado
+VOLKSWAGEM;24.280;Caçamba;L/h;1;275;6;20;;;0;24.280 CRM 6X2;TZN-CAM3;tanque: VW Constellation 24.280: 275 L | média: convenção adotada para Caçamba
+VOLKSWAGEM;OUTROS;Automóvel;Km/L;1;;;20;500;;0;OUTROS;MAK2025;cadastro genérico — modelo não identificável
+Volkswagen;8-150;Caminhão Carroceria;L/h;1;;6;20;124;;0;8-150 DELIVERY;RE449;tanque: não encontrado com segurança | média: convenção adotada para Caminhão Carroceria
+VOLKSWAGEN;17310;Caçamba Truckado;L/h;1;;6;20;;;0;17310;IKX2A39;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+VOLKSWAGEN;24.250C;Caçamba Bitruck;L/h;1;275;6;20;;;0;24.250C PMERECHIM 8X2;IRU6F51;tanque: VW Constellation 24.250: 275 L | média: convenção adotada para Caçamba Bitruck
+VOLKSWAGEN;26.280;Caçamba Traçado;L/h;1;275;6;20;344;;0;26.280 CRM 6X4;IUD1A97;tanque: VW Constellation 26.280: 275 L (existe opção de tanque duplo 275+150) | média: convenção adotada para Caçamba Traçado
+VOLKSWAGEN;26220;Caçamba Truckado;L/h;1;;6;20;;;0;26220;EGC2D24;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+VOLKSWAGEN;31370;Caçamba Traçado;L/h;1;620;6;20;;;0;31370;IPS7B63;tanque: VW Constellation 31.370: 620 L | média: convenção adotada para Caçamba Traçado
+VOLKSWAGEN;DIVERSOS;Automóvel;Km/L;1;;;20;200;;0;DIVERSOS;VAL2025;cadastro genérico — modelo não identificável
+VOLVO;EC 210;Escavadeira;L/h;1;295;25;20;;;0;EC 210;ec210blc JAVALI;tanque: Volvo EC210: 295 L na versão base | média: convenção adotada para Escavadeira
+VOLVO;FH 380;Caçamba Truckado;L/h;1;;6;20;;;0;FH 380;ORJ7B21;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+VOLVO;VM 260;Caçamba Truckado;L/h;1;;6;20;340;;0;VM 260 6X2R;MJT3G99;tanque: não encontrado com segurança | média: convenção adotada para Caçamba Truckado
+VOLVO;VM 260;Caçamba;L/h;1;;6;20;;;0;VM 260 6X2R;TZN-CAM6;tanque: não encontrado com segurança | média: convenção adotada para Caçamba
+VW;23.210;Caçamba;L/h;1;;6;20;;;0;23.210;IKU1G26;tanque: não encontrado com segurança | média: convenção adotada para Caçamba
+VW;31.320;Caçamba;L/h;1;;6;20;;;0;31.320 CNC;IQD3B60;tanque: não encontrado com segurança | média: convenção adotada para Caçamba
+YUNDAI;210;Escavadeira;L/h;1;;25;20;;;0;210 LC_7;ESC 8;tanque: não encontrado com segurança | média: convenção adotada para Escavadeira

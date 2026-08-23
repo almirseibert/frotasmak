@@ -97,9 +97,11 @@ três números fecham entre si, é sinal forte de que a leitura está correta.
 
 ---
 
-## Fase de acompanhamento (modo sombra)
+## Fase de acompanhamento — o "treinamento" de 15 dias
 
-Nas primeiras semanas o sistema roda em **modo sombra**:
+É assim que a fase é apresentada às obras: um **período de treinamento de no mínimo 15 dias**, em
+que o sistema acompanha os pedidos e aprende o consumo dos equipamentos daquela obra. Internamente
+isso é o **modo sombra**:
 
 - A IA analisa tudo e registra o que **teria feito**;
 - **Nada é liberado automaticamente** — todas as solicitações continuam passando por você;
@@ -120,11 +122,25 @@ só porque ela encaminhou. A medição só vale se as suas decisões forem as de
 Se encontrar um caso em que a IA marcou "liberaria" e você negaria — **avise a coordenação**. Esse é
 o caso que mais interessa.
 
+### Por que insistimos que a obra peça tudo pelo site
+
+O aviso enviado às obras pede que **todos** os veículos passem a solicitar pelo `frotamak.com`
+durante o treinamento. Não é formalidade: o sistema aprende o consumo de cada equipamento a partir
+dos pedidos. Veículo que continua pedindo por fora não gera histórico e, quando a liberação
+automática for ligada naquela obra, vai continuar caindo na sua fila — sem que ninguém entenda o
+motivo.
+
+Se perceber uma obra em treinamento com veículos ainda pedindo por telefone ou WhatsApp direto,
+vale avisar a coordenação para reforçar no grupo.
+
 ---
 
 ## Quando o modo automático for ligado
 
-Muda pouco no seu dia:
+Para a obra, a mudança mais visível é que o pedido passa a poder ser feito **a qualquer hora e em
+qualquer dia**, inclusive fim de semana e feriado, sem depender de alguém estar no escritório.
+
+Para você, muda pouco:
 
 - Solicitações que passam em tudo geram a ordem sozinhas, e a ordem vai para o posto normalmente.
   O operador recebe aviso no WhatsApp;
