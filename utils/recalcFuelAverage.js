@@ -10,11 +10,33 @@ const consumo = require('./consumo');
 // Descartar o intervalo é melhor que gravar ou que falhar: os demais intervalos
 // do veículo seguem válidos, e uma média envenenada faria o portão de média do
 // aceite automático liberar (ou barrar) por um motivo inexistente.
+//
+// A faixa inicial (Km/L 0,1–100 · L/h 0,1–500) só pegava o absurdo aritmético.
+// O backfill em produção mostrou que ela deixava passar dois erros de leitura
+// bem mais comuns, e ambos envenenavam a média sem nenhum sinal:
+//
+//   - km gravado no campo de HORÍMETRO: delta enorme com litragem normal, e o
+//     resultado cai entre 0,1 e 1 L/h. Deixou `Caminhão Carroceria` com média
+//     de tipo de 0,687 L/h e `Caçamba` com 0,758 — fisicamente impossível.
+//   - horímetro parado (ou quase) com tanque cheio: delta minúsculo, litragem
+//     alta, resultado nas dezenas ou centenas. RE735 fechou em 250 L/h, RE786
+//     em 178 e RE440 em 170, empurrando a média da Motoniveladora para 25,5
+//     L/h quando a operação real gira em torno de 18.
+//
+// Os limites abaixo vêm da própria frota, com folga deliberada nas duas pontas:
+// a maior média legítima observada é uma escavadeira em ~50 L/h e a menor é um
+// caminhão pesado em ~1,4 Km/L; do lado do Km/L o teto precisa acomodar as motos
+// (RE549 em 32,4 Km/L). Apertar mais do que isso começaria a descartar dado bom.
+//
+// Efeito de estreitar: o veículo cujo intervalo cai fora perde aquele intervalo e
+// pode ficar com histórico insuficiente — o portão de média manda para o humano,
+// que é o desfecho certo. Era o mesmo desfecho de antes (a média podre reprovava
+// contra o cadastro), mas agora sem contaminar `avg_by_tipo` de toda a frota.
 const FAIXA_PLAUSIVEL = {
-    'Km/L': [0.1, 100],   // nem 0,1 km por litro, nem 100 km por litro
-    'L/Km': [0.01, 10],   // recíproco de Km/L
-    'L/h':  [0.1, 500],   // do gerador pequeno à escavadeira grande
-    'h/L':  [0.002, 10],  // recíproco de L/h
+    'Km/L': [0.5, 40],     // prancha carregada ~1,4 · moto ~32
+    'L/Km': [0.025, 2],    // recíproco de Km/L
+    'L/h':  [1, 60],       // retro ~4 · escavadeira grande ~50
+    'h/L':  [1 / 60, 1],   // recíproco de L/h
 };
 
 const consumoPlausivel = (unidade, valor) => {

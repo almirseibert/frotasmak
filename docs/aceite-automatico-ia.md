@@ -725,35 +725,79 @@ desmarcada. Escondê-la deixaria escopo ativo invisível na tela, que é pior do
 Os veículos oferecidos excluem terceirizado, fictício e comboio — o G0 recusa os três de qualquer
 forma, e listá-los seria convidar a marcar um veículo que nunca seria liberado.
 
-### As médias em produção ainda não foram recalculadas
+### Backfill das médias em produção (2026-08-23)
 
-O parecer da IA em produção mostra `Histórico insuficiente: 0 intervalo(s), mínimo 3` para
-**toda** a frota. Não é falta de histórico: `vehicle_fuel_averages` existe e vem de `refuelings`,
-mas as colunas `unidade` / `intervalos_validos` / `intervalos_tanque_cheio` (Fase 1) só são
-preenchidas pelo recálculo novo, e o backfill dos 447 veículos registrado acima rodou no **banco
-de teste**. Em produção nunca rodou, e `NULL` é lido como zero pelo G2.
+O parecer da IA mostrava `Histórico insuficiente: 0 intervalo(s)` para **toda** a frota. Não era
+falta de histórico: `vehicle_fuel_averages` existe e vem de `refuelings`, mas as colunas `unidade`
+/ `intervalos_validos` / `intervalos_tanque_cheio` (Fase 1) só são preenchidas pelo recálculo novo,
+e o backfill dos 447 veículos registrado acima rodou no **banco de teste**. Em produção nunca
+tinha rodado, e `NULL` é lido como zero pelo G2.
 
-Enquanto isso não for feito, o G2 devolve `indeterminado` para todas as solicitações e o piloto
-não sai do lugar. Rodar **dentro do container** (na máquina local o `.env.local` desvia para o
-banco de teste):
+**Não havia atalho invertendo h/L → L/h.** Inverter corrige o número mas não preenche `unidade`
+nem `intervalos_validos`, que é o que o portão lê — e o recálculo já parte de `refuelings`, a
+mesma fonte de onde a média antiga saiu, só que com a leitura certa por grupo e com o filtro de
+plausibilidade. O caminho curto e o caminho certo eram o mesmo.
 
-```bash
-node scripts/recalcMediasConsumo.js --listar
-```
+Rodado no container (na máquina local o `.env.local` desvia para o banco de teste):
 
 ```bash
 node scripts/recalcMediasConsumo.js
 ```
 
-**Não existe atalho invertendo h/L → L/h.** Inverter corrige o número mas não preenche `unidade`
-nem `intervalos_validos`, que é o que o portão lê — e o recálculo já é feito a partir de
-`refuelings`, a mesma fonte de onde a média antiga saiu, só que com a leitura certa por grupo e
-com o filtro de plausibilidade. O caminho curto e o caminho certo são o mesmo.
+**533 veículos, 0 erros, 0 linhas sem unidade.** Médias por tipo resultantes:
 
-Detalhe que vai importar na calibragem: a consulta do recálculo usa `LIMIT 4` ordens, ou seja, no
-máximo **3 intervalos**. Com `min_intervalos_historico = 3` o mínimo é igual ao teto — basta um
-intervalo descartado por implausibilidade para o veículo nunca passar no G2. Se depois do backfill
-a maioria da frota ficar em 2, o ajuste é baixar o mínimo para 2 na tela, não mexer no código.
+| Tipo | Unidade | Média |
+|---|---|---|
+| Moto | Km/L | 30,20 |
+| Automóvel | Km/L | 13,86 |
+| Camionete | Km/L | 11,17 |
+| Caminhão Prancha | Km/L | 1,895 |
+| Motoniveladora | L/h | 25,49 |
+| Caçamba Traçado | L/h | 16,55 |
+| Escavadeira | L/h | 13,46 |
+| Cavalo | L/h | 12,30 |
+| Retroescavadeira | L/h | 10,49 |
+| Rolo | L/h | 10,19 |
+| Trator Esteira | L/h | 9,97 |
+| Pá Carregadeira | L/h | 9,07 |
+| Caçamba Truckado | L/h | 6,26 |
+
+Boa parte da frota rodante fechou com `int = 3`, então **`min_intervalos_historico` fica em 3** —
+o receio de que quase todo mundo pararia em 2 não se confirmou.
+
+**`intervalos_tanque_cheio = 0` em praticamente toda a linha de máquinas** (Escavadeira,
+Motoniveladora, Rolo, Retro, Pá, Trator Esteira). Consequência direta: **não ligar**
+`exigir_tanque_cheio_historico` — barraria as máquinas todas de uma vez.
+
+### Faixa de plausibilidade estreitada
+
+O resultado do backfill expôs que a faixa original (Km/L 0,1–100 · L/h 0,1–500) só pegava o
+absurdo aritmético e deixava passar os dois erros de leitura que realmente acontecem:
+
+| Erro | Como aparece | Exemplos em produção |
+|---|---|---|
+| km gravado no campo de horímetro | média entre 0,1 e 1 L/h | RE558 0,114 · RE449 0,142 · RE571 0,342 · BWB2J62 0,728 |
+| horímetro parado com tanque cheio | média nas dezenas/centenas | RE735 250 · RE786 178 · RE440 170 · RE673 87,7 |
+
+O primeiro deixou `Caminhão Carroceria` com média de tipo de **0,687 L/h** e `Caçamba` com
+**0,758**; o segundo empurrou `Motoniveladora` para **25,5 L/h** quando a operação real gira em
+torno de 18. Nenhum dos dois é perigoso para a liberação — o G2 compara contra o cadastro e
+reprova — mas ambos contaminam `avg_by_tipo`, que é fallback de média esperada para quem não tem
+cadastro.
+
+Nova faixa, tirada da própria frota com folga nas duas pontas:
+
+| Unidade | Antes | Agora | Ancoragem |
+|---|---|---|---|
+| Km/L | 0,1–100 | **0,5–40** | prancha carregada ~1,4 · moto ~32 |
+| L/h | 0,1–500 | **1–60** | retro ~4 · escavadeira grande ~50 |
+
+Os recíprocos (`L/Km`, `h/L`) acompanham. Apertar mais começaria a descartar dado bom.
+
+O veículo que perde intervalos por isso pode ficar com histórico insuficiente — e aí o G2 manda
+para o humano, que é o mesmo desfecho de antes, só que sem sujar o agregado da frota.
+**A faixa nova só vale para o que for recalculado depois dela**: rodar
+`node scripts/recalcMediasConsumo.js --todos` no container para aplicar retroativamente.
 
 ---
 
@@ -806,7 +850,11 @@ virar ou não para o modo ativo)_
 - **`ANTHROPIC_API_KEY`** foi documentada em `backend/CLAUDE.md` na Fase 2. Continua ausente dos
   `.env` locais (é injetada pelo Easypanel), então o portão de visão fica `indeterminado` em
   desenvolvimento — o primeiro teste real de leitura de imagem precisa rodar em ambiente com a chave.
-- **Leitura de km gravada em campo de horímetro** em alguns caminhões — ver observação na Fase 1.
+- **Leitura de km gravada em campo de horímetro** em alguns caminhões. O backfill em produção
+  nomeou os casos (RE558, RE449, RE571, RE433, RE512, LZR2J11, MHW4I31, BWB2J62 entre outros). A
+  faixa de plausibilidade nova impede que envenenem a média, mas o cadastro segue errado: enquanto
+  estiver assim, esses veículos ficam permanentemente em conferência humana. Para listar:
+  `SELECT ... FROM vehicle_fuel_averages WHERE unidade = 'L/h' AND (avg_last_3 < 1 OR avg_last_3 > 60)`.
 - **Cadastro restante.** 63 veículos ainda sem capacidade de tanque e 28 sem média. Destes, 11 são
   semirreboques (corretos: reboque não abastece) e o resto é cadastro genérico demais para valer
   qualquer número. Enquanto assim, esses pedidos continuam indo para conferência humana — que é o
@@ -830,8 +878,8 @@ virar ou não para o modo ativo)_
 
 1. **Redeploy do backend** com a correção do `updated_by` — sem ela a tela de parâmetros
    não salva (ver "O 500 que sobrou" acima). O `ALTER TABLE` roda sozinho no boot.
-2. **Rodar `node scripts/recalcMediasConsumo.js` no container** — sem isso o G2 fica
-   `indeterminado` para a frota inteira (ver "Ajustes de escopo" acima).
+2. **Rodar `node scripts/recalcMediasConsumo.js --todos` no container** após o deploy, para
+   aplicar a faixa de plausibilidade nova às médias já calculadas.
 3. Admin → Frota → Aceite Automático: ligar o motor, deixar em **sombra**, marcar **uma** obra
    e/ou os veículos que devem entrar independentemente de obra.
 4. Enviar o aviso da **Fase 1** no grupo daquela obra.
