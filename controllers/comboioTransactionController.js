@@ -10,6 +10,8 @@ const { ensureComboioPartner, buildComboioPartnerId } = require('../utils/ensure
 const { notifyComboioEntrada } = require('../services/orderNotifier');
 const { ensureOpenComboioPeriod, getActivePeriodId } = require('../utils/comboioPeriodo');
 const { recalcFuelAverage } = require('../utils/recalcFuelAverage');
+const { checkReadingConsistency } = require('../utils/vehicleRules');
+const consumo = require('../utils/consumo');
 
 // --- HELPERS DE SANITIZAÇÃO ---
 const sanitize = (value) => (value === undefined || value === 'undefined' || value === '' ? null : value);
@@ -288,6 +290,57 @@ const updateVehicleReadingLocal = async (connection, vehicleId, readings) => {
         await updateVehicleReading(connection, vehicleId, vRow.tipo, readingVal, 'auto');
     }
 };
+
+// --- HELPER: Validar leitura informada na distribuição (B1) ---
+// A saída de comboio grava uma linha em `refuelings` já como 'Concluída' e essa
+// linha alimenta recalcFuelAverage. Até aqui ela NÃO passava por nenhuma trava de
+// leitura — nem regressão, nem salto — enquanto a emissão de ordem normal passa
+// por checkLeituraBloqueada. Resultado: uma leitura digitada errada na obra
+// corrompia a média do veículo em silêncio.
+//
+// Usa checkReadingConsistency (utils/vehicleRules), a mesma função do frontend,
+// que já traz a exceção de 2000 km dos Caminhões de Trecho.
+const validarLeituraDistribuicao = async (connection, vehicleId, readings) => {
+    if (!vehicleId) return null;
+
+    const [[veiculo]] = await connection.execute(
+        'SELECT tipo, odometro, horimetro, isOutsourced, permiteMultiplosAbastecimentos FROM vehicles WHERE id = ?',
+        [vehicleId]
+    );
+    if (!veiculo) return null;
+
+    // Mesmas isenções da emissão de ordem: terceirizados e veículos fictícios
+    // (ajuda de custo, gerador, lava-jato) não seguem nossa malha de leitura.
+    if (veiculo.isOutsourced == 1 || veiculo.permiteMultiplosAbastecimentos == 1) return null;
+
+    const campo = await consumo.getCampoLeitura(veiculo.tipo, connection);
+    const valor = sanitizeNumber(campo === 'odometro' ? readings.odometro : readings.horimetro);
+    if (!valor || valor <= 0) return null; // sem leitura informada, nada a validar
+
+    const resultado = checkReadingConsistency(veiculo, valor, campo);
+    return resultado.status === 'bloqueio' ? resultado.message : null;
+};
+
+// --- HELPER: Saldo de combustível do comboio (B2) ---
+// A subtração usava GREATEST(0, saldo - litros): distribuir mais do que existe
+// simplesmente zerava o tanque e ninguém ficava sabendo. Agora conferimos antes.
+//
+// Quando o nível nunca foi rastreado (fuelLevels sem a chave) devolvemos null e
+// deixamos passar — comboio nunca inicializado não pode travar a operação.
+const getSaldoComboio = async (connection, comboioVehicleId, fuelType) => {
+    if (!comboioVehicleId || !fuelType) return null;
+    const [[linha]] = await connection.execute(
+        'SELECT JSON_EXTRACT(fuelLevels, ?) AS saldo FROM vehicles WHERE id = ?',
+        ['$.' + fuelType, comboioVehicleId]
+    );
+    if (!linha || linha.saldo === null || linha.saldo === undefined) return null;
+    const n = parseFloat(linha.saldo);
+    return isNaN(n) ? null : n;
+};
+
+// Tolerância de arredondamento: medidores analógicos e conversões geram sobras
+// de fração de litro. Recusar por 0,2 L seria falso positivo.
+const TOLERANCIA_SALDO_L = 1;
 
 // --- HELPER: Obtém ou cria período ativo do comboio na obra ---
 const getOrCreateActivePeriod = async (connection, comboioVehicleId, obraId) => {
@@ -578,6 +631,29 @@ const createSaidaTransaction = async (req, res) => {
         await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
 
         const safeLiters = sanitizeNumber(liters) || 0;
+
+        // B1 — trava de leitura (regressão / salto excessivo) no veículo que recebe.
+        const erroLeitura = await validarLeituraDistribuicao(connection, receivingVehicleId, { odometro, horimetro });
+        if (erroLeitura) {
+            await connection.rollback();
+            connection.release();
+            return res.status(409).json({ error: erroLeitura, code: 'READING_BLOCK' });
+        }
+
+        // B2 — saldo do comboio precisa cobrir a distribuição.
+        const saldoAtual = await getSaldoComboio(connection, comboioVehicleId, fuelType);
+        if (saldoAtual !== null && safeLiters > (saldoAtual + TOLERANCIA_SALDO_L)) {
+            await connection.rollback();
+            connection.release();
+            return res.status(409).json({
+                error: `Saldo insuficiente no comboio: ${saldoAtual.toFixed(2)} L de ${fuelType} `
+                     + `disponíveis, ${safeLiters.toFixed(2)} L solicitados. `
+                     + 'Registre a entrada de combustível no comboio antes de distribuir.',
+                code: 'INSUFFICIENT_COMBOIO_BALANCE',
+                saldoDisponivel: saldoAtual,
+                litrosSolicitados: safeLiters,
+            });
+        }
 
         let obraName = 'Obra Desconhecida';
         if (obraId) {

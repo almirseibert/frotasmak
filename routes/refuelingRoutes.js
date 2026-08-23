@@ -3,35 +3,45 @@ const express = require('express');
 const router = express.Router();
 const refuelingController = require('../controllers/refuelingController');
 const authMiddleware = require('../middlewares/authMiddleware');
+const { requireAnyPage } = require('../utils/permissions');
 
 router.use(authMiddleware);
 
+// Emitir, editar, dar baixa e liberar ordem exige a área de abastecimento.
+// Aceita 'admin_solicitacoes' junto de 'refueling' porque a tela de Solicitações
+// (App) emite a ordem e dá a baixa pelos mesmos endpoints, e há usuários com
+// page_permissions individual contendo só uma das duas páginas.
+// As leituras (GET) seguem abertas a qualquer autenticado: já passam pelo
+// filtro de ordens reservadas (HIDDEN_VISIBILITY_CLAUSE) e alimentam o
+// DataContext de várias telas.
+const podeOperar = requireAnyPage(['refueling', 'admin_solicitacoes']);
+
 // --- ROTA DE UPLOAD (MUITO IMPORTANTE: DEVE VIR ANTES DE /:id) ---
 // Se ficar depois, o sistema acha que "upload-pdf" é um ID de abastecimento
-router.post('/upload-pdf', refuelingController.upload.single('file'), refuelingController.uploadOrderPdf);
+router.post('/upload-pdf', podeOperar, refuelingController.upload.single('file'), refuelingController.uploadOrderPdf);
 
 // --- NOVA ROTA: Envio de Email ---
-router.post('/send-email', refuelingController.sendOrderEmail);
+router.post('/send-email', podeOperar, refuelingController.sendOrderEmail);
 
 // Rotas CRUD padrão
 router.get('/', refuelingController.getAllRefuelings);
 // Abastecimentos de um veículo — DEVE vir antes de /:id (senão "vehicle" vira um id)
 router.get('/vehicle/:vehicleId', refuelingController.getRefuelingsByVehicle);
 router.get('/:id', refuelingController.getRefuelingById);
-router.post('/', refuelingController.createRefuelingOrder);
-router.put('/:id', refuelingController.updateRefuelingOrder);
-router.delete('/:id', refuelingController.deleteRefuelingOrder);
+router.post('/', podeOperar, refuelingController.createRefuelingOrder);
+router.put('/:id', podeOperar, refuelingController.updateRefuelingOrder);
+router.delete('/:id', podeOperar, refuelingController.deleteRefuelingOrder);
 
 // Rota para confirmar um abastecimento em aberto
-router.put('/:id/confirm', refuelingController.confirmRefuelingOrder);
+router.put('/:id/confirm', podeOperar, refuelingController.confirmRefuelingOrder);
 
 // Rota para liberar ordem bloqueada (admin)
-router.put('/:id/liberar', refuelingController.liberarOrdemBloqueada);
+router.put('/:id/liberar', podeOperar, refuelingController.liberarOrdemBloqueada);
 
 // Rota para negar (excluir) ordem bloqueada (admin)
-router.delete('/:id/negar', refuelingController.negarOrdemBloqueada);
+router.delete('/:id/negar', podeOperar, refuelingController.negarOrdemBloqueada);
 
 // Rota para liberar/reagendar ordem reservada (só o emissor)
-router.put('/:id/revelar', refuelingController.revelarOrdemOculta);
+router.put('/:id/revelar', podeOperar, refuelingController.revelarOrdemOculta);
 
 module.exports = router;

@@ -10,6 +10,7 @@ const erpSyncService = require('./erpSyncService');
 const orderDelivery = require('./orderDelivery');
 const orderRetryService = require('./orderRetryService');
 const { sendEmail } = require('./emailService');
+const abastecimentoAuto = require('./abastecimentoAutoService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -787,6 +788,25 @@ cron.schedule('*/2 * * * *', async () => {
         await erpSyncService.processQueue();
     } catch (e) {
         console.error('❌ [ERP-SYNC] Erro no processamento da fila:', e.message);
+    }
+});
+
+// ====================================================================
+// FILA DE ANÁLISE AUTOMÁTICA DE ABASTECIMENTO (IA)
+// ====================================================================
+// O disparo normal é setImmediate logo após o commit da solicitação. Esta fila
+// é a rede de segurança: pega o que ficou para trás porque o processo reiniciou
+// no meio da análise, ou porque a API do Claude estava fora do ar.
+//
+// INERTE sem ANTHROPIC_API_KEY (isConfigured() = false → processarFila() retorna
+// imediatamente), no mesmo padrão do erpSyncService. A cada 2 minutos.
+// Ver docs/aceite-automatico-ia.md.
+// ====================================================================
+cron.schedule('*/2 * * * *', async () => {
+    try {
+        await abastecimentoAuto.processarFila();
+    } catch (e) {
+        console.error('❌ [ABASTECIMENTO-IA] Erro no processamento da fila:', e.message);
     }
 });
 

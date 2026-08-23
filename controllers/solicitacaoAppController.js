@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { vehicleGroups } = require('../utils/vehicleRules');
+const abastecimentoAuto = require('../services/abastecimentoAutoService');
 
 // Exceção da trava de leitura: veículos do grupo "Caminhões de Trecho"
 // (Caminhão Prancha / Semirreboques) podem deslocar até 2000 km entre
@@ -44,6 +45,17 @@ const safeNum = (val) => {
     if (val === null || val === undefined || val === '') return 0;
     const n = parseFloat(val);
     return isNaN(n) ? 0 : n;
+};
+
+// Remove o upload órfão quando a requisição é recusada. Tolerante a arquivo já
+// removido: um unlinkSync solto derruba o handler e mascara o erro real.
+const descartarUpload = (req) => {
+    if (!req.file || !req.file.path) return;
+    try {
+        if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    } catch (e) {
+        console.warn('[solicitacao] falha ao remover upload órfão:', e.message);
+    }
 };
 
 const normalizeFuelType = (val) => {
@@ -110,7 +122,7 @@ const criarSolicitacao = async (req, res) => {
         const [vehicles] = await connection.execute('SELECT * FROM vehicles WHERE id = ? FOR UPDATE', [veiculo_id]);
         if (vehicles.length === 0) {
             await connection.rollback();
-            if (req.file) fs.unlinkSync(req.file.path);
+            descartarUpload(req);
             return res.status(404).json({ error: 'Veículo não encontrado.' });
         }
         const veiculo = vehicles[0];
@@ -133,7 +145,7 @@ const criarSolicitacao = async (req, res) => {
         if (duplicates.length > 0) {
             const msg = 'Já existe uma solicitação em andamento para este veículo. Finalize a anterior antes de abrir uma nova.';
             await connection.rollback();
-            if (req.file) fs.unlinkSync(req.file.path);
+            descartarUpload(req);
             await registrarErro({
                 usuarioId, usuarioNome, veiculoId: veiculo_id, veiculoPlaca: veiculo.placa, obraId: obra_id,
                 campoErro: 'veiculoId', tipoErro: 'duplicado', mensagem: msg,
@@ -194,7 +206,7 @@ const criarSolicitacao = async (req, res) => {
                 [usuarioId]
             );
             await connection.commit();
-            if (req.file) fs.unlinkSync(req.file.path);
+            descartarUpload(req);
             await registrarErro({
                 usuarioId, usuarioNome, veiculoId: veiculo_id, veiculoPlaca: veiculo.placa, obraId: obra_id,
                 campoErro: erroCampo, tipoErro: erroTipo, mensagem: erroValidacao,
@@ -252,10 +264,22 @@ const criarSolicitacao = async (req, res) => {
 
         res.status(201).json({ message: 'Solicitação enviada!', id: result.insertId });
 
+        // Análise automática — DEPOIS do commit e da resposta. Enfileira primeiro
+        // (rede de segurança se o processo cair) e dispara na sequência, para o
+        // parecer já estar pronto quando o gestor abrir a tela.
+        // Nunca bloqueia nem afeta a resposta ao operador.
+        const novaSolicitacaoId = result.insertId;
+        setImmediate(() => {
+            abastecimentoAuto.enfileirar(novaSolicitacaoId, abastecimentoAuto.ETAPA.PAINEL)
+                .then(() => abastecimentoAuto.dispararAgora(novaSolicitacaoId, abastecimentoAuto.ETAPA.PAINEL))
+                .then(() => { if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] }); })
+                .catch(e => console.warn('[solicitacao] análise automática falhou:', e.message));
+        });
+
     } catch (error) {
         await connection.rollback();
         console.error("Erro Criar Solicitacao App:", error);
-        if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+        descartarUpload(req);
         res.status(500).json({ error: 'Erro no servidor: ' + error.message });
     } finally {
         connection.release();
@@ -298,13 +322,53 @@ const enviarComprovante = async (req, res) => {
     const { id } = req.params;
     try {
         if (!req.file) return res.status(400).json({ error: 'Foto obrigatória.' });
+
+        // Antes desta checagem a rota aceitava qualquer id: dava para enviar cupom
+        // na solicitação de outra pessoa e sobrescrever o de uma já concluída.
+        const [rows] = await db.execute(
+            'SELECT usuario_id, status FROM solicitacoes_abastecimento WHERE id = ?',
+            [id]
+        );
+        if (rows.length === 0) {
+            descartarUpload(req);
+            return res.status(404).json({ error: 'Solicitação não encontrada.' });
+        }
+
+        const sol = rows[0];
+        const ehDono = String(sol.usuario_id) === String(req.user.id);
+        const ehGestor = req.user.role === 'admin' || req.user.canAccessRefueling === true;
+        if (!ehDono && !ehGestor) {
+            descartarUpload(req);
+            return res.status(403).json({ error: 'Apenas o solicitante pode enviar o comprovante.' });
+        }
+
+        // Só faz sentido anexar cupom em ordem liberada (ou substituir um cupom
+        // que ainda não foi baixado). CONCLUIDO e NEGADO estão encerrados.
+        if (!['LIBERADO', 'AGUARDANDO_BAIXA'].includes(sol.status)) {
+            descartarUpload(req);
+            return res.status(409).json({
+                error: `Não é possível enviar comprovante para uma solicitação com status ${sol.status}.`
+            });
+        }
+
         const fotoPath = `/uploads/solicitacoes/${req.file.filename}`;
-        
+
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?', [fotoPath, id]);
-        
+
         if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
         res.json({ message: 'Comprovante enviado.' });
+
+        // Leitura do cupom pela IA para pré-preencher a baixa. Não conclui nada:
+        // a confirmação financeira continua sendo de uma pessoa.
+        setImmediate(() => {
+            abastecimentoAuto.enfileirar(id, abastecimentoAuto.ETAPA.CUPOM)
+                .then(() => abastecimentoAuto.dispararAgora(id, abastecimentoAuto.ETAPA.CUPOM))
+                .then(() => { if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes', 'refuelings'] }); })
+                .catch(e => console.warn('[solicitacao] leitura do cupom falhou:', e.message));
+        });
     } catch (error) {
+        descartarUpload(req);
+        console.error('Erro Enviar Comprovante:', error);
         res.status(500).json({ error: 'Erro ao enviar comprovante.' });
     }
 };

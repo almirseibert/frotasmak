@@ -6,6 +6,9 @@ const path = require('path');
 const fs = require('fs');
 const db = require('./database');
 const http = require('http');
+// Helpers das migrações inline: encapsulam o fallback de ADD COLUMN IF NOT EXISTS,
+// que é sintaxe de MariaDB e o MySQL 8 recusa com ER_PARSE_ERROR.
+const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
 
 // ====================================================================
 // MIGRAÇÃO AUTOMÁTICA DE SCHEMA (adiciona colunas se não existirem)
@@ -106,6 +109,22 @@ const http = require('http');
         // receptor) à transação de drenagem que o gerou, para permitir reversão
         // na exclusão e o desconto de litragem no cálculo de médias.
         { table: 'refuelings',             column: 'drenagemTransactionId',            def: 'VARCHAR(36) DEFAULT NULL' },
+        // ── Aceite/baixa automáticos com IA (ver docs/aceite-automatico-ia.md) ──
+        // createdFromSolicitacaoId já era LIDA pelo refuelingController (baixa e
+        // exclusão) mas nunca existiu no schema: só o fallback via JSON
+        // createdBy.linkedSolicitacaoId funcionava. Agora passa a ser gravada.
+        { table: 'refuelings',             column: 'createdFromSolicitacaoId',         def: 'VARCHAR(36) DEFAULT NULL' },
+        { table: 'refuelings',             column: 'liberacao_automatica',             def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        // Leitura do cupom feita pela IA, usada para pré-preencher a baixa.
+        { table: 'refuelings',             column: 'baixa_sugerida_ia',                def: 'JSON DEFAULT NULL' },
+        // Parecer da IA sobre a solicitação (leitura do painel + portões).
+        { table: 'solicitacoes_abastecimento', column: 'ia_status',            def: 'VARCHAR(28) DEFAULT NULL' },
+        { table: 'solicitacoes_abastecimento', column: 'ia_decisao',           def: 'VARCHAR(28) DEFAULT NULL' },
+        { table: 'solicitacoes_abastecimento', column: 'ia_leitura_extraida',  def: 'DECIMAL(12,2) DEFAULT NULL' },
+        { table: 'solicitacoes_abastecimento', column: 'ia_confianca',         def: 'DECIMAL(5,4) DEFAULT NULL' },
+        { table: 'solicitacoes_abastecimento', column: 'ia_motivos',           def: 'JSON DEFAULT NULL' },
+        { table: 'solicitacoes_abastecimento', column: 'ia_analisado_em',      def: 'DATETIME DEFAULT NULL' },
+        { table: 'solicitacoes_abastecimento', column: 'liberacao_automatica', def: 'TINYINT(1) NOT NULL DEFAULT 0' },
         // ── Módulo de Planejamento de Obras (pré-obra) ──
         // Ciclo de vida: radar → planejada → mobilizacao → ativa → finalizada.
         // 'dataFimPrevisto' já existia no schema (órfã) e foi adotada; aqui só o par de início.
@@ -132,20 +151,7 @@ const http = require('http');
     ];
 
     for (const { table, column, def } of migrations) {
-        try {
-            await db.query(`ALTER TABLE \`${table}\` ADD COLUMN IF NOT EXISTS \`${column}\` ${def}`);
-        } catch (e) {
-            if (e.code === 'ER_PARSE_ERROR') {
-                // MySQL < 8.0.3: fallback sem IF NOT EXISTS
-                try {
-                    await db.query(`ALTER TABLE \`${table}\` ADD COLUMN \`${column}\` ${def}`);
-                } catch (e2) {
-                    if (e2.code !== 'ER_DUP_FIELDNAME') console.warn(`[migration] ${table}.${column}:`, e2.message);
-                }
-            } else if (e.code !== 'ER_DUP_FIELDNAME') {
-                console.warn(`[migration] ${table}.${column}:`, e.message);
-            }
-        }
+        await addColumnIfMissing(db, table, column, def);
     }
 
     // Índice de performance para authNumber em comboio_transactions
@@ -154,6 +160,14 @@ const http = require('http');
     } catch (e) {
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_authNumber:', e.message);
     }
+
+    // Índice da checagem de NF duplicada por posto. Não é UNIQUE de propósito:
+    // uma nota pode cobrir mais de uma ordem. Serve para o FOR UPDATE da baixa
+    // conseguir gap lock em vez de varrer a tabela inteira.
+    await addIndexIfMissing(db, 'refuelings', 'idx_partner_invoice', '`partnerId`, `invoiceNumber`');
+
+    // Índice para casar ordem <-> solicitação sem varrer a tabela
+    await addIndexIfMissing(db, 'refuelings', 'idx_from_solicitacao', '`createdFromSolicitacaoId`');
 
     // Índice para o filtro de ordens reservadas (GET /refuelings e cron de liberação)
     try {
@@ -747,9 +761,109 @@ const http = require('http');
                 FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE
             )
         `);
+        // Colunas acrescentadas junto com a correção de unidade das médias.
+        // Ficam AQUI (e não na lista geral de migrações) porque aquela lista roda
+        // em IIFE paralelo e poderia correr antes do CREATE TABLE acima.
+        //
+        // `unidade` torna o valor auto-descritivo: antes a mesma coluna guardava
+        // Km/L para leves e h/L para máquinas (invertido em relação ao rótulo
+        // "L/h" da UI), e avg_by_tipo fazia AVG() misturando as duas escalas.
+        // Também marca a linha como já migrada — o backfill procura NULL.
+        const colunasMedia = [
+            { column: 'unidade',                 def: 'VARCHAR(10) DEFAULT NULL' },
+            { column: 'intervalos_validos',      def: 'INT DEFAULT NULL' },
+            { column: 'intervalos_tanque_cheio', def: 'INT DEFAULT NULL' },
+        ];
+        for (const { column, def } of colunasMedia) {
+            await addColumnIfMissing(db, 'vehicle_fuel_averages', column, def);
+        }
         console.log('✅ Migração vehicle_fuel_averages concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] vehicle_fuel_averages:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Aceite e baixa automáticos com IA
+// Ver docs/aceite-automatico-ia.md
+// ====================================================================
+(async () => {
+    try {
+        // Parâmetros do motor. Linha única (id = 1) para poder editar pela tela
+        // de admin sem precisar de deploy. Nasce DESLIGADA e em modo sombra:
+        // enquanto `ativo = 0` nada é analisado; com `modo = 'sombra'` a IA
+        // analisa e registra o que faria, mas não libera nada.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS abastecimento_auto_config (
+                id                        TINYINT UNSIGNED PRIMARY KEY DEFAULT 1,
+                ativo                     TINYINT(1)    NOT NULL DEFAULT 0,
+                modo                      VARCHAR(10)   NOT NULL DEFAULT 'sombra',
+                obras_habilitadas         JSON          DEFAULT NULL,
+                tipos_habilitados         JSON          DEFAULT NULL,
+                confianca_minima_painel   DECIMAL(5,4)  NOT NULL DEFAULT 0.9000,
+                confianca_minima_cupom    DECIMAL(5,4)  NOT NULL DEFAULT 0.9000,
+                tolerancia_leitura_km     DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+                tolerancia_leitura_hr     DECIMAL(10,2) NOT NULL DEFAULT 1.00,
+                tolerancia_media_padrao   DECIMAL(5,2)  NOT NULL DEFAULT 20.00,
+                min_intervalos_historico  INT           NOT NULL DEFAULT 3,
+                exigir_tanque_cheio_historico TINYINT(1) NOT NULL DEFAULT 0,
+                percentual_minimo_tanque  DECIMAL(5,2)  NOT NULL DEFAULT 30.00,
+                limite_valor_auto         DECIMAL(12,2) NOT NULL DEFAULT 1500.00,
+                modelo_rapido             VARCHAR(60)   NOT NULL DEFAULT 'claude-haiku-4-5',
+                modelo_preciso            VARCHAR(60)   NOT NULL DEFAULT 'claude-opus-5',
+                updated_at                TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                updated_by                INT           DEFAULT NULL,
+                CONSTRAINT chk_auto_linha_unica CHECK (id = 1)
+            )
+        `);
+        // Semente idempotente da linha única.
+        await db.query('INSERT IGNORE INTO abastecimento_auto_config (id) VALUES (1)');
+
+        // Auditoria de CADA análise. É o que permite calibrar limiares e provar
+        // por que uma ordem foi (ou não foi) liberada automaticamente.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS solicitacao_ia_analises (
+                id              VARCHAR(36) PRIMARY KEY,
+                solicitacao_id  INT UNSIGNED NOT NULL,
+                etapa           VARCHAR(10)  NOT NULL,
+                modelo          VARCHAR(60)  DEFAULT NULL,
+                escalonou       TINYINT(1)   NOT NULL DEFAULT 0,
+                resposta_json   JSON         DEFAULT NULL,
+                confianca       DECIMAL(5,4) DEFAULT NULL,
+                portoes_json    JSON         DEFAULT NULL,
+                decisao         VARCHAR(28)  DEFAULT NULL,
+                input_tokens    INT          DEFAULT NULL,
+                output_tokens   INT          DEFAULT NULL,
+                latencia_ms     INT          DEFAULT NULL,
+                erro            TEXT         DEFAULT NULL,
+                created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_solicitacao (solicitacao_id),
+                INDEX idx_etapa_data  (etapa, created_at),
+                INDEX idx_decisao     (decisao)
+            )
+        `);
+
+        // Fila de processamento — mesma mecânica de erp_sync_queue.
+        // O disparo normal é setImmediate logo após o commit; a fila existe para
+        // que uma análise perdida num restart seja retomada pelo cron.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS abastecimento_ia_fila (
+                id              VARCHAR(36) PRIMARY KEY,
+                solicitacao_id  INT UNSIGNED NOT NULL,
+                etapa           VARCHAR(10)  NOT NULL,
+                status          VARCHAR(20)  NOT NULL DEFAULT 'pending',
+                attempts        INT          NOT NULL DEFAULT 0,
+                last_error      TEXT         DEFAULT NULL,
+                created_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                updated_at      TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_solicitacao_etapa (solicitacao_id, etapa),
+                INDEX idx_status (status)
+            )
+        `);
+
+        console.log('✅ Migração aceite automático (IA) concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] aceite automático (IA):', e.message);
     }
 })();
 
@@ -1752,6 +1866,7 @@ const inventoryRoutes = require('./routes/inventoryRoutes');
 const whatsappRoutes = require('./routes/whatsappRoutes');
 const sigasulRoutes = require('./routes/sigasulRoutes');
 const vehicleTypeConfigRoutes = require('./routes/vehicleTypeConfigRoutes');
+const abastecimentoAutoRoutes = require('./routes/abastecimentoAutoRoutes');
 const vehicleTaxonomyRoutes = require('./routes/vehicleTaxonomyRoutes');
 const partnerFuelCreditsRoutes = require('./routes/partnerFuelCreditsRoutes');
 const notificationLogRoutes    = require('./routes/notificationLogRoutes');
@@ -1898,6 +2013,7 @@ apiRouter.use('/whatsapp', whatsappRoutes);
 apiRouter.use('/orderNotifications', orderNotificationRoutes);
 apiRouter.use('/sigasul', sigasulRoutes);
 apiRouter.use('/vehicle-type-configs', vehicleTypeConfigRoutes);
+apiRouter.use('/abastecimento-auto', abastecimentoAutoRoutes);
 apiRouter.use('/vehicle-taxonomy', vehicleTaxonomyRoutes);
 apiRouter.use('/partnerFuelCredits', partnerFuelCreditsRoutes);
 apiRouter.use('/notification-log', notificationLogRoutes);

@@ -1,9 +1,9 @@
 const db = require('../database');
-const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const whatsappService = require('../services/whatsappService');
+const { criarOrdem } = require('./refuelingController');
 
 // --- CONFIGURAÇÃO MULTER E LIMPEZA (Copiado de refuelingController) ---
 
@@ -129,6 +129,7 @@ const avaliarSolicitacao = async (req, res) => {
     
     const connection = await db.getConnection();
     await connection.beginTransaction();
+    let liberouConexao = false;
 
     try {
         const [solicitacao] = await connection.execute(
@@ -187,58 +188,46 @@ const avaliarSolicitacao = async (req, res) => {
 
         // --- FLUXO DE APROVAÇÃO (GERAR ORDEM) ---
         if (status === 'LIBERADO') {
-            const [counterRows] = await connection.execute('SELECT lastNumber FROM counters WHERE name = "refuelingCounter" FOR UPDATE');
-            const newAuthNumber = (counterRows[0]?.lastNumber || 0) + 1;
-            const newRefuelingId = crypto.randomUUID();
-
-            let partnerName = 'Posto Externo';
-            if (sol.posto_id) {
-                const [p] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [sol.posto_id]);
-                if (p.length > 0) partnerName = p[0].razaoSocial;
-            }
-
-            let employeeId = sol.funcionario_id; 
-            const combustivelFinal = normalizeFuelType(sol.tipo_combustivel);
-
-            // Criação da Ordem Oficial na tabela Refuelings
-            await connection.execute(
-                `INSERT INTO refuelings (
-                    id, authNumber, vehicleId, partnerId, partnerName, 
-                    employeeId, obraId, fuelType, data, status, 
-                    isFillUp, needsArla, isFillUpArla, outrosGeraValor,
-                    litrosLiberados, litrosLiberadosArla, 
-                    odometro, horimetro, 
-                    outros, outrosValor,
-                    createdBy
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), 'Aberta', ?, 0, 0, 0, ?, 0, ?, ?, ?, 0, ?)`,
-                [
-                    newRefuelingId, 
-                    newAuthNumber, 
-                    sol.veiculo_id, 
-                    sol.posto_id || null, 
-                    partnerName,
-                    employeeId, 
-                    sol.obra_id, 
-                    combustivelFinal, 
-                    sol.flag_tanque_cheio, 
-                    safeNum(sol.litragem_solicitada),
-                    safeNum(sol.odometro_informado), 
-                    safeNum(sol.horimetro_informado),
-                    sol.observacao || null, 
-                    JSON.stringify({ id: req.user.id, name: req.user.name || 'Gestor' })
-                ]
-            );
-
-            await connection.execute('UPDATE counters SET lastNumber = ? WHERE name = "refuelingCounter"', [newAuthNumber]);
-
-            await connection.execute(
-                'UPDATE solicitacoes_abastecimento SET status = ?, aprovado_por_usuario_id = ?, data_aprovacao = NOW() WHERE id = ?',
-                ['LIBERADO', req.user.id, id]
-            );
-
+            // Antes daqui havia um INSERT cru em `refuelings`, que pulava TODAS as
+            // travas soberanas: ordem já aberta para o veículo, operador
+            // placeholder há mais de 7 dias, regressão/salto de leitura e o limite
+            // de 20% do contrato. Também não empenhava saldo pré-pago nem enviava
+            // a ordem ao posto.
+            //
+            // Na prática a tela de Solicitações não usava este caminho (ela abre o
+            // RefuelingOrderModal e emite pelo POST /api/refuelings), mas o
+            // endpoint continuava aberto e era uma porta lateral em volta das
+            // regras. Agora chama o mesmo núcleo do caminho humano.
+            //
+            // A transação local é encerrada antes: criarOrdem abre a sua própria e
+            // faz o UPDATE da solicitação para LIBERADO por dentro.
             await connection.commit();
-            if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes', 'refuelings'] });
-            return res.json({ message: 'Solicitação liberada! Ordem gerada.', authNumber: newAuthNumber });
+            connection.release();
+            liberouConexao = true;
+
+            const resultado = await criarOrdem({
+                vehicleId: sol.veiculo_id,
+                partnerId: sol.posto_id || null,
+                employeeId: sol.funcionario_id || null,
+                obraId: sol.obra_id,
+                fuelType: normalizeFuelType(sol.tipo_combustivel),
+                isFillUp: !!sol.flag_tanque_cheio,
+                litrosLiberados: safeNum(sol.litragem_solicitada),
+                odometro: safeNum(sol.odometro_informado),
+                horimetro: safeNum(sol.horimetro_informado),
+                outros: sol.observacao || null,
+                solicitacaoId: id,
+                createdBy: { id: req.user.id, name: req.user.name || 'Gestor' },
+            }, { actor: req.user, io: req.io });
+
+            if (!resultado.ok) return res.status(resultado.status).json(resultado.body);
+
+            return res.json({
+                message: 'Solicitação liberada! Ordem gerada.',
+                authNumber: resultado.body.authNumber,
+                bloqueadoLeitura: resultado.body.bloqueadoLeitura,
+                bloqueadoOrcamento: resultado.body.bloqueadoOrcamento,
+            });
         }
 
     } catch (error) {
@@ -246,7 +235,10 @@ const avaliarSolicitacao = async (req, res) => {
         console.error("Erro Avaliar Admin:", error);
         res.status(500).json({ error: 'Erro ao avaliar: ' + error.message });
     } finally {
-        connection.release();
+        // criarOrdem abre a própria conexão, então o fluxo de aprovação encerra
+        // esta antes de chamá-lo. Liberar de novo devolveria a mesma conexão duas
+        // vezes ao pool.
+        if (!liberouConexao) connection.release();
     }
 };
 

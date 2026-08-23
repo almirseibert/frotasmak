@@ -3,6 +3,7 @@
 const path       = require('path');
 const fs         = require('fs');
 const Anthropic  = require('@anthropic-ai/sdk');
+const abastecimentoAuto = require('./abastecimentoAutoService');
 const db         = require('../database');
 const whatsappService = require('./whatsappService');
 const { todayBRT } = require('../utils/dateBRT');
@@ -429,6 +430,17 @@ async function criarSolicitacaoDB(session) {
             global.io.emit('server:sync', { targets: ['solicitacoes'] });
             global.io.emit('admin:notificacao', { tipo: 'nova_solicitacao', id: result.insertId });
         }
+
+        // Mesma análise automática do app: a solicitação vinda do WhatsApp é uma
+        // solicitação como qualquer outra e precisa receber o mesmo parecer.
+        const novaId = result.insertId;
+        setImmediate(() => {
+            abastecimentoAuto.enfileirar(novaId, abastecimentoAuto.ETAPA.PAINEL)
+                .then(() => abastecimentoAuto.dispararAgora(novaId, abastecimentoAuto.ETAPA.PAINEL))
+                .then(() => { if (global.io) global.io.emit('server:sync', { targets: ['solicitacoes'] }); })
+                .catch(e => console.warn('[CHATBOT] análise automática falhou:', e.message));
+        });
+
         return { id: result.insertId };
     } catch (err) {
         await conn.rollback();

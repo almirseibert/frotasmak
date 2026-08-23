@@ -88,6 +88,17 @@ function requirePage(pageId) {
   };
 }
 
+// Igual ao requirePage, mas aceita QUALQUER uma das páginas informadas.
+// Usado onde a mesma rota serve o app do operador e o desktop do gestor
+// (ex.: distribuição do comboio: 'comboio' OU 'admin_solicitacoes_app').
+function requireAnyPage(pageIds) {
+  const lista = Array.isArray(pageIds) ? pageIds : [pageIds];
+  return (req, res, next) => {
+    if (req.user && lista.some(p => canUserAccessPage(req.user, p))) return next();
+    return res.status(403).json({ error: 'Acesso negado a este módulo.' });
+  };
+}
+
 function getVehicleButtons(role) {
   return VEHICLE_ACTION_BUTTONS[(role || '').toLowerCase()] || [];
 }
@@ -103,5 +114,6 @@ module.exports = {
   canUserAccessPage,
   canAccessPage,
   requirePage,
+  requireAnyPage,
   getVehicleButtons,
 };

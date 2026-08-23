@@ -3,7 +3,15 @@ const db = require('../database');
 const crypto = require('crypto');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
 const { recalcFuelAverage } = require('../utils/recalcFuelAverage');
-const { vehicleGroups } = require('../utils/vehicleRules');
+// Travas soberanas de emissão de ordem. Vivem em utils/ para que o aceite
+// automático por IA avalie exatamente as MESMAS regras deste controller,
+// em vez de reimplementá-las e divergir no primeiro ajuste.
+const {
+    checkLeituraBloqueada,
+    checkOrcamentoBloqueado,
+    checkOrdemAbertaDuplicada,
+    checkOperadorPlaceholder,
+} = require('../utils/regrasAbastecimento');
 const { ymdBRT } = require('../utils/dateBRT');
 const { notifyComboioEntrada } = require('../services/orderNotifier');
 const fuelCredits = require('../utils/partnerFuelCredits');
@@ -359,65 +367,31 @@ const getRefuelingById = async (req, res) => {
     }
 };
 
-const checkLeituraBloqueada = async (connection, vehicleId, odometro, horimetro) => {
-    if (!vehicleId) return null;
-    try {
-        const [[v]] = await connection.execute(
-            'SELECT tipo, odometro AS odoAtual, horimetro AS horiAtual FROM vehicles WHERE id = ?',
-            [vehicleId]
-        );
-        if (!v) return null;
+// ─────────────────────────────────────────────────────────────────────────────
+// NÚCLEO DE EMISSÃO DE ORDEM
+//
+// `criarOrdem` é o miolo do POST /api/refuelings, separado do handler HTTP para
+// que o aceite automático por IA (services/abastecimentoAutoService) emita
+// ordens pelo MESMO caminho do gestor humano, com as mesmas travas, o mesmo
+// empenho de saldo e o mesmo envio ao posto.
+//
+// Se a automação tivesse seu próprio INSERT, qualquer regra adicionada aqui
+// deixaria de valer para ela em silêncio — foi exatamente o que aconteceu com
+// solicitacaoAdminController.avaliarSolicitacao, que fazia INSERT cru e pulava
+// ordem-aberta, operador placeholder, leitura, orçamento e o envio ao posto.
+//
+// Fica neste arquivo, e não num services/ próprio, porque depende de três
+// helpers privados daqui (dispatchOrderToPartner, updateMonthlyExpense,
+// safeNum) com 11 pontos de uso. Movê-los renderia um import mais bonito e
+// nenhum ganho funcional, com risco real de regressão.
+//
+// Devolve { ok, status, body } em vez de escrever na resposta: quem chama
+// decide se vira HTTP ou log.
+// ─────────────────────────────────────────────────────────────────────────────
 
-        // Exceção: grupo "Caminhões de Trecho" (Caminhão Prancha / Semirreboques)
-        // pode deslocar até 2000 km entre abastecidas.
-        const ODO_MAX_JUMP = vehicleGroups['Caminhões de Trecho']?.includes(v.tipo) ? 2000 : 1000;
-        const HORI_MAX_JUMP = 50;
+const respostaErro = (status, body) => ({ ok: false, status, body });
 
-        const odo = odometro != null ? parseFloat(odometro) : NaN;
-        const hori = horimetro != null ? parseFloat(horimetro) : NaN;
-        const odoAtual = parseFloat(v.odoAtual || 0);
-        const horiAtual = parseFloat(v.horiAtual || 0);
-
-        if (!isNaN(odo) && odoAtual > 0) {
-            if (odo < odoAtual)
-                return `Odômetro informado (${odo} Km) é inferior ao atual do veículo (${odoAtual} Km).`;
-            if (odo - odoAtual > ODO_MAX_JUMP)
-                return `Salto de odômetro excessivo: ${odo - odoAtual} Km (máx. ${ODO_MAX_JUMP} Km).`;
-        }
-        if (!isNaN(hori) && horiAtual > 0) {
-            if (hori < horiAtual)
-                return `Horímetro informado (${hori} Hr) é inferior ao atual do veículo (${horiAtual} Hr).`;
-            if (hori - horiAtual > HORI_MAX_JUMP)
-                return `Salto de horímetro excessivo: ${hori - horiAtual} Hr (máx. ${HORI_MAX_JUMP} Hr).`;
-        }
-        return null;
-    } catch {
-        return null;
-    }
-};
-
-const checkOrcamentoBloqueado = async (connection, obraId) => {
-    if (!obraId || obraId === 'Patio') return false;
-    try {
-        const [[obraRow]] = await connection.execute(
-            'SELECT valorContrato FROM obras WHERE id = ?', [obraId]
-        );
-        if (!obraRow || !obraRow.valorContrato || parseFloat(obraRow.valorContrato) <= 0) return false;
-
-        const [[expRow]] = await connection.execute(
-            'SELECT COALESCE(SUM(amount), 0) AS total FROM expenses WHERE obraId = ? AND category = "Combustível"',
-            [obraId]
-        );
-        const totalGasto = parseFloat(expRow.total || 0);
-        const limite = parseFloat(obraRow.valorContrato) * 0.20;
-        return totalGasto >= limite;
-    } catch {
-        return false;
-    }
-};
-
-const createRefuelingOrder = async (req, res) => {
-    const data = req.body;
+const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
@@ -427,9 +401,9 @@ const createRefuelingOrder = async (req, res) => {
         // ordem reservada acredita que ela ficará oculta — criar visível em silêncio
         // seria o pior desfecho possível.
         const querOcultar = !!data.isHidden;
-        if (querOcultar && req.user?.can_create_hidden_orders !== true) {
+        if (querOcultar && actor?.can_create_hidden_orders !== true) {
             await connection.rollback();
-            return res.status(403).json({ error: 'Sem permissão para emitir ordem reservada.' });
+            return respostaErro(403, { error: 'Sem permissão para emitir ordem reservada.' });
         }
 
         const id = crypto.randomUUID();
@@ -469,29 +443,14 @@ const createRefuelingOrder = async (req, res) => {
             }
         }
 
-        // ─── Anti-duplicidade: bloqueia 2ª ordem aberta para o mesmo veículo ──
-        // Exceções:
-        //  - data em fim-de-semana ou feriado nacional fixo (antecipação legítima
-        //    para obras que operam quando o escritório está fechado);
-        //  - veículo fictício (vehicles.permiteMultiplosAbastecimentos = 1)
-        //    usado para ajuda de custo, gerador, lava-jato etc.
-        //  - veículo terceirizado (vehicles.isOutsourced = 1) — frota não gerida
-        //    por nós; apenas registramos consumo para faturamento.
-        // FOR UPDATE serializa contra criações concorrentes dentro da transação.
+        // ─── Travas soberanas (utils/regrasAbastecimento) ────────────────────
+        // Anti-duplicidade: bloqueia 2ª ordem aberta para o mesmo veículo.
+        // Exceções tratadas dentro do predicado: fim-de-semana/feriado fixo,
+        // veículo fictício (permiteMultiplosAbastecimentos) e terceirizado.
+        // travar=true usa FOR UPDATE, serializando contra criações concorrentes.
         let isOutsourcedVehicle = false;
         let allowMultiple = false;
         if (data.vehicleId) {
-            const FERIADOS_BR_FIXOS = new Set([
-                '01-01', '04-21', '05-01', '09-07',
-                '10-12', '11-02', '11-15', '12-25'
-            ]);
-            // Dia da semana / MM-DD calculados no fuso de Brasília (não UTC),
-            // senão ordens do fim da tarde caíam no dia seguinte.
-            const ymd = ymdBRT(dataAbastecimento); // 'YYYY-MM-DD' em BRT
-            const dow = new Date(`${ymd}T12:00:00-03:00`).getDay();
-            const mmdd = ymd.slice(5, 10);
-            const isWeekendOrHoliday = dow === 0 || dow === 6 || FERIADOS_BR_FIXOS.has(mmdd);
-
             const [vehicleRows] = await connection.execute(
                 'SELECT permiteMultiplosAbastecimentos, isOutsourced FROM vehicles WHERE id = ?',
                 [data.vehicleId]
@@ -504,38 +463,28 @@ const createRefuelingOrder = async (req, res) => {
             isOutsourcedVehicle = vehicleRows.length > 0
                 && (vehicleRows[0].isOutsourced == 1 || vehicleRows[0].isOutsourced === true);
 
-            if (!isWeekendOrHoliday && !allowMultiple && !isOutsourcedVehicle) {
-                const [openRows] = await connection.execute(
-                    `SELECT id, authNumber, status, is_hidden, hidden_by_user_id
-                       FROM refuelings
-                      WHERE vehicleId = ?
-                        AND status NOT IN ('Concluída','Concluida','Cancelada','Negada','Baixada')
-                      LIMIT 1
-                      FOR UPDATE`,
-                    [data.vehicleId]
-                );
-                if (openRows.length > 0) {
-                    await connection.rollback();
-                    connection.release();
-                    // A regra NUNCA ignora ordens reservadas — permitir uma 2ª ordem aberta
-                    // no mesmo veículo geraria risco de abastecimento duplo no posto.
-                    // Só a mensagem muda: para terceiros, sem número nem status.
-                    const bloqueia = openRows[0];
-                    const ocultaDeTerceiro = bloqueia.is_hidden == 1 && bloqueia.hidden_by_user_id !== req.user?.id;
-                    if (ocultaDeTerceiro) {
-                        return res.status(409).json({
-                            error: 'Este veículo está temporariamente indisponível para emissão de nova ordem. Verifique com a administração.',
-                            code: 'VEHICLE_TEMPORARILY_BLOCKED'
-                        });
-                    }
-                    return res.status(409).json({
-                        error: `Já existe ordem em aberto Nº ${bloqueia.authNumber} (${bloqueia.status}) para este veículo. Conclua ou cancele antes de emitir outra.`,
-                        code: 'DUPLICATE_OPEN_ORDER',
-                        openOrderId: bloqueia.id,
-                        openOrderAuthNumber: bloqueia.authNumber,
-                        openOrderStatus: bloqueia.status
+            // ymdBRT: dia calculado no fuso de Brasília, senão ordens do fim da
+            // tarde caíam no dia seguinte.
+            const duplicada = await checkOrdemAbertaDuplicada(
+                connection, data.vehicleId, ymdBRT(dataAbastecimento),
+                { travar: true, usuarioId: actor?.id }
+            );
+            if (duplicada) {
+                await connection.rollback();
+                if (duplicada.ocultaDeTerceiro) {
+                    return respostaErro(409, {
+                        error: 'Este veículo está temporariamente indisponível para emissão de nova ordem. Verifique com a administração.',
+                        code: 'VEHICLE_TEMPORARILY_BLOCKED'
                     });
                 }
+                const bloqueia = duplicada.ordem;
+                return respostaErro(409, {
+                    error: `Já existe ordem em aberto Nº ${bloqueia.authNumber} (${bloqueia.status}) para este veículo. Conclua ou cancele antes de emitir outra.`,
+                    code: 'DUPLICATE_OPEN_ORDER',
+                    openOrderId: bloqueia.id,
+                    openOrderAuthNumber: bloqueia.authNumber,
+                    openOrderStatus: bloqueia.status
+                });
             }
 
             // ─── Bloqueio: veículo a >7 dias em obra com operador placeholder ───
@@ -543,29 +492,14 @@ const createRefuelingOrder = async (req, res) => {
             // entra um placeholder (COLABORADOR, TESTE, MAK SERVIÇOS etc.). Se o
             // operador real não for trocado em até 7 dias, suspende emissão de
             // ordens até que alguém atualize o operador na tela de alocação.
-            // Veículos terceirizados não usam nossa malha de alocação de operadores,
-            // então pulam este bloqueio.
-            const [placeholderRows] = isOutsourcedVehicle ? [[]] : await connection.execute(
-                `SELECT h.dataEntrada, e.nome AS employeeName
-                   FROM obras_historico_veiculos h
-                   INNER JOIN employees e ON e.id = h.employeeId
-                  WHERE h.veiculoId = ?
-                    AND h.dataSaida IS NULL
-                    AND e.isPlaceholder = 1
-                    AND h.dataEntrada <= DATE_SUB(NOW(), INTERVAL 7 DAY)
-                  ORDER BY h.dataEntrada ASC
-                  LIMIT 1`,
-                [data.vehicleId]
-            );
-            if (placeholderRows.length > 0) {
-                const dias = Math.floor((Date.now() - new Date(placeholderRows[0].dataEntrada).getTime()) / 86400000);
+            const placeholder = await checkOperadorPlaceholder(connection, data.vehicleId);
+            if (placeholder) {
                 await connection.rollback();
-                connection.release();
-                return res.status(409).json({
-                    error: `Bloqueado: veículo está há ${dias} dias na obra com operador fictício "${placeholderRows[0].employeeName}". Atualize o operador real antes de emitir ordens.`,
+                return respostaErro(409, {
+                    error: `Bloqueado: veículo está há ${placeholder.diasNaObra} dias na obra com operador fictício "${placeholder.employeeName}". Atualize o operador real antes de emitir ordens.`,
                     code: 'PLACEHOLDER_OPERATOR_BLOCK',
-                    placeholderName: placeholderRows[0].employeeName,
-                    diasNaObra: dias,
+                    placeholderName: placeholder.employeeName,
+                    diasNaObra: placeholder.diasNaObra,
                 });
             }
         }
@@ -603,7 +537,7 @@ const createRefuelingOrder = async (req, res) => {
             id: id,
             authNumber: newAuthNumber,
             vehicleId: data.vehicleId,
-            partnerId: data.partnerId,
+            partnerId: data.partnerId || null,
             partnerName: finalPartnerName || null,
             employeeId: data.employeeId || null,
             obraId: data.obraId || null,
@@ -628,17 +562,30 @@ const createRefuelingOrder = async (req, res) => {
             invoiceNumber: data.invoiceNumber || null
         };
 
+        // Vínculo ordem -> solicitação em coluna própria. A coluna já era LIDA na
+        // baixa e na exclusão (order.createdFromSolicitacaoId) mas nunca existia
+        // no schema, então só o fallback pelo JSON createdBy funcionava. Ambos
+        // seguem gravados: o JSON mantém compatibilidade com as ordens antigas.
+        if (data.solicitacaoId) {
+            refuelingData.createdFromSolicitacaoId = String(data.solicitacaoId);
+        }
+
         // Só acrescenta as colunas de reserva quando a ordem é reservada — assim o
         // INSERT do caminho normal permanece exatamente como era.
         if (querOcultar) {
             refuelingData.is_hidden = 1;
-            refuelingData.hidden_by_user_id = req.user.id;
+            refuelingData.hidden_by_user_id = actor.id;
             refuelingData.hidden_at = new Date();
             refuelingData.reveal_at = revealAtDate; // null = liberação apenas manual
         }
 
         const fields = Object.keys(refuelingData);
-        const values = Object.values(refuelingData);
+        // mysql2 recusa `undefined` nos binds ("Bind parameters must not contain
+        // undefined"). Isso derrubava a criação com 500 sempre que o chamador
+        // omitia um campo em vez de mandar null — tolerável quando só o
+        // frontend chamava e sempre enviava tudo, mas não agora que a emissão
+        // automática também usa esta função. undefined vira NULL.
+        const values = Object.values(refuelingData).map((v) => (v === undefined ? null : v));
         const placeholders = fields.map(() => '?').join(', ');
         
         await connection.execute(`INSERT INTO refuelings (${fields.join(', ')}) VALUES (${placeholders})`, values);
@@ -679,21 +626,21 @@ const createRefuelingOrder = async (req, res) => {
                     litrosLiberados: refuelingData.litrosLiberados,
                     litrosLiberadosArla: refuelingData.litrosLiberadosArla,
                     outrosValor: refuelingData.outrosValor,
-                }, { createdBy: req.user?.id || null });
+                }, { createdBy: actor?.id || null });
             } catch (e) {
                 console.warn('[partnerFuelCredits] applyOrderReservation falhou:', e.message);
             }
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes', 'partner_fuel_credits'] });
+        if (io) io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes', 'partner_fuel_credits'] });
 
         // Ordem salva bloqueada (leitura ou orçamento) → alerta admins (pop-up + som).
         // Ordem reservada não dispara o alerta: o texto carrega o número da ordem e
         // faria broadcast dela para todos os admins. Quem libera é o próprio emissor,
         // pelo painel "Ordens Reservadas".
         if ((motivoLeitura || bloqueadoOrcamento) && !querOcultar) {
-            req.io.emit('admin:notificacao', {
+            if (io) io.emit('admin:notificacao', {
                 tipo: 'ordem_bloqueada',
                 mensagem: motivoLeitura
                     ? `Ordem Nº ${newAuthNumber} bloqueada por leitura aguardando liberação.`
@@ -717,24 +664,34 @@ const createRefuelingOrder = async (req, res) => {
             mensagemRetorno += ' A data de liberação informada é inválida ou já passou — a ordem ficará reservada até você liberá-la manualmente.';
         }
 
-        res.status(201).json({
-            id,
-            authNumber: newAuthNumber,
-            bloqueadoOrcamento: !!bloqueadoOrcamento,
-            bloqueadoLeitura: !!motivoLeitura,
-            motivoBloqueioLeitura: motivoLeitura || null,
-            isHidden: querOcultar,
-            revealAt: revealAtDate,
-            revealAtIgnorado,
-            message: mensagemRetorno
-        });
+        return {
+            ok: true,
+            status: 201,
+            body: {
+                id,
+                authNumber: newAuthNumber,
+                bloqueadoOrcamento: !!bloqueadoOrcamento,
+                bloqueadoLeitura: !!motivoLeitura,
+                motivoBloqueioLeitura: motivoLeitura || null,
+                isHidden: querOcultar,
+                revealAt: revealAtDate,
+                revealAtIgnorado,
+                message: mensagemRetorno,
+            },
+        };
     } catch (error) {
         await connection.rollback();
-        console.error('Erro CREATE:', error);
-        res.status(500).json({ error: error.message });
+        console.error('[refuelingOrderService] falha ao criar ordem:', error);
+        return respostaErro(500, { error: error.message });
     } finally {
         connection.release();
     }
+};
+
+// Wrapper HTTP fino sobre criarOrdem.
+const createRefuelingOrder = async (req, res) => {
+    const resultado = await criarOrdem(req.body, { actor: req.user, io: req.io });
+    return res.status(resultado.status).json(resultado.body);
 };
 
 const updateRefuelingOrder = async (req, res) => {
@@ -993,8 +950,16 @@ const confirmRefuelingOrder = async (req, res) => {
         if (invoiceNumber) {
             const nfStr = invoiceNumber.toString().trim();
             if (nfStr) {
+                // FOR UPDATE: sem ele, duas baixas simultâneas com a mesma NF
+                // passavam as duas pela checagem antes de qualquer uma gravar.
+                // Com o índice idx_partner_invoice, o InnoDB aplica gap lock em
+                // REPEATABLE READ e serializa as duas transações.
+                //
+                // Não usamos constraint UNIQUE porque uma nota legitimamente cobre
+                // mais de uma ordem (diesel + arla, ou dois veículos na mesma nota):
+                // o banco já tem 8 pares (posto, NF) repetidos que são válidos.
                 const [duplicates] = await connection.execute(
-                    'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ?',
+                    'SELECT id FROM refuelings WHERE partnerId = ? AND invoiceNumber = ? AND id != ? FOR UPDATE',
                     [order.partnerId, nfStr, id]
                 );
                 if (duplicates.length > 0) {
@@ -1302,6 +1267,7 @@ const revelarOrdemOculta = async (req, res) => {
 };
 
 module.exports = {
+    criarOrdem,
     getAllRefuelings,
     getRefuelingsByVehicle,
     getRefuelingById,

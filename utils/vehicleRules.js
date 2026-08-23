@@ -108,7 +108,12 @@ const checkReadingConsistency = (vehicle, newValueStr, fieldType) => {
     if (fieldType === 'odometro') {
         currentValue = parseFloat(vehicle.odometro || 0);
         unit = 'Km';
-        limit = 1000;  // Regra: salto > 1000 Km bloqueia
+        // Regra: salto > 1000 Km bloqueia. Exceção: "Caminhões de Trecho"
+        // (Caminhão Prancha / Semirreboques) deslocam até 2000 km entre
+        // abastecidas. Esta cópia estava com 1000 fixo enquanto a versão do
+        // frontend (src/utils/vehicleRules.js) já tinha a exceção — divergência
+        // que este arquivo se propõe justamente a não ter.
+        limit = vehicleGroups['Caminhões de Trecho']?.includes(vehicle.tipo) ? 2000 : 1000;
     } else if (fieldType === 'horimetro') {
         currentValue = parseFloat(vehicle.horimetro || 0);
         unit = 'Hr';
