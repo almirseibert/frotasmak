@@ -624,6 +624,25 @@ Correções:
 - blindagem de `req.body` e `req.user` ausentes (400/200 em vez de 500);
 - a resposta de erro passa a trazer `code`, para diagnosticar pelo navegador sem reproduzir às cegas.
 
+### O 500 que sobrou: `updated_by INT` — corrigido em 2026-08-23
+
+Depois do redeploy o erro voltou, agora com o código que a correção acima passou a expor:
+**`ER_TRUNCATED_WRONG_VALUE_FOR_FIELD`**. Foi o `code` na resposta que resolveu — sem ele o
+diagnóstico teria sido outra rodada de reprodução às cegas.
+
+A causa: `abastecimento_auto_config.updated_by` foi declarada `INT`, mas **`users.id` é
+`VARCHAR(255)`** — UUID herdado do Firebase, não inteiro. Todo `UPDATE` da tela grava
+`updated_by = <uuid>`, e o MySQL em modo estrito recusa. Ou seja: a tela **nunca** conseguiu salvar;
+o defeito anterior mascarava este.
+
+Exatamente a mesma armadilha já tinha acontecido em `partner_fuel_credit_entries.created_by`, que
+carrega um `MODIFY COLUMN ... VARCHAR(64)` de conversão no `server.js`. A correção segue esse
+precedente: o `CREATE TABLE` passa a declarar `VARCHAR(64)` e um `ALTER TABLE ... MODIFY` idempotente
+converte a tabela que já existe em produção, no boot.
+
+Lição para as próximas tabelas: neste banco **nenhuma coluna que aponta para `users.id` pode ser
+`INT`**. Vale conferir `solicitacao_erros_log.usuario_id`, declarada `INT NOT NULL` no `server.js`.
+
 ### Cadastro de capacidade e média
 
 Aplicado em produção por família de modelo, em duas rodadas:
@@ -744,7 +763,8 @@ virar ou não para o modo ativo)_
 
 ## Próximo passo
 
-1. **Redeploy do backend** com os commits `f1a00e0` (correção do 500) e `d0fc9a9`.
+1. **Redeploy do backend** com a correção do `updated_by` — sem ela a tela de parâmetros
+   não salva (ver "O 500 que sobrou" acima). O `ALTER TABLE` roda sozinho no boot.
 2. Admin → Frota → Aceite Automático: ligar o motor, deixar em **sombra**, marcar **uma** obra.
 3. Enviar o aviso da **Fase 1** no grupo daquela obra.
 4. Acompanhar por no mínimo 15 dias. O botão do modo ativo destrava sozinho com 20+ pedidos

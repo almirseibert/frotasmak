@@ -812,10 +812,20 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
                 modelo_rapido             VARCHAR(60)   NOT NULL DEFAULT 'claude-haiku-4-5',
                 modelo_preciso            VARCHAR(60)   NOT NULL DEFAULT 'claude-opus-5',
                 updated_at                TIMESTAMP     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                updated_by                INT           DEFAULT NULL,
+                updated_by                VARCHAR(64)   DEFAULT NULL,
                 CONSTRAINT chk_auto_linha_unica CHECK (id = 1)
             )
         `);
+        // `users.id` é VARCHAR(255) (UUID do Firebase), não INT — a primeira
+        // versão desta tabela declarou `updated_by INT` e todo UPDATE vindo da
+        // tela morria com ER_TRUNCATED_WRONG_VALUE_FOR_FIELD ao gravar o id de
+        // quem salvou. Mesma armadilha já vista em
+        // partner_fuel_credit_entries.created_by. MODIFY é idempotente: se a
+        // coluna já estiver VARCHAR, não faz nada.
+        try {
+            await db.query('ALTER TABLE abastecimento_auto_config MODIFY COLUMN updated_by VARCHAR(64) DEFAULT NULL');
+        } catch (e) { /* ignora se já estiver correto */ }
+
         // Semente idempotente da linha única.
         await db.query('INSERT IGNORE INTO abastecimento_auto_config (id) VALUES (1)');
 
