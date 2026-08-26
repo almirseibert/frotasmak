@@ -57,10 +57,6 @@ const formatDateDb = (dbDate) => {
 };
 
 // Formatação Padrão de WhatsApp (Padronização Frotas MAK)
-const formatMsgFuncionario = (msg) => {
-    return `*Sistema de Frotas MAK*\n\n${msg}\n\n_Esta é uma mensagem automática, em caso de dúvida entre em contato com o setor responsável da Mak Serviços._`;
-};
-
 const formatMsgInterno = (msg) => {
     return `*Sistema de Frotas MAK*\n\n${msg}`;
 };
@@ -298,15 +294,13 @@ cron.schedule('* * * * *', async () => {
                         if (cnhVenc === todayStr)       dispatchAsync('cnh_vencida',           { funcionario: emp.nome, vencimento: emp.cnhVencimento });
                         if (toxVenc === daqui30DiasStr) dispatchAsync('toxicologico_vencendo', { funcionario: emp.nome, vencimento: emp.exameToxicologicoVencimento, dias: 30 });
 
-                        if (emp.contato && typeof whatsappService !== 'undefined') {
-                            if (cnhVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta CNH 30 Dias', formatMsgFuncionario(`Olá ${emp.nome}, sua CNH vencerá em 30 dias. Por favor, programe a renovação.`)).catch(()=>{});
-                            if (toxVenc === daqui30DiasStr) await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Alerta Toxicológico 30 Dias', formatMsgFuncionario(`Olá ${emp.nome}, seu Exame Toxicológico vencerá em 30 dias. Por favor, programe a renovação.`)).catch(()=>{});
+                        // Avisos diretos ao funcionario (CNH/Toxicologico) removidos a pedido do RH.
+                        // Mantidos apenas os avisos internos (contato RH) e os configuraveis acima.
+                        if (typeof whatsappService !== 'undefined') {
                             if (cnhVenc === todayStr) {
-                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'CNH Vencida Hoje', formatMsgFuncionario(`⚠️ Atenção ${emp.nome}, sua CNH vence HOJE. Entre em contato com o RH.`)).catch(()=>{});
                                 await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Aviso CNH Vencida', formatMsgInterno(`A CNH do funcionário *${emp.nome}* venceu hoje.`)).catch(()=>{});
                             }
                             if (toxVenc === todayStr) {
-                                await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Toxicológico Vencido Hoje', formatMsgFuncionario(`⚠️ Atenção ${emp.nome}, seu Exame Toxicológico vence HOJE. Entre em contato com o RH.`)).catch(()=>{});
                                 await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Aviso Toxicológico Vencido', formatMsgInterno(`O Exame Toxicológico do funcionário *${emp.nome}* venceu hoje.`)).catch(()=>{});
                             }
                         }
@@ -351,12 +345,7 @@ cron.schedule('* * * * *', async () => {
                             try {
                                 await whatsappService.enviarMensagem(whatsappService.CONTATOS_INTERNOS.RH, 'RH', 'Retorno Afastamento', formatMsgInterno(`✅ *Aviso de Retorno*\n\nO colaborador *${emp.nome}* finalizou seu afastamento e já se encontra "Disponível".`));
                             } catch(e) { console.error(`Erro Whats RH Férias:`, e.message); }
-                            
-                            if (emp.contato) {
-                                try {
-                                    await whatsappService.enviarMensagem(emp.contato, emp.nome, 'Fim de Afastamento', formatMsgFuncionario(`Olá, ${emp.nome}! Seu afastamento chegou ao fim e seu status no Frotas MAK está *Disponível*.\nBom retorno!`));
-                                } catch(e) { console.error(`Erro Whats Funcionario Férias:`, e.message); }
-                            }
+                            // Aviso direto ao funcionario (fim de afastamento) removido a pedido do RH.
                         }
                     }
                 } catch (e) { console.error('❌ [CRON] Erro Retorno Afastamento:', e.message); }

@@ -66,6 +66,30 @@ const TEMPLATES = {
         subject: `Exame toxicológico vencendo: ${p.funcionario || '—'}`,
         body: `O exame toxicológico de *${p.funcionario || '—'}* vence em ${fmtDate(p.vencimento)} (${p.dias} dia(s) restante(s)).`,
     }),
+    funcionario_cadastrado: (p) => ({
+        subject: `Novo funcionário cadastrado: ${p.nome || '—'}`,
+        body: `🆕 *Novo funcionário cadastrado*\n\n` +
+              `• Nome: ${p.nome || '—'}\n` +
+              `• Função: ${p.funcao || '—'}\n` +
+              `• Registro interno: ${p.registroInterno || '—'}\n` +
+              `• Admissão: ${fmtDate(p.dataAdmissao)}`,
+    }),
+    funcionario_reativado: (p) => ({
+        subject: `Funcionário reativado: ${p.nome || '—'}`,
+        body: `♻️ *Funcionário reativado*\n\n` +
+              `• Nome: ${p.nome || '—'}\n` +
+              `• Função: ${p.funcao || '—'}\n` +
+              `• Registro interno: ${p.registroInterno || '—'}\n` +
+              `• Readmissão: ${fmtDate(p.dataAdmissao)}`,
+    }),
+    funcionario_desligado: (p) => ({
+        subject: `Funcionário desligado: ${p.nome || '—'}`,
+        body: `📤 *Funcionário desligado*\n\n` +
+              `• Nome: ${p.nome || '—'}\n` +
+              `• Função: ${p.funcao || '—'}\n` +
+              `• Registro interno: ${p.registroInterno || '—'}\n` +
+              `• Desligamento: ${fmtDate(p.dataDesligamento)}`,
+    }),
     combustivel_obra_20pct: (p) => ({
         subject: `Combustível da obra ${p.obra || '—'} a ${p.pct || '—'}% do limite`,
         body: `⚠️ A obra *${p.obra || '—'}* atingiu *${p.pct || '—'}%* do orçamento de combustível.` +

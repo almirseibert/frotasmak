@@ -1,6 +1,7 @@
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcrypt');
+const { dispatchAsync } = require('../services/notificationDispatcher');
 
 // ===================================================================================
 // FUNÇÕES AUXILIARES
@@ -246,6 +247,15 @@ const createEmployee = async (req, res) => {
         }
 
         await connection.commit();
+
+        // Notificação configurável (Comunicação > Notificações)
+        dispatchAsync('funcionario_cadastrado', {
+            nome: data.nome,
+            funcao: data.funcao,
+            registroInterno: data.registroInterno,
+            dataAdmissao,
+        });
+
         if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
         res.status(201).json({ message: 'Funcionário criado com sucesso.', id: newId });
 
@@ -269,6 +279,9 @@ const updateEmployee = async (req, res) => {
     await connection.beginTransaction();
 
     try {
+        const [prevRows] = await connection.execute('SELECT status FROM employees WHERE id = ?', [id]);
+        const statusAnterior = String(prevRows[0]?.status || '').toLowerCase();
+
         const aso = JSON.stringify(data.aso || {});
         const epi = JSON.stringify(data.epi || {});
         const certificados = JSON.stringify(data.certificados || []);
@@ -356,6 +369,28 @@ const updateEmployee = async (req, res) => {
         }
 
         await connection.commit();
+
+        // Notificação configurável — só quando o status realmente muda (ativo <-> inativo).
+        // O fluxo dedicado é PUT /employees/:id/status, mas a tela de edição também altera.
+        const statusNovo = String(data.status || '').toLowerCase();
+        const eraInativo = ['inativo', 'desligado'].includes(statusAnterior);
+        const virouInativo = ['inativo', 'desligado'].includes(statusNovo);
+        if (virouInativo && !eraInativo) {
+            dispatchAsync('funcionario_desligado', {
+                nome: data.nome,
+                funcao: data.funcao,
+                registroInterno: data.registroInterno,
+                dataDesligamento,
+            });
+        } else if (statusNovo === 'ativo' && eraInativo) {
+            dispatchAsync('funcionario_reativado', {
+                nome: data.nome,
+                funcao: data.funcao,
+                registroInterno: data.registroInterno,
+                dataAdmissao,
+            });
+        }
+
         if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
         res.json({ message: 'Funcionário atualizado.' });
 
@@ -453,6 +488,11 @@ const updateEmployeeStatus = async (req, res) => {
         let eventType = '';
         let notes = '';
 
+        const [empRows] = await connection.execute(
+            'SELECT nome, funcao, registroInterno FROM employees WHERE id = ?', [id]
+        );
+        const emp = empRows[0] || {};
+
         if (status === 'ativo') {
             queryEmployee = 'UPDATE employees SET status = ?, dataAdmissao = ?, dataDesligamento = NULL WHERE id = ?';
             paramsEmployee = ['ativo', date, id];
@@ -477,6 +517,24 @@ const updateEmployeeStatus = async (req, res) => {
         }
 
         await connection.commit();
+
+        // Notificação configurável (Comunicação > Notificações)
+        if (status === 'ativo') {
+            dispatchAsync('funcionario_reativado', {
+                nome: emp.nome,
+                funcao: emp.funcao,
+                registroInterno: emp.registroInterno,
+                dataAdmissao: date,
+            });
+        } else {
+            dispatchAsync('funcionario_desligado', {
+                nome: emp.nome,
+                funcao: emp.funcao,
+                registroInterno: emp.registroInterno,
+                dataDesligamento: date,
+            });
+        }
+
         if (req.io) req.io.emit('server:sync', { targets: ['employees'] });
         res.json({ message: `Status atualizado para ${status}.` });
 

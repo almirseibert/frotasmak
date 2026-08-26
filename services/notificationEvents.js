@@ -113,6 +113,42 @@ const EVENT_CATALOG = [
         defaultBody: 'O exame toxicológico de *{{funcionario}}* vence em {{vencimento}} ({{dias}} dia(s) restante(s)).',
     },
     {
+        key: 'funcionario_cadastrado',
+        label: 'Novo funcionário cadastrado',
+        area: 'funcionarios',
+        variables: ['nome', 'funcao', 'registroInterno', 'dataAdmissao'],
+        defaultBody:
+            '🆕 *Novo funcionário cadastrado*\n\n' +
+            '• Nome: {{nome}}\n' +
+            '• Função: {{funcao}}\n' +
+            '• Registro interno: {{registroInterno}}\n' +
+            '• Admissão: {{dataAdmissao}}',
+    },
+    {
+        key: 'funcionario_reativado',
+        label: 'Funcionário reativado (readmissão)',
+        area: 'funcionarios',
+        variables: ['nome', 'funcao', 'registroInterno', 'dataAdmissao'],
+        defaultBody:
+            '♻️ *Funcionário reativado*\n\n' +
+            '• Nome: {{nome}}\n' +
+            '• Função: {{funcao}}\n' +
+            '• Registro interno: {{registroInterno}}\n' +
+            '• Readmissão: {{dataAdmissao}}',
+    },
+    {
+        key: 'funcionario_desligado',
+        label: 'Funcionário desligado',
+        area: 'funcionarios',
+        variables: ['nome', 'funcao', 'registroInterno', 'dataDesligamento'],
+        defaultBody:
+            '📤 *Funcionário desligado*\n\n' +
+            '• Nome: {{nome}}\n' +
+            '• Função: {{funcao}}\n' +
+            '• Registro interno: {{registroInterno}}\n' +
+            '• Desligamento: {{dataDesligamento}}',
+    },
+    {
         key: 'funcionario_retornou_ferias',
         label: 'Funcionário retornou de férias',
         area: 'funcionarios',
