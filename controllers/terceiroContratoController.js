@@ -15,6 +15,16 @@ const num = (v) => {
     return Number.isFinite(n) ? n : 0;
 };
 
+// Normaliza um pedaco do nome do arquivo do contrato: tira acentos, troca o que
+// nao for alfanumerico por _ e limita o tamanho (nome final precisa caber no FS).
+const slugArquivo = (v, max = 40) => String(v == null ? '' : v)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, max)
+    .replace(/_+$/g, '');
+
 const FOROS_VALIDOS = ['Santa Maria', 'Lajeado'];
 
 // Cláusulas jurídicas parametrizáveis: aplica default do contrato-modelo quando
@@ -286,9 +296,25 @@ const gerarContratoPdf = async (req, res) => {
         const buffer = await generateContratoPdf({ contrato, locador, obra });
 
         fs.mkdirSync(CONTRATOS_PDF_DIR, { recursive: true });
-        const filename = `contrato_${String(contrato.numero || id).replace(/[^a-zA-Z0-9]/g, '_')}.pdf`;
+        // Nome do arquivo: numero + empresa contratada + obra, para identificar o
+        // contrato pelo proprio arquivo salvo (pedido do faturamento).
+        const partes = [
+            'contrato',
+            slugArquivo(contrato.numero || id, 40),
+            slugArquivo(locador.razaoSocial || locador.nome, 40),
+            slugArquivo(obra.nome || obra.nome_obra, 40),
+        ].filter(Boolean);
+        const filename = `${partes.join('_')}.pdf`;
         fs.writeFileSync(path.join(CONTRATOS_PDF_DIR, filename), buffer);
         const url = `/uploads/contratos/${filename}`;
+
+        // Regeracao com nome diferente (empresa/obra/numero alterados) deixaria o
+        // PDF antigo orfao e ainda acessivel pela URL antiga — remove o anterior.
+        const anterior = String(contrato.pdfUrl || '').split('/').pop();
+        if (anterior && anterior !== filename) {
+            try { fs.unlinkSync(path.join(CONTRATOS_PDF_DIR, anterior)); }
+            catch (e) { if (e.code !== 'ENOENT') console.warn('⚠️ PDF antigo do contrato nao removido:', e.message); }
+        }
 
         await db.execute('UPDATE terceiro_contratos SET pdfUrl = ? WHERE id = ?', [url, id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
