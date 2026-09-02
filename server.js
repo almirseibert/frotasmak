@@ -2,6 +2,7 @@ require('dotenv').config();
 require('dotenv').config({ path: '.env.local', override: true });
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const path = require('path');
 const fs = require('fs');
 const db = require('./database');
@@ -175,6 +176,26 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
     } catch (e) {
         if (e.code !== 'ER_DUP_KEYNAME') console.warn('[migration] idx_hidden:', e.message);
     }
+
+    // ── Índices das colunas de ordenação/filtro das listagens ────────────────
+    // As FKs já eram indexadas automaticamente pelo MySQL, mas nenhuma tabela
+    // tinha índice na coluna do ORDER BY. Toda listagem fazia full scan +
+    // filesort — o custo crescia junto com o histórico.
+    await addIndexIfMissing(db, 'comboio_transactions', 'idx_ct_date', '`date`');
+    await addIndexIfMissing(db, 'orders', 'idx_orders_number', '`orderNumber`');
+    // Coluna usada pelo filtro de período opcional de GET /orders.
+    await addIndexIfMissing(db, 'orders', 'idx_orders_date', '`date`');
+    await addIndexIfMissing(db, 'expenses', 'idx_expenses_created', '`createdAt`');
+    await addIndexIfMissing(db, 'diario_de_bordo', 'idx_ddb_logdate', '`logDate`');
+    await addIndexIfMissing(db, 'lavagens', 'idx_lavagens_data', '`dataLavagem`, `createdAt`');
+    await addIndexIfMissing(db, 'revisions_history', 'idx_revhist_data', '`data`');
+    await addIndexIfMissing(db, 'fines', 'idx_fines_data', '`dataInfração`');
+
+    // Filtro por período das listagens de abastecimento (ver getAllRefuelings).
+    await addIndexIfMissing(db, 'refuelings', 'idx_refuelings_data', '`data`');
+
+    // Cobre `WHERE obraId = ? AND date >= ...` do painel do supervisor de obra.
+    await addIndexIfMissing(db, 'daily_work_logs', 'idx_dwl_obra_date', '`obraId`, `date`');
 
     // Backfill idempotente: drenagens antigas eram sempre "para o comboio".
     try {
@@ -1791,6 +1812,12 @@ const app = express();
 // O middleware genérico abaixo já captura e finaliza as requisições de preflight (OPTIONS)
 // sem precisarmos definir app.options('*', ...) o que estava quebrando o path-to-regexp atualizado.
 app.use(cors(corsOptions));
+
+// Compressão gzip das respostas. A dependência já existia no package.json mas
+// nunca havia sido registrada, então todo JSON trafegava cru — as listagens
+// grandes (refuelings devolve ~20 MB) pagavam o payload inteiro na rede.
+// Precisa vir ANTES das rotas para envolver os res.json() delas.
+app.use(compression());
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));

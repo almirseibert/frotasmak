@@ -23,7 +23,10 @@ const db = mysql.createPool({
     database: process.env.DB_DATABASE,
     port: process.env.DB_PORT || 3306,
     waitForConnections: true,
-    connectionLimit: 10,
+    // 10 era baixo para o padrão de acesso do frontend, que dispara várias
+    // chamadas em paralelo a cada troca de página; requests ficavam na fila
+    // esperando conexão livre.
+    connectionLimit: 25,
     queueLimit: 0,
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,

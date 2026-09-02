@@ -156,17 +156,21 @@ const processPlacaDay = async (placa, dateStr) => {
     // 2. Fonte de sinal e posições do dia
     const fonte = await detectSignalSource(placa);
     const activityFilter = fonte === 'ignicao' ? 'pos_ignicao = 1' : 'pos_velocidade > 0';
+    // Filtro de data por intervalo semiaberto em vez de DATE(coluna) = ?: a função
+    // impedia o uso da segunda coluna de `idx_placa_data`, obrigando a varrer todas
+    // as posições da placa para descartar as de outros dias.
+    const janela = 'pos_data_hora_receb >= ? AND pos_data_hora_receb < DATE_ADD(?, INTERVAL 1 DAY)';
     const [posRows] = await db.query(
         `SELECT pos_data_hora_receb FROM sigasul_positions
-         WHERE pos_placa = ? AND DATE(pos_data_hora_receb) = ? AND ${activityFilter}
+         WHERE pos_placa = ? AND ${janela} AND ${activityFilter}
          ORDER BY pos_data_hora_receb`,
-        [placa, dateStr]
+        [placa, dateStr, dateStr]
     );
     const trackerIntervals = pointsToIntervals(posRows.map(r => toMs(r.pos_data_hora_receb)));
     const [allPosCount] = await db.query(
         `SELECT COUNT(*) AS c FROM sigasul_positions
-         WHERE pos_placa = ? AND DATE(pos_data_hora_receb) = ?`,
-        [placa, dateStr]
+         WHERE pos_placa = ? AND ${janela}`,
+        [placa, dateStr, dateStr]
     );
     const hasTrackerData = allPosCount[0].c > 0;
     const minutosTotal = sumMinutes(trackerIntervals);
@@ -259,10 +263,14 @@ const processPlacaDay = async (placa, dateStr) => {
  * ou lançamentos no intervalo.
  */
 const processRange = async (startDate, endDate, { onProgress } = {}) => {
+    // O filtro de data usa intervalo semiaberto em vez de DATE(coluna) BETWEEN:
+    // envolver a coluna numa função anulava `idx_data` e varria as ~6 milhões de
+    // linhas da tabela. Assim o MySQL faz range scan sobre o índice.
     const [pairs] = await db.query(
         `SELECT DISTINCT pos_placa AS placa, DATE(pos_data_hora_receb) AS data
            FROM sigasul_positions
-          WHERE DATE(pos_data_hora_receb) BETWEEN ? AND ?
+          WHERE pos_data_hora_receb >= ?
+            AND pos_data_hora_receb < DATE_ADD(?, INTERVAL 1 DAY)
          UNION
          SELECT DISTINCT v.placa AS placa, l.date AS data
            FROM daily_work_logs l

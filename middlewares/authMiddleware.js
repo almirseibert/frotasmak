@@ -3,6 +3,49 @@ const jwt = require('jsonwebtoken');
 const db = require('../database'); // Importação necessária para verificar status em tempo real
 const { canUserAccessPage, normalizePagePermissions } = require('../utils/permissions');
 
+// ────────────────────────────────────────────────────────────────────────────
+// Cache curto do registro do usuário.
+//
+// A revalidação no banco existe para que bloqueio/mudança de permissão tenham
+// efeito imediato, e isso é mantido — mas ela roda a CADA request, e o
+// frontend dispara várias chamadas em paralelo a cada troca de página. Com um
+// pool de apenas 10 conexões, essa rajada competia por conexão com as queries
+// que realmente carregam dados.
+//
+// O TTL é deliberadamente curto (5s): colapsa a rajada de um único page load,
+// que é onde está a pressão, sem criar uma janela de revogação perceptível.
+// Não há invalidação explícita de propósito — `users` é alterada em 11 pontos
+// de 6 controllers, vários por `email` ou `employeeId` em vez de `id`, e um
+// ponto esquecido deixaria um bloqueio sem efeito por mais tempo do que os 5s
+// que o TTL já garante.
+// ────────────────────────────────────────────────────────────────────────────
+const USER_CACHE_TTL_MS = 5_000;
+const userCache = new Map(); // id -> { row, expiresAt }
+
+const fetchUserRow = async (id) => {
+    const agora = Date.now();
+    const cached = userCache.get(id);
+    if (cached && cached.expiresAt > agora) return cached.row;
+
+    const [users] = await db.query(
+        'SELECT id, email, role, user_type, canAccessRefueling, canAccessAnaliseGerencial, bloqueado_abastecimento, page_permissions, can_create_hidden_orders FROM users WHERE id = ?',
+        [id]
+    );
+    const row = users.length ? users[0] : null;
+    userCache.set(id, { row, expiresAt: agora + USER_CACHE_TTL_MS });
+
+    // Poda preguiçosa: sem isso o Map cresceria indefinidamente com ids antigos.
+    if (userCache.size > 500) {
+        for (const [k, v] of userCache) {
+            if (v.expiresAt <= agora) userCache.delete(k);
+        }
+    }
+    return row;
+};
+
+/** Descarta a entrada de cache de um usuário (efeito imediato antes do TTL). */
+const invalidateUserCache = (id) => { userCache.delete(id); };
+
 const authMiddleware = async (req, res, next) => {
     // 1. Obter o token do cabeçalho
     const authHeader = req.headers.authorization;
@@ -22,21 +65,16 @@ const authMiddleware = async (req, res, next) => {
     try {
         // 2. Verificar e decodificar o token
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        
+
         // 3. SEGURANÇA REFORÇADA:
         // Busca dados atualizados do usuário no banco para garantir que não foi bloqueado recentemente
         // e para pegar as flags de permissão de abastecimento mais recentes.
-        const [users] = await db.query(
-            'SELECT id, email, role, user_type, canAccessRefueling, canAccessAnaliseGerencial, bloqueado_abastecimento, page_permissions, can_create_hidden_orders FROM users WHERE id = ?',
-            [decoded.id]
-        );
+        const user = await fetchUserRow(decoded.id);
 
-        if (users.length === 0) {
+        if (!user) {
             return res.status(401).json({ error: 'Usuário não encontrado ou removido.' });
         }
 
-        const user = users[0];
-        
         // Normaliza o papel do usuário (role ou user_type)
         const userRole = (user.role || user.user_type || '').toLowerCase();
 
@@ -64,7 +102,7 @@ const authMiddleware = async (req, res, next) => {
                 });
             }
         }
-        
+
         // 6. Continuar para a próxima função/rota
         next();
     } catch (err) {
@@ -80,3 +118,4 @@ const authMiddleware = async (req, res, next) => {
 };
 
 module.exports = authMiddleware;
+module.exports.invalidateUserCache = invalidateUserCache;

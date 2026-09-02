@@ -403,7 +403,17 @@ const notifyPartnerEntrada = async (partnerId, partnerName, orderNumber, safeLit
 
 const getAllComboioTransactions = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM comboio_transactions ORDER BY date DESC');
+        // Filtro de período opcional: sem startDate/endDate o retorno segue sendo
+        // a tabela inteira, preservando o comportamento dos consumidores atuais.
+        const { startDate, endDate } = req.query;
+        let sql = 'SELECT * FROM comboio_transactions';
+        const params = [];
+        if (startDate && endDate) {
+            sql += ' WHERE date >= ? AND date < DATE_ADD(?, INTERVAL 1 DAY)';
+            params.push(startDate, endDate);
+        }
+        sql += ' ORDER BY date DESC';
+        const [rows] = await db.query(sql, params);
         res.json(rows);
     } catch (error) {
         console.error('Erro GET transactions:', error);

@@ -189,7 +189,17 @@ const _notifyOrderCS = async ({ orderNumber, supplierId, status, totalValue, ane
 // ============================================================================
 const getAllOrders = async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT * FROM orders ORDER BY orderNumber DESC');
+        // Filtro de período opcional: sem startDate/endDate o retorno segue sendo
+        // a tabela inteira, preservando o comportamento dos consumidores atuais.
+        const { startDate, endDate } = req.query;
+        let sql = 'SELECT * FROM orders';
+        const params = [];
+        if (startDate && endDate) {
+            sql += ' WHERE date >= ? AND date < DATE_ADD(?, INTERVAL 1 DAY)';
+            params.push(startDate, endDate);
+        }
+        sql += ' ORDER BY orderNumber DESC';
+        const [rows] = await db.query(sql, params);
         res.json(rows.map(parseOrderJsonFields));
     } catch (error) {
         console.error('Erro ao buscar ordens:', error);

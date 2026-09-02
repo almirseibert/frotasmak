@@ -5,13 +5,14 @@ API REST + WebSocket que serve o frontend e o app mobile do sistema de gestão d
 ## Stack
 
 - **Node.js** + **Express 5** (CommonJS, `"type": "commonjs"`)
-- **MySQL 8** via `mysql2/promise` (pool de 10 conexões em [database.js](database.js))
+- **MySQL 8** via `mysql2/promise` (pool de 25 conexões em [database.js](database.js))
 - **Socket.io 4** para eventos em tempo real (`server:sync` invalida caches no frontend)
 - **JWT** (`jsonwebtoken`) para autenticação, **bcrypt** para hash de senhas
 - **Multer** para upload (10MB, JPEG/PNG/WEBP/PDF) em `public/uploads/`
 - **node-cron** para tarefas agendadas (`services/cronService.js`)
 - **nodemailer** (email), **@anthropic-ai/sdk** (chatbot WhatsApp), **pdfkit** (PDFs)
-- **helmet**, **compression**, **express-rate-limit**, **cors**
+- **compression** (gzip das respostas), **express-rate-limit**, **cors**
+- **helmet** está no `package.json` mas **não está registrado** no `server.js` — se for adotar, registrar junto dos demais middlewares globais
 
 ## Comandos
 
@@ -59,7 +60,7 @@ Rotas seguem o padrão `routes → controller → db.query`. Não há ORM — SQ
 
 [`middlewares/authMiddleware.js`](middlewares/authMiddleware.js):
 - Lê `Authorization: Bearer <token>`, verifica com `JWT_SECRET`
-- **Revalida no banco a cada request** (busca `users.id` → role, flags `canAccessRefueling`, `canAccessAnaliseGerencial`, `bloqueado_abastecimento`). Caro, mas garante revogação em tempo real.
+- **Revalida no banco** (busca `users.id` → role, flags `canAccessRefueling`, `canAccessAnaliseGerencial`, `bloqueado_abastecimento`), com **cache em memória de TTL 5s** por usuário. O TTL colapsa a rajada de chamadas paralelas de um page load sem criar janela de revogação perceptível. `authMiddleware.invalidateUserCache(id)` descarta a entrada antes do TTL.
 - Popula `req.user` com `{ id, email, role, user_type, canAccessRefueling, canAccessAnaliseGerencial, bloqueado_abastecimento }`
 - Rotas com `/supervisor` na URL exigem role `admin` ou `supervisor`.
 

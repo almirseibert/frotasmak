@@ -169,13 +169,29 @@ const syncPositions = async () => {
             inserted += batch.length;
         }
 
-        // Limpeza de registros com mais de 90 dias
-        const [del] = await db.query(
-            `DELETE FROM sigasul_positions WHERE pos_data_hora_receb < DATE_SUB(NOW(), INTERVAL 90 DAY)`
-        );
+        // Limpeza de registros mais antigos que a janela de retenção.
+        //
+        // Em lotes, e não num DELETE único: esta tabela é de longe a maior do
+        // banco (~6 milhões de linhas / 750 MB) e a primeira execução após a
+        // redução da janela apaga milhões de linhas de uma vez — um DELETE
+        // monolítico estoura o undo log e segura lock na tabela durante todo o
+        // comando, travando o sync e as telas que leem posições.
+        const RETENCAO_DIAS = 45;
+        const DELETE_BATCH = 50_000;
+        let removidos = 0;
+        for (;;) {
+            const [del] = await db.query(
+                `DELETE FROM sigasul_positions
+                  WHERE pos_data_hora_receb < DATE_SUB(NOW(), INTERVAL ? DAY)
+                  LIMIT ?`,
+                [RETENCAO_DIAS, DELETE_BATCH]
+            );
+            removidos += del.affectedRows;
+            if (del.affectedRows < DELETE_BATCH) break;
+        }
 
         await updateSyncState({ last_positions_sync_date: yesterdayStr });
-        console.log(`✅ [SigaSul] Posições: ${inserted} registros inseridos, ${del.affectedRows} expirados removidos.`);
+        console.log(`✅ [SigaSul] Posições: ${inserted} registros inseridos, ${removidos} expirados removidos.`);
     } catch (e) {
         console.error('❌ [SigaSul] Erro sync posições:', e.message);
     } finally {

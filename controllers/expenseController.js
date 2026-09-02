@@ -84,7 +84,17 @@ const createOrUpdateWeeklyFuelExpense = async ({ connection, obraId, date, fuelT
 const listExpenses = async (req, res) => {
     try {
         // A tabela 'expenses' deve existir (baseado no seu .sql anterior)
-        const [rows] = await db.execute('SELECT * FROM expenses ORDER BY createdAt DESC');
+        // Filtro de período opcional: sem startDate/endDate o retorno segue sendo
+        // a tabela inteira, preservando o comportamento dos consumidores atuais.
+        const { startDate, endDate } = req.query;
+        let sql = 'SELECT * FROM expenses';
+        const params = [];
+        if (startDate && endDate) {
+            sql += ' WHERE createdAt >= ? AND createdAt < DATE_ADD(?, INTERVAL 1 DAY)';
+            params.push(startDate, endDate);
+        }
+        sql += ' ORDER BY createdAt DESC';
+        const [rows] = await db.query(sql, params);
         
         // *** CORREÇÃO DO ERRO 500 ***
         // Trocamos o JSON.parse() inseguro pelo 'parseJsonSafe'

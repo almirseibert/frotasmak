@@ -7,6 +7,7 @@
 // para distinguir "OK" de "não processado".
 
 const db = require('../database');
+const { normalizarPlaca, variantesPlaca } = require('../utils/placa');
 const {
     _internal: {
         pointsToIntervals,
@@ -62,11 +63,12 @@ const serializeIntervals = (intervals) =>
 
 // Mesma lógica do confrontoService — copiada para não atrelar a mudanças futuras lá.
 const detectSignalSource = async (placa) => {
+    const variantes = variantesPlaca(placa);
+    if (!variantes.length) return 'velocidade';
     const [rows] = await db.query(
         `SELECT MAX(pos_ignicao) AS tem_ignicao FROM sigasul_positions
-         WHERE REPLACE(REPLACE(UPPER(pos_placa),'-',''),' ','')
-             = REPLACE(REPLACE(UPPER(?),'-',''),' ','')`,
-        [placa]
+         WHERE pos_placa IN (?)`,
+        [variantes]
     );
     return rows[0] && rows[0].tem_ignicao ? 'ignicao' : 'velocidade';
 };
@@ -123,22 +125,29 @@ const processPlacaDay = async (placa, dateStr) => {
 
     const fonte = await detectSignalSource(placa);
     const activityFilter = fonte === 'ignicao' ? 'pos_ignicao = 1' : 'pos_velocidade > 0';
-    // Normaliza a placa na comparação para suportar formatos com/sem traço ou espaço,
-    // evitando que veículos com placa "ABC-1234" em vehicles e "ABC1234" em sigasul
-    // sejam tratados como entidades distintas no processRange (bug: segunda chamada
-    // sobrescrevia rastreador_intervalos_json com array vazio via ON DUPLICATE KEY UPDATE).
-    const placaNorm = `REPLACE(REPLACE(UPPER(pos_placa),'-',''),' ','') = REPLACE(REPLACE(UPPER(?),'-',''),' ','')`;
+    // Casa as variantes de escrita da placa ("ABC1234" / "ABC-1234") em vez de
+    // normalizar a coluna no SQL, e filtra a data por intervalo semiaberto em
+    // vez de DATE(coluna) = ?. As duas mudanças mantêm as colunas "cruas" na
+    // comparação, que é o que permite ao MySQL usar `idx_placa_data` — antes o
+    // par de funções anulava o índice e cada consulta varria a tabela inteira.
+    //
+    // Casar as variantes também preserva a unificação de veículos com placa
+    // gravada em formatos diferentes entre `vehicles` e `sigasul_positions`
+    // (bug: a segunda chamada sobrescrevia rastreador_intervalos_json com array
+    // vazio via ON DUPLICATE KEY UPDATE).
+    const variantes = variantesPlaca(placa);
+    const janela = 'pos_data_hora_receb >= ? AND pos_data_hora_receb < DATE_ADD(?, INTERVAL 1 DAY)';
     const [posRows] = await db.query(
         `SELECT pos_data_hora_receb FROM sigasul_positions
-         WHERE ${placaNorm} AND DATE(pos_data_hora_receb) = ? AND ${activityFilter}
+         WHERE pos_placa IN (?) AND ${janela} AND ${activityFilter}
          ORDER BY pos_data_hora_receb`,
-        [placa, dateStr]
+        [variantes, dateStr, dateStr]
     );
     const trackerIntervals = pointsToIntervals(posRows.map(r => toMs(r.pos_data_hora_receb)));
     const [allPosCount] = await db.query(
         `SELECT COUNT(*) AS c FROM sigasul_positions
-         WHERE ${placaNorm} AND DATE(pos_data_hora_receb) = ?`,
-        [placa, dateStr]
+         WHERE pos_placa IN (?) AND ${janela}`,
+        [variantes, dateStr, dateStr]
     );
     const hasTrackerData = allPosCount[0].c > 0;
 
@@ -250,36 +259,61 @@ const processPlacaDay = async (placa, dateStr) => {
 
 const processRange = async (startDate, endDate, { onProgress } = {}) => {
     // Agrupa por (vehicle_id, data) para evitar pares duplicados quando o formato
-    // da placa difere entre sigasul_positions (ex: "ABC1234") e vehicles (ex: "ABC-1234").
-    // Usa vehicles.placa como placa canônica para que processPlacaDay possa resolver
-    // o vehicleId corretamente; a query interna do sigasul usa comparação normalizada.
-    const [pairs] = await db.query(
-        `SELECT v.placa, dates.data
-           FROM (
-             SELECT DISTINCT
-               (SELECT id FROM vehicles
-                 WHERE REPLACE(REPLACE(UPPER(placa),'-',''),' ','')
-                     = REPLACE(REPLACE(UPPER(sp.pos_placa),'-',''),' ','')
-                 LIMIT 1) AS vehicle_id,
-               DATE(sp.pos_data_hora_receb) AS data
-               FROM sigasul_positions sp
-              WHERE DATE(sp.pos_data_hora_receb) BETWEEN ? AND ?
-             UNION
-             SELECT DISTINCT vehicleId AS vehicle_id, date AS data
-               FROM daily_work_logs
-              WHERE date BETWEEN ? AND ?
-           ) dates
-           JOIN vehicles v ON v.id = dates.vehicle_id
-          WHERE dates.vehicle_id IS NOT NULL AND v.placa IS NOT NULL`,
-        [startDate, endDate, startDate, endDate]
+    // da placa difere entre sigasul_positions (grava com traço, "ABC-1234") e
+    // vehicles (grava sem separador, "ABC1234"). Usa vehicles.placa como placa
+    // canônica para que processPlacaDay possa resolver o vehicleId corretamente.
+    //
+    // A versão anterior fazia isso num único SQL, com uma subquery correlacionada
+    // em `vehicles` avaliada POR LINHA VARRIDA de sigasul_positions e um
+    // DATE(pos_data_hora_receb) no WHERE que anulava o índice — ou seja, uma
+    // varredura das ~6 milhões de linhas multiplicada pelos ~550 veículos.
+    // Agora: filtro de data sargável (usa `idx_data`) e o casamento
+    // placa → veículo resolvido em memória, onde é trivial.
+    const [vehicleRows] = await db.query(
+        'SELECT id, placa FROM vehicles WHERE placa IS NOT NULL'
     );
+    const placaCanonica = new Map();
+    for (const v of vehicleRows) {
+        placaCanonica.set(normalizarPlaca(v.placa), { id: v.id, placa: v.placa });
+    }
+
+    const [posDias] = await db.query(
+        `SELECT DISTINCT pos_placa, DATE(pos_data_hora_receb) AS data
+           FROM sigasul_positions
+          WHERE pos_data_hora_receb >= ?
+            AND pos_data_hora_receb < DATE_ADD(?, INTERVAL 1 DAY)`,
+        [startDate, endDate]
+    );
+    const [logDias] = await db.query(
+        `SELECT DISTINCT l.vehicleId, l.date AS data, v.placa
+           FROM daily_work_logs l
+           JOIN vehicles v ON v.id = l.vehicleId
+          WHERE l.date BETWEEN ? AND ? AND v.placa IS NOT NULL`,
+        [startDate, endDate]
+    );
+
+    // Deduplica por (vehicleId, dia) usando a placa canônica de `vehicles`,
+    // igual ao UNION do SQL anterior.
+    const toDateStr = (d) => (d instanceof Date
+        ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+        : String(d).slice(0, 10));
+
+    const paresUnicos = new Map();
+    for (const r of posDias) {
+        const veiculo = placaCanonica.get(normalizarPlaca(r.pos_placa));
+        if (!veiculo) continue; // placa sem veículo cadastrado
+        const dia = toDateStr(r.data);
+        paresUnicos.set(`${veiculo.id}|${dia}`, { placa: veiculo.placa, data: dia });
+    }
+    for (const r of logDias) {
+        const dia = toDateStr(r.data);
+        paresUnicos.set(`${r.vehicleId}|${dia}`, { placa: r.placa, data: dia });
+    }
+    const pairs = [...paresUnicos.values()];
 
     const results = { total: pairs.length, processed: 0, skipped: 0, discrepancias: 0 };
     for (let i = 0; i < pairs.length; i++) {
-        const { placa, data } = pairs[i];
-        const dateStr = data instanceof Date
-            ? data.toISOString().slice(0, 10)
-            : String(data).slice(0, 10);
+        const { placa, data: dateStr } = pairs[i]; // toDateStr já normalizou para 'YYYY-MM-DD'
         try {
             const res = await processPlacaDay(placa, dateStr);
             if (res.skipped) results.skipped++;

@@ -324,13 +324,84 @@ const sendOrderEmail = async (req, res) => {
 const HIDDEN_VISIBILITY_CLAUSE =
     '(is_hidden = 0 OR (hidden_by_user_id IS NOT NULL AND hidden_by_user_id = ?))';
 
+// Filtro de período e paginação são OPCIONAIS e sem default: sem query params
+// o retorno segue sendo a tabela inteira, como antes.
+//
+// Não impomos uma janela padrão de propósito. Os relatórios do frontend
+// (AveragesReport, SupplyOrdersReport, FuelConsumptionReport) iniciam com o
+// filtro de data VAZIO, o que significa "todo o histórico" — um default de N
+// dias no servidor truncaria esses relatórios em silêncio, sem que o usuário
+// visse qualquer indicação de que faltam dados.
+//
+// Query params aceitos:
+//   startDate / endDate → 'YYYY-MM-DD' (inclusivos)
+//   page / limit        → paginação; a resposta vira { data, total, page, limit }
 const getAllRefuelings = async (req, res) => {
     try {
-        const [rows] = await db.execute(
-            `SELECT * FROM refuelings WHERE ${HIDDEN_VISIBILITY_CLAUSE} ORDER BY id DESC`,
-            [req.user?.id || null]
+        const { startDate, endDate, page, limit, scope } = req.query;
+
+        let where = HIDDEN_VISIBILITY_CLAUSE;
+        const params = [req.user?.id || null];
+
+        // `scope` serve a tela de Abastecimento, que exibe três listas distintas
+        // e não precisa da tabela inteira para montá-las.
+        if (scope === 'pendentes') {
+            where += " AND is_hidden = 0 AND status IN ('Aberta', 'BloqueadoLeitura', 'BloqueadoOrcamento')";
+        } else if (scope === 'ocultas') {
+            where += ' AND is_hidden = 1';
+        } else if (scope === 'historico') {
+            where += " AND is_hidden = 0 AND status IN ('Concluída', 'Cancelada')";
+            // A busca da tela cobre número da ordem, registro interno e placa.
+            // O JOIN em `vehicles` mantém o mesmo alcance de antes (todo o
+            // histórico) agora que a tela não carrega mais a tabela inteira —
+            // filtrar só as 20 linhas já paginadas reduziria a busca.
+            const termo = (req.query.search || '').trim();
+            if (termo) {
+                where += ` AND (
+                    CAST(authNumber AS CHAR) LIKE ?
+                    OR vehicleId IN (
+                        SELECT id FROM vehicles
+                         WHERE registroInterno LIKE ? OR placa LIKE ?
+                    )
+                )`;
+                const like = `%${termo}%`;
+                params.push(like, like, like);
+            }
+        }
+
+        // Só aplica o intervalo quando AMBOS vierem — evita binds com undefined
+        // (mesmo cuidado de getAllDiarioDeBordo).
+        if (startDate && endDate) {
+            where += ' AND data >= ? AND data < DATE_ADD(?, INTERVAL 1 DAY)';
+            params.push(startDate, endDate);
+        }
+
+        const base = `FROM refuelings WHERE ${where}`;
+
+        // O histórico da tela de Abastecimento é ordenado por data (e o número da
+        // ordem desempata), não por id — ordenar por id aqui devolveria um
+        // conjunto diferente das 20 linhas que a tela mostrava antes.
+        const orderBy = scope === 'historico'
+            ? 'ORDER BY data DESC, authNumber DESC'
+            : 'ORDER BY id DESC';
+
+        // Sem page/limit o formato da resposta continua sendo um array puro,
+        // que é o que todos os consumidores atuais esperam.
+        if (!page && !limit) {
+            const [rows] = await db.query(`SELECT * ${base} ${orderBy}`, params);
+            return res.json(parseRefuelingRows(rows));
+        }
+
+        const limitNum = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 1000);
+        const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+        const offset = (pageNum - 1) * limitNum;
+
+        const [[{ total }]] = await db.query(`SELECT COUNT(*) AS total ${base}`, params);
+        const [rows] = await db.query(
+            `SELECT * ${base} ${orderBy} LIMIT ? OFFSET ?`,
+            [...params, limitNum, offset]
         );
-        res.json(parseRefuelingRows(rows));
+        res.json({ data: parseRefuelingRows(rows), total, page: pageNum, limit: limitNum });
     } catch (error) {
         console.error('Erro GET refuelings:', error);
         res.status(500).json({ error: 'Erro ao buscar dados.' });
@@ -349,6 +420,100 @@ const getRefuelingsByVehicle = async (req, res) => {
     } catch (error) {
         console.error('Erro GET refuelings por veículo:', error);
         res.status(500).json({ error: 'Erro ao buscar abastecimentos do veículo.' });
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regras que antes rodavam no cliente sobre a tabela inteira de refuelings.
+//
+// A tela de Abastecimento baixava os ~23 mil registros só para responder duas
+// perguntas pontuais: "este veículo já tem ordem aberta?" e "quanto esta obra
+// já gastou de combustível?". Ambas viraram consulta pontual ao banco — além
+// de tirar o payload, a validação passa a ser feita no servidor, onde o
+// cliente não tem como divergir.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Status que NÃO contam como ordem aberta. Espelha o closedStatuses que estava
+// no RefuelingOrderModal (inclui as duas grafias de "Concluída").
+const CLOSED_STATUSES = ['Concluída', 'Concluida', 'Cancelada', 'Negada', 'Baixada'];
+
+// GET /refuelings/open?vehicleId=X&excludeId=Y
+// Devolve a ordem em aberto do veículo (ou null). `excludeId` cobre a edição,
+// em que a própria ordem sendo editada não deve contar.
+const getOpenRefuelingByVehicle = async (req, res) => {
+    try {
+        const { vehicleId, excludeId } = req.query;
+        if (!vehicleId) return res.status(400).json({ error: 'vehicleId é obrigatório.' });
+
+        const params = [vehicleId, ...CLOSED_STATUSES];
+        let sql = `SELECT * FROM refuelings
+                    WHERE vehicleId = ?
+                      AND status NOT IN (${CLOSED_STATUSES.map(() => '?').join(',')})`;
+        if (excludeId) {
+            sql += ' AND id != ?';
+            params.push(excludeId);
+        }
+        // Mantém o filtro de ordens reservadas: o array que alimentava esta regra
+        // no cliente já vinha filtrado por ele, então preservamos o comportamento.
+        sql += ` AND ${HIDDEN_VISIBILITY_CLAUSE} LIMIT 1`;
+        params.push(req.user?.id || null);
+
+        const [rows] = await db.query(sql, params);
+        res.json(rows.length ? parseRefuelingRows(rows)[0] : null);
+    } catch (error) {
+        console.error('Erro GET refuelings/open:', error);
+        res.status(500).json({ error: 'Erro ao verificar ordem aberta.' });
+    }
+};
+
+// GET /refuelings/obra-status/:obraId
+// Replica exatamente a regra que estava no RefuelingOrderModal: o gasto é o
+// MAIOR entre o somatório de `expenses` de combustível e o dos abastecimentos
+// concluídos — `expenses` não tem categoria 'Combustível' em todos os casos, e
+// sozinha zeraria o cálculo.
+const getObraFuelStatus = async (req, res) => {
+    try {
+        const { obraId } = req.params;
+        const [[obra]] = await db.query(
+            'SELECT valorTotalContrato FROM obras WHERE id = ?',
+            [obraId]
+        );
+        if (!obra) return res.json(null);
+
+        const valorContrato = parseFloat(obra.valorTotalContrato) || 0;
+        if (valorContrato <= 0) return res.json(null);
+
+        const [[expRow]] = await db.query(
+            `SELECT COALESCE(SUM(amount), 0) AS total
+               FROM expenses
+              WHERE obraId = ? AND (category = 'Combustível' OR fuelType IS NOT NULL)`,
+            [obraId]
+        );
+        // 'Confirmada' entra junto de 'Concluída' para não divergir do que a tela
+        // exibia antes desta mudança.
+        const [[refRow]] = await db.query(
+            `SELECT COALESCE(SUM(
+                    (COALESCE(litrosAbastecidos, 0) * COALESCE(pricePerLiter, 0)) +
+                    (COALESCE(litrosAbastecidosArla, 0) * COALESCE(pricePerLiterArla, 0)) +
+                    COALESCE(outrosValor, 0)
+                 ), 0) AS total
+               FROM refuelings
+              WHERE obraId = ? AND status IN ('Concluída', 'Confirmada')`,
+            [obraId]
+        );
+
+        const totalGasto = Math.max(
+            parseFloat(expRow.total) || 0,
+            parseFloat(refRow.total) || 0
+        );
+        res.json({
+            totalGasto,
+            valorContrato,
+            percentual: (totalGasto / valorContrato) * 100,
+        });
+    } catch (error) {
+        console.error('Erro GET refuelings/obra-status:', error);
+        res.status(500).json({ error: 'Erro ao calcular gasto da obra.' });
     }
 };
 
@@ -1269,6 +1434,8 @@ const revelarOrdemOculta = async (req, res) => {
 module.exports = {
     criarOrdem,
     getAllRefuelings,
+    getOpenRefuelingByVehicle,
+    getObraFuelStatus,
     getRefuelingsByVehicle,
     getRefuelingById,
     createRefuelingOrder,
