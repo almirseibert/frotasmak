@@ -44,6 +44,29 @@ exports.getDashboardData = async (req, res) => {
         try { const [r] = await db.query('SELECT * FROM obra_contracts'); contracts = r || []; } catch (e) {}
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
 
+        // Comprometimento com terceiros: quanto do valor de contrato da obra já
+        // está destinado a contratos de terceirizados ATIVOS. Uma única query
+        // agregada — o .map abaixo já é N+1, não piorar. O valor NÃO depende do
+        // vínculo de máquina (só a leitura de horas dependeria), então é confiável
+        // mesmo nos contratos com `maquinas` ainda nulo.
+        const terceirosMap = {};
+        try {
+            const [terc] = await db.query(`
+                SELECT obraId, SUM(valorTotal) AS valor, COUNT(*) AS qtd
+                FROM terceiro_contratos
+                WHERE status = 'ativo'
+                GROUP BY obraId
+            `);
+            (terc || []).forEach((t) => {
+                terceirosMap[String(t.obraId)] = {
+                    valor: parseFloat(t.valor) || 0,
+                    qtd: parseInt(t.qtd, 10) || 0,
+                };
+            });
+        } catch (e) {
+            console.warn('⚠️ [supervisor] agregado de terceiros indisponível:', e.message);
+        }
+
         const dashboardData = await Promise.all(allObras.map(async (obra) => {
             const obraId = String(obra.id);
             const contract = contractMap[obra.id] || {};
@@ -81,6 +104,10 @@ exports.getDashboardData = async (req, res) => {
                 previsaoTermino = addBusinessDays(new Date(), diasRestantes);
             }
 
+            const terceiros = terceirosMap[obraId] || { valor: 0, qtd: 0 };
+            const valorTerceiros = terceiros.valor;
+            const percTerceirizado = valorTotal > 0 ? (valorTerceiros / valorTotal) * 100 : 0;
+
             const percConclusao = horasContratadas > 0 ? (horasExecutadas / horasContratadas) * 100 : 0;
             // Crítico se > 90% concluído OU (menos de 15 dias para acabar E não está oculto)
             const isZonaAditivo = percConclusao >= 90;
@@ -91,10 +118,14 @@ exports.getDashboardData = async (req, res) => {
                 nome: obra.nome,
                 dataInicio: obra.dataInicio, 
                 responsavel: contract.responsavel_nome || obra.responsavel || 'A Definir',
+                orgao_contratante: obra.orgao_contratante || null,
                 kpi: {
                     ...contract, 
                     valor_total_contrato: valorTotal,
                     total_gasto: totalGasto,
+                    valor_terceiros: valorTerceiros,
+                    percentual_terceirizado: parseFloat(percTerceirizado.toFixed(1)),
+                    qtd_contratos_terceiros: terceiros.qtd,
                     horas_contratadas: horasContratadas,
                     horas_executadas: horasExecutadas,
                     percentual_conclusao: parseFloat(percConclusao.toFixed(1)),
@@ -152,6 +183,29 @@ exports.getContractsOverview = async (req, res) => {
         let contracts = [];
         try { const [r] = await db.query('SELECT * FROM obra_contracts'); contracts = r || []; } catch (e) {}
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
+
+        // Comprometimento com terceiros: quanto do valor de contrato da obra já
+        // está destinado a contratos de terceirizados ATIVOS. Uma única query
+        // agregada — o .map abaixo já é N+1, não piorar. O valor NÃO depende do
+        // vínculo de máquina (só a leitura de horas dependeria), então é confiável
+        // mesmo nos contratos com `maquinas` ainda nulo.
+        const terceirosMap = {};
+        try {
+            const [terc] = await db.query(`
+                SELECT obraId, SUM(valorTotal) AS valor, COUNT(*) AS qtd
+                FROM terceiro_contratos
+                WHERE status = 'ativo'
+                GROUP BY obraId
+            `);
+            (terc || []).forEach((t) => {
+                terceirosMap[String(t.obraId)] = {
+                    valor: parseFloat(t.valor) || 0,
+                    qtd: parseInt(t.qtd, 10) || 0,
+                };
+            });
+        } catch (e) {
+            console.warn('⚠️ [supervisor] agregado de terceiros indisponível:', e.message);
+        }
 
         const obrasComValor = allObras
             .map(obra => {
