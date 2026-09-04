@@ -1133,6 +1133,45 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
     }
 })();
 
+// ── Termos aditivos de contrato de terceirizado ───────────────────────────────
+// Aditivo NÃO é edição: a linha de terceiro_contratos permanece imutável (é o que
+// o PDF assinado diz) e cada aditivo guarda apenas o DELTA. Os valores vigentes
+// (base + soma dos aditivos assinados) são derivados em utils/contratoAditivos.js.
+// Só existe aditivo sobre contrato que já tem documento assinado vigente.
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS terceiro_contrato_aditivos (
+                id              VARCHAR(36)   PRIMARY KEY,
+                contratoId      VARCHAR(36)   NOT NULL,
+                numero          VARCHAR(40)   NOT NULL,
+                sequencia       INT           NOT NULL,
+                tipo            VARCHAR(20)   NOT NULL,
+                itensDelta      JSON          DEFAULT NULL,
+                horasDelta      DECIMAL(12,2) NOT NULL DEFAULT 0,
+                valorDelta      DECIMAL(14,2) NOT NULL DEFAULT 0,
+                novaVigenciaFim DATE          DEFAULT NULL,
+                justificativa   VARCHAR(1000) NOT NULL,
+                status          VARCHAR(20)   NOT NULL DEFAULT 'minuta',
+                observacoes     VARCHAR(1000) DEFAULT NULL,
+                pdfUrl          VARCHAR(500)  DEFAULT NULL,
+                assinadoUrl     VARCHAR(500)  DEFAULT NULL,
+                assinadoNome    VARCHAR(255)  DEFAULT NULL,
+                assinadoEm      TIMESTAMP     NULL DEFAULT NULL,
+                assinadoPor     VARCHAR(255)  DEFAULT NULL,
+                created_by_email VARCHAR(255) DEFAULT NULL,
+                created_at      TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_aditivo_seq (contratoId, sequencia),
+                UNIQUE KEY uq_aditivo_numero (numero),
+                INDEX idx_aditivo_contrato (contratoId)
+            )
+        `);
+        console.log('✅ Migração terceiro_contrato_aditivos concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] terceiro_contrato_aditivos:', e.message);
+    }
+})();
+
 // ====================================================================
 // MIGRAÇÃO — Integração ERP (Odoo): fila de sincronização + IDs espelho
 // Ver IMPLANTACAO_ERP_ODOO.md. Idempotente. A fila só é PROCESSADA quando a

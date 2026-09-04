@@ -7,6 +7,7 @@ const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { generateContratoPdf } = require('../services/contratoPdfGenerator');
+const { anexarVigente } = require('../utils/contratoAditivos');
 
 const CONTRATOS_PDF_DIR = path.join(__dirname, '..', 'public', 'uploads', 'contratos');
 
@@ -131,7 +132,10 @@ const gerarNumero = async () => {
 const getTerceiroContratos = async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM terceiro_contratos ORDER BY created_at DESC');
-        res.json(rows);
+        // Cada contrato leva junto `aditivos` e `vigente` (base + aditivos assinados).
+        // As colunas da linha seguem intactas: são o contrato ORIGINAL, usado na
+        // minuta e na exibição do "original R$ X".
+        res.json(await anexarVigente(db, rows));
     } catch (error) {
         console.error('❌ Erro ao listar contratos de terceirizados:', error.code, '|', error.sqlMessage || error.message);
         res.status(500).json({ error: 'Erro ao listar contratos.' });
@@ -186,7 +190,7 @@ const createTerceiroContrato = async (req, res) => {
         );
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
-        res.status(201).json(rows[0]);
+        res.status(201).json(await anexarVigente(db, rows[0]));
     } catch (error) {
         console.error('❌ Erro ao criar contrato de terceirizado:', error.code, '|', error.sqlMessage || error.message);
         res.status(500).json({ error: 'Erro ao criar contrato.' });
@@ -246,7 +250,7 @@ const updateTerceiroContrato = async (req, res) => {
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
-        res.json(rows[0]);
+        res.json(await anexarVigente(db, rows[0]));
     } catch (error) {
         console.error('❌ Erro ao atualizar contrato de terceirizado:', error.code, '|', error.sqlMessage || error.message);
         res.status(500).json({ error: 'Erro ao atualizar contrato.' });
@@ -359,7 +363,7 @@ const enviarContratoAssinado = async (req, res) => {
 
         const [updated] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
-        res.status(201).json(updated[0]);
+        res.status(201).json(await anexarVigente(db, updated[0]));
     } catch (error) {
         cleanup();
         console.error('❌ Erro ao enviar contrato assinado:', error.code, '|', error.sqlMessage || error.message);
@@ -376,6 +380,17 @@ const removerContratoAssinado = async (req, res) => {
         const [rows] = await db.query('SELECT id FROM terceiro_contratos WHERE id = ?', [id]);
         if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
 
+        // Aditivo só existe sobre contrato assinado: reabrir a base deixaria os
+        // aditivos assinados pendurados em um contrato que voltou a ser minuta.
+        const [comAditivo] = await db.query(
+            `SELECT COUNT(*) AS n FROM terceiro_contrato_aditivos
+              WHERE contratoId = ? AND status = 'assinado'`,
+            [id]
+        );
+        if (comAditivo[0].n > 0) {
+            return res.status(409).json({ error: 'Contrato possui aditivo assinado. Remova os aditivos antes de reabrir o contrato.' });
+        }
+
         const novo = ['ativo', 'concluido', 'cancelado'].includes(req.body?.status) ? req.body.status : 'ativo';
         await db.execute('UPDATE terceiro_contrato_docs SET vigente = 0 WHERE contratoId = ? AND vigente = 1', [id]);
         await db.execute(
@@ -388,10 +403,35 @@ const removerContratoAssinado = async (req, res) => {
 
         const [updated] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
-        res.json(updated[0]);
+        res.json(await anexarVigente(db, updated[0]));
     } catch (error) {
         console.error('❌ Erro ao remover contrato assinado:', error.code, '|', error.sqlMessage || error.message);
         res.status(500).json({ error: 'Erro ao remover contrato assinado.' });
+    }
+};
+
+// Remapeia as MÁQUINAS do contrato. Vínculo máquina↔contrato é operacional, não
+// cláusula (o que se contrata é subgrupo × horas), então continua editável mesmo
+// com contrato assinado — trocar a escavadeira em campo não exige aditivo.
+const updateMaquinasContrato = async (req, res) => {
+    const { id } = req.params;
+    const maqs = normalizeMaquinas(req.body?.maquinas);
+    try {
+        const [cur] = await db.query('SELECT id FROM terceiro_contratos WHERE id = ?', [id]);
+        if (cur.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+
+        const conflito = await maquinasEmConflito(maqs, id);
+        if (conflito.length > 0) {
+            return res.status(400).json({ error: 'Uma ou mais máquinas já estão vinculadas a outro contrato.' });
+        }
+        await db.execute('UPDATE terceiro_contratos SET maquinas = ? WHERE id = ?', [JSON.stringify(maqs), id]);
+
+        const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
+        res.json(await anexarVigente(db, rows[0]));
+    } catch (error) {
+        console.error('❌ Erro ao atualizar máquinas do contrato:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao atualizar máquinas do contrato.' });
     }
 };
 
@@ -419,4 +459,6 @@ module.exports = {
     enviarContratoAssinado,
     removerContratoAssinado,
     getContratoDocs,
+    updateMaquinasContrato,
+    slugArquivo,
 };
