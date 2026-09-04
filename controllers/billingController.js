@@ -68,6 +68,43 @@ const getDailyLogs = async (req, res) => {
     }
 };
 
+// --- Totais de horas do mês agrupados por obra ---
+// A tela inicial do Faturamento só precisa de um número por obra. Buscar isso
+// via getDailyLogs('all') trazia todos os lançamentos da empresa no mês para
+// somar no cliente — e ainda deduplicava por vehicleId+date, perdendo o
+// lançamento quando o mesmo equipamento trabalhou em duas obras no mesmo dia.
+const getMonthTotalsByObra = async (req, res) => {
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+        return res.status(400).json({ error: 'startDate e endDate são obrigatórios.' });
+    }
+
+    try {
+        const [rows] = await db.query(
+            `SELECT obraId, SUM(totalHours) AS totalHours, COUNT(DISTINCT vehicleId) AS equipamentos
+             FROM daily_work_logs
+             WHERE date BETWEEN ? AND ?
+               AND (justificativaTipo IS NULL OR justificativaTipo = '')
+             GROUP BY obraId`,
+            [startDate, endDate]
+        );
+
+        const totais = {};
+        rows.forEach(r => {
+            totais[r.obraId] = {
+                totalHours: parseFloat(r.totalHours || 0),
+                equipamentos: Number(r.equipamentos || 0),
+            };
+        });
+
+        res.json(totais);
+    } catch (error) {
+        console.error('Erro ao agregar horas por obra:', error);
+        res.status(500).json({ error: 'Erro ao buscar totais.' });
+    }
+};
+
 // Reconcilia a obra a partir dos seus lançamentos de horas. Fonte única de verdade:
 //  - dataInicio = MIN(date) dos logs (menor data efetivamente trabalhada).
 //    Reconciliação real: sobe ou desce conforme upsert/delete. Sem lançamentos → NULL
@@ -190,4 +227,4 @@ const deleteDailyLog = async (req, res) => {
     }
 };
 
-module.exports = { getDailyLogs, upsertDailyLog, deleteDailyLog };
+module.exports = { getDailyLogs, getMonthTotalsByObra, upsertDailyLog, deleteDailyLog };

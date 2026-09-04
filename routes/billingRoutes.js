@@ -8,6 +8,9 @@ router.use(authMiddleware);
 // Rota principal para listagem (suporta query params ?obraId=... ou ?obraId=all)
 router.get('/', billingController.getDailyLogs);
 
+// Totais agregados do período por obra (tela inicial do Faturamento)
+router.get('/totais-por-obra', billingController.getMonthTotalsByObra);
+
 // Rota específica por obra (legado/compatibilidade)
 router.get('/obra/:obraId', billingController.getDailyLogs);
 
