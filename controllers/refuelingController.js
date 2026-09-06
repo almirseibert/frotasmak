@@ -798,7 +798,7 @@ const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
         }
 
         await connection.commit();
-        if (io) io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'solicitacoes', 'partner_fuel_credits'] });
+        global.emitSync(['refuelings', 'vehicles', 'expenses', 'solicitacoes', 'partner_fuel_credits']);
 
         // Ordem salva bloqueada (leitura ou orçamento) → alerta admins (pop-up + som).
         // Ordem reservada não dispara o alerta: o texto carrega o número da ordem e
@@ -989,7 +989,7 @@ const updateRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'vehicles', 'partner_fuel_credits'] });
+        global.emitSync(['refuelings', 'expenses', 'vehicles', 'partner_fuel_credits']);
 
         // Reenvia a ordem ao posto (WhatsApp/e-mail conforme configurado) com um
         // alerta de "ORDEM ALTERADA — desconsiderar a anterior". Só reenvia se a
@@ -1226,7 +1226,7 @@ const confirmRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'vehicles', 'expenses', 'partners', 'solicitacoes', 'partner_fuel_credits'] });
+        global.emitSync(['refuelings', 'vehicles', 'expenses', 'partners', 'solicitacoes', 'partner_fuel_credits']);
         res.json({ message: 'Abastecimento confirmado com sucesso.' });
 
         // Verifica percentual de combustível da obra após confirmar (fire-and-forget)
@@ -1306,7 +1306,7 @@ const deleteRefuelingOrder = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'expenses', 'solicitacoes', 'partner_fuel_credits'] });
+        global.emitSync(['refuelings', 'expenses', 'solicitacoes', 'partner_fuel_credits']);
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
@@ -1326,7 +1326,7 @@ const negarOrdemBloqueada = async (req, res) => {
             return res.status(400).json({ error: 'Ordem não está bloqueada.' });
         }
         await db.execute('DELETE FROM refuelings WHERE id = ?', [id]);
-        req.io.emit('server:sync', { targets: ['refuelings'] });
+        global.emitSync(['refuelings']);
         res.json({ message: 'Ordem negada e excluída.' });
     } catch (error) {
         console.error('Erro ao negar ordem:', error);
@@ -1362,7 +1362,7 @@ const liberarOrdemBloqueada = async (req, res) => {
         }
 
         await connection.commit();
-        req.io.emit('server:sync', { targets: ['refuelings', 'partner_fuel_credits'] });
+        global.emitSync(['refuelings', 'partner_fuel_credits']);
         // Após o admin liberar, a ordem agora vai ao posto — dispara envio automático
         dispatchOrderToPartner(id);
         res.json({ message: 'Ordem liberada com sucesso.' });
@@ -1420,7 +1420,7 @@ const revelarOrdemOculta = async (req, res) => {
         );
         if (result.affectedRows === 0) return naoEncontrado();
 
-        req.io.emit('server:sync', { targets: ['refuelings'] });
+        global.emitSync(['refuelings']);
         res.json({
             message: `Ordem Nº ${ordem.authNumber} liberada — agora visível para todos os usuários.`,
             authNumber: ordem.authNumber

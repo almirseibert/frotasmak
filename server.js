@@ -194,6 +194,14 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
     // Filtro por período das listagens de abastecimento (ver getAllRefuelings).
     await addIndexIfMissing(db, 'refuelings', 'idx_refuelings_data', '`data`');
 
+    // Índices compostos para os cálculos que rodam a CADA baixa/emissão de ordem:
+    //   - idx_obra_status_data: gasto de combustível da obra (status='Concluída'
+    //     por obraId) e updateMonthlyExpense (obra+período).
+    //   - idx_vehicle_status: ordem aberta do veículo e recálculo de média.
+    // Aditivos e reversíveis (DROP INDEX); rodar fora do horário de pico.
+    await addIndexIfMissing(db, 'refuelings', 'idx_obra_status_data', '`obraId`, `status`, `data`');
+    await addIndexIfMissing(db, 'refuelings', 'idx_vehicle_status', '`vehicleId`, `status`');
+
     // Cobre `WHERE obraId = ? AND date >= ...` do painel do supervisor de obra.
     await addIndexIfMissing(db, 'daily_work_logs', 'idx_dwl_obra_date', '`obraId`, `date`');
 
@@ -1982,6 +1990,28 @@ const io = new Server(server, {
 global.io = io;
 
 // ====================================================================
+// server:sync DIRECIONADO POR SALA
+// ====================================================================
+// Broadcast (io.emit) mandava TODO server:sync para todos os sockets, inclusive
+// os ~200 operadores que só se importam com as próprias solicitações. No pico
+// (meio-dia) uma emissão de ordem acordava as centenas de clientes de uma vez.
+// global.emitSync roteia por sala:
+//   - 'gestores'   recebe TODOS os targets (usuários do sistema completo).
+//   - 'operadores' recebe só os targets abaixo — na prática 'solicitacoes', o
+//     único sinal que muda a tela do operador. Toda baixa de ordem ligada a uma
+//     solicitação já emite 'solicitacoes' junto, então nada se perde para ele.
+// Call sites que ainda usam io.emit('server:sync', ...) seguem funcionando como
+// broadcast; a migração para emitSync é feita no caminho quente do abastecimento.
+const OPERADOR_SYNC_TARGETS = new Set(['solicitacoes']);
+global.emitSync = (targets) => {
+  if (!Array.isArray(targets) || targets.length === 0) return;
+  io.to('gestores').emit('server:sync', { targets });
+  if (targets.some(t => OPERADOR_SYNC_TARGETS.has(t))) {
+    io.to('operadores').emit('server:sync', { targets });
+  }
+};
+
+// ====================================================================
 // ROTAS ESTÁTICAS E MIDDLEWARE
 // ====================================================================
 
@@ -2182,10 +2212,22 @@ io.on('connection', (socket) => {
     const uid = socket.userId;
     socket.join('user:' + uid);
 
+    // ── Salas de sincronização (server:sync direcionado, ver global.emitSync) ──
+    // Fail-safe: todo socket autenticado entra em 'gestores' por padrão, então
+    // continua recebendo tudo mesmo se a consulta de papel abaixo falhar. Só
+    // operadores são movidos para 'operadores', que recebe apenas os targets que
+    // lhes interessam — tirando os ~200 operadores do broadcast do pico.
+    socket.join('gestores');
+
     // Status inicial: usa o último status salvo do usuário (fallback disponível).
-    db.query('SELECT chat_status, chat_status_msg FROM users WHERE id = ?', [uid])
+    db.query('SELECT chat_status, chat_status_msg, user_type, role FROM users WHERE id = ?', [uid])
       .then(([rows]) => {
         const saved = rows[0] || {};
+        const papel = String(saved.user_type || saved.role || '').toLowerCase();
+        if (papel === 'operador') {
+          socket.leave('gestores');
+          socket.join('operadores');
+        }
         const initialStatus = saved.chat_status && saved.chat_status !== 'offline'
           ? saved.chat_status : 'disponivel';
         const { wasOffline, entry } = presence.addSocket(uid, socket.id, initialStatus);

@@ -153,7 +153,7 @@ const avaliarSolicitacao = async (req, res) => {
                 ['NEGADO', motivoNegativa, req.user.id, id]
             );
             await connection.commit();
-            if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
+            global.emitSync(['solicitacoes']);
 
             // Notifica solicitante via WhatsApp
             try {
@@ -246,7 +246,7 @@ const confirmarBaixa = async (req, res) => {
     const { id } = req.params;
     try {
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "CONCLUIDO", data_baixa = NOW() WHERE id = ?', [id]);
-        if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
+        global.emitSync(['solicitacoes']);
         res.json({ message: 'Baixa confirmada.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao confirmar baixa.' });
@@ -257,7 +257,7 @@ const rejeitarComprovante = async (req, res) => {
     const { id } = req.params;
     try {
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "LIBERADO" WHERE id = ?', [id]);
-        if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
+        global.emitSync(['solicitacoes']);
         res.json({ message: 'Comprovante rejeitado.' });
     } catch (error) {
         res.status(500).json({ error: 'Erro ao rejeitar.' });

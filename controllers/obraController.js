@@ -64,11 +64,21 @@ const getAllObras = async (req, res) => {
             billingMap[row.obraId] = parseFloat(row.totalHorasRealizadas) || 0;
         });
 
+        // Pré-indexa o histórico por obraId num Map: O(H) para montar, O(1) por
+        // obra. Antes era filter() aninhado no map() — O(obras × histórico) ≈
+        // 255 × 2.264 comparações por chamada, para os ~200 usuários.
+        const historyByObra = new Map();
+        for (const h of historyRows) {
+            if (!historyByObra.has(h.obraId)) historyByObra.set(h.obraId, []);
+            historyByObra.get(h.obraId).push(h);
+        }
+        for (const lista of historyByObra.values()) {
+            lista.sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada));
+        }
+
         const obras = rows.map(obra => {
             const parsedObra = parseObraJsonFields(obra);
-            parsedObra.historicoVeiculos = historyRows
-                .filter(h => h.obraId === parsedObra.id)
-                .sort((a, b) => new Date(b.dataEntrada) - new Date(a.dataEntrada));
+            parsedObra.historicoVeiculos = historyByObra.get(parsedObra.id) || [];
             parsedObra.totalHorasRealizadas = billingMap[parsedObra.id] || 0;
             return parsedObra;
         });

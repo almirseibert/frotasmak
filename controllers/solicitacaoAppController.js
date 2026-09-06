@@ -258,7 +258,7 @@ const criarSolicitacao = async (req, res) => {
         await connection.commit();
 
         if (req.io) {
-            req.io.emit('server:sync', { targets: ['solicitacoes'] });
+            global.emitSync(['solicitacoes']);
             req.io.emit('admin:notificacao', { tipo: 'nova_solicitacao', id: result.insertId });
         }
 
@@ -272,7 +272,7 @@ const criarSolicitacao = async (req, res) => {
         setImmediate(() => {
             abastecimentoAuto.enfileirar(novaSolicitacaoId, abastecimentoAuto.ETAPA.PAINEL)
                 .then(() => abastecimentoAuto.dispararAgora(novaSolicitacaoId, abastecimentoAuto.ETAPA.PAINEL))
-                .then(() => { if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] }); })
+                .then(() => { global.emitSync(['solicitacoes']); })
                 .catch(e => console.warn('[solicitacao] análise automática falhou:', e.message));
         });
 
@@ -355,7 +355,7 @@ const enviarComprovante = async (req, res) => {
 
         await db.execute('UPDATE solicitacoes_abastecimento SET status = "AGUARDANDO_BAIXA", foto_cupom_path = ? WHERE id = ?', [fotoPath, id]);
 
-        if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes'] });
+        global.emitSync(['solicitacoes']);
         res.json({ message: 'Comprovante enviado.' });
 
         // Leitura do cupom pela IA para pré-preencher a baixa. Não conclui nada:
@@ -363,7 +363,7 @@ const enviarComprovante = async (req, res) => {
         setImmediate(() => {
             abastecimentoAuto.enfileirar(id, abastecimentoAuto.ETAPA.CUPOM)
                 .then(() => abastecimentoAuto.dispararAgora(id, abastecimentoAuto.ETAPA.CUPOM))
-                .then(() => { if (req.io) req.io.emit('server:sync', { targets: ['solicitacoes', 'refuelings'] }); })
+                .then(() => { global.emitSync(['solicitacoes', 'refuelings']); })
                 .catch(e => console.warn('[solicitacao] leitura do cupom falhou:', e.message));
         });
     } catch (error) {
