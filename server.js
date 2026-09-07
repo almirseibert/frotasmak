@@ -2207,17 +2207,20 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   console.log(`🔌 Cliente Socket.io conectado: ${socket.id}${socket.userId ? ` | user:${socket.userId}` : ''}`);
 
+  // ── Salas de sincronização (server:sync direcionado, ver global.emitSync) ──
+  // Fail-safe: TODO socket entra em 'gestores' por padrão — inclusive o que não
+  // autenticou no handshake (token expirado: o access token vale 4h e o cliente
+  // reusa o mesmo valor nas reconexões). Antes esse join ficava dentro do
+  // `if (socket.userId)`, então um socket sem auth não entrava em sala nenhuma e
+  // parava de receber QUALQUER server:sync vindo de global.emitSync — na prática,
+  // o app do operador congelava: baixa/aprovação da ordem não chegava mais.
+  // Com io.emit isso não acontecia, porque broadcast ignora salas.
+  socket.join('gestores');
+
   // ── Presença / mensageiro ──
   if (socket.userId) {
     const uid = socket.userId;
     socket.join('user:' + uid);
-
-    // ── Salas de sincronização (server:sync direcionado, ver global.emitSync) ──
-    // Fail-safe: todo socket autenticado entra em 'gestores' por padrão, então
-    // continua recebendo tudo mesmo se a consulta de papel abaixo falhar. Só
-    // operadores são movidos para 'operadores', que recebe apenas os targets que
-    // lhes interessam — tirando os ~200 operadores do broadcast do pico.
-    socket.join('gestores');
 
     // Status inicial: usa o último status salvo do usuário (fallback disponível).
     db.query('SELECT chat_status, chat_status_msg, user_type, role FROM users WHERE id = ?', [uid])
