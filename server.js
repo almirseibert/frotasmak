@@ -1787,6 +1787,72 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
     }
 })();
 
+// ====================================================================
+// MIGRAÇÃO — Guia de Peças e Reposição (part_catalog_models / _items)
+// Catálogo de referência de filtros/óleos/correias etc. por modelo de
+// equipamento. Seed idempotente (só quando a tabela de modelos está vazia).
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS part_catalog_models (
+                id                VARCHAR(36)  PRIMARY KEY,
+                marca             VARCHAR(80)  NOT NULL,
+                marca_norm        VARCHAR(80)  NOT NULL,
+                modelo            VARCHAR(120) NOT NULL,
+                modelo_norm       VARCHAR(120) NOT NULL,
+                variante          VARCHAR(120) NULL,
+                categoria_veiculo VARCHAR(40)  NULL,
+                ano_inicio        INT NULL,
+                ano_fim           INT NULL,
+                observacoes       TEXT NULL,
+                anexo_url         VARCHAR(500) NULL,
+                fonte             VARCHAR(300) NULL,
+                createdAt         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updatedAt         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                KEY idx_pcm_busca (marca_norm, modelo_norm, ano_inicio, ano_fim)
+            )
+        `);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS part_catalog_items (
+                id                   VARCHAR(36) PRIMARY KEY,
+                model_id             VARCHAR(36) NULL,
+                vehicle_id           VARCHAR(36) NULL,
+                categoria            VARCHAR(50) NOT NULL,
+                descricao            VARCHAR(200) NOT NULL,
+                especificacao        VARCHAR(200) NULL,
+                capacidade           VARCHAR(60)  NULL,
+                quantidade           VARCHAR(30)  NULL,
+                codigo_oem           VARCHAR(80)  NULL,
+                codigos_equivalentes JSON NULL,
+                intervalo_km         INT NULL,
+                intervalo_horas      INT NULL,
+                intervalo_meses      INT NULL,
+                status_validacao     ENUM('referencia','confirmado','revisar') NOT NULL DEFAULT 'referencia',
+                fonte                VARCHAR(300) NULL,
+                observacoes          TEXT NULL,
+                createdAt            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updatedAt            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                KEY idx_pci_model (model_id),
+                KEY idx_pci_vehicle (vehicle_id),
+                KEY idx_pci_cat (categoria)
+            )
+        `);
+
+        // Seed idempotente: só popula quando o catálogo está vazio, para não
+        // sobrescrever edições feitas pela oficina.
+        const [[{ total }]] = await db.query('SELECT COUNT(*) AS total FROM part_catalog_models');
+        if (Number(total) === 0) {
+            const { seedPartCatalog } = require('./data/partCatalogSeed');
+            const inserted = await seedPartCatalog(db);
+            console.log(`✅ [seed] Guia de Peças: ${inserted.models} modelos / ${inserted.items} itens de referência inseridos.`);
+        }
+        console.log('✅ Migração part_catalog concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] part_catalog:', e.message);
+    }
+})();
+
 const { Server } = require("socket.io");
 const multer = require('multer');
 
@@ -1971,6 +2037,7 @@ const terceiroContratoRoutes      = require('./routes/terceiroContratoRoutes');
 const chatRoutes                  = require('./routes/chatRoutes');
 const holidayRoutes               = require('./routes/holidayRoutes');
 const relatoRoutes                = require('./routes/relatoRoutes');
+const partCatalogRoutes           = require('./routes/partCatalogRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -2142,6 +2209,9 @@ apiRouter.use('/chat', chatRoutes);
 apiRouter.use('/holidays', holidayRoutes);
 // Relato de Ocorrência e Manutenção de Frota (FRM-MAN-001).
 apiRouter.use('/relatos', relatoRoutes);
+
+// Guia de Peças e Reposição (catálogo de referência por modelo de equipamento).
+apiRouter.use('/part-catalog', partCatalogRoutes);
 
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware
