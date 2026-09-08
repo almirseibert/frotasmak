@@ -10,7 +10,8 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { randomUUID } = require('crypto');
-const archiver = require('archiver');
+// `archiver` é ESM-only nas versões recentes; num projeto CommonJS não dá para
+// require()-á-lo. Carregamos via import() dinâmico dentro de gerarLote (lazy).
 const { SUBDIRS, resolverCaminho, relativizar, garantirDirs } = require('../utils/evidenciaRegras');
 const carimbo = require('./evidenciaCarimboService');
 
@@ -77,6 +78,10 @@ async function gerarLote(obraId, { de, ate, geradoPor } = {}) {
     fs.mkdirSync(outDir, { recursive: true });
     const zipName = `MAK_EVID_${obraSlug}_${de || 'ini'}_a_${ate || 'fim'}.zip`;
     const zipPath = path.join(outDir, zipName);
+
+    // ESM-only: import() dinâmico funciona em qualquer módulo CommonJS.
+    const _archiverMod = await import('archiver');
+    const archiver = _archiverMod.default || _archiverMod;
 
     try {
         await new Promise(async (resolve, reject) => {
