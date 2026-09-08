@@ -14,14 +14,14 @@
 // role -> páginas que o role enxerga por padrão. 'admin' usa curinga '*'.
 const ROLE_PAGE_ACCESS = {
   admin:         ['*'],
-  gerencia:      ['dashboard','obras','planejamento','expenses','operacional','billing','terceirizados','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','revisions','relatos','tires','vehicles','employees','partners','inventory','fines','sigasul','supervisor_dashboard','analise_gerencial'],
+  gerencia:      ['dashboard','obras','planejamento','expenses','operacional','billing','terceirizados','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','revisions','relatos','tires','guia_pecas','vehicles','employees','partners','inventory','fines','sigasul','supervisor_dashboard','analise_gerencial','admin_evidencias'],
   rh:            ['dashboard','obras','billing','reports','vehicles','employees','fines'],
-  faturamento:   ['dashboard','obras','operacional','billing','terceirizados','reports','vehicles'],
+  faturamento:   ['dashboard','obras','operacional','billing','terceirizados','reports','vehicles','admin_evidencias'],
   abastecimento: ['dashboard','obras','expenses','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','vehicles','partners','inventory'],
-  oficina:       ['dashboard','obras','reports','revisions','relatos','tires','orders','vehicles','inventory','employees'],
-  editor:        ['dashboard','obras','expenses','operacional','billing','terceirizados','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','revisions','relatos','tires','vehicles','employees','partners','inventory','fines'],
-  supervisor:    ['dashboard','obras','supervisor_dashboard','expenses','operacional','billing','reports','revisions','relatos','tires','orders','vehicles'],
-  operador:      ['admin_solicitacoes_app'],
+  oficina:       ['dashboard','obras','reports','revisions','relatos','tires','guia_pecas','orders','vehicles','inventory','employees'],
+  editor:        ['dashboard','obras','expenses','operacional','billing','terceirizados','reports','refueling','saldo_postos','comboio','admin_solicitacoes','orders','revisions','relatos','tires','guia_pecas','vehicles','employees','partners','inventory','fines'],
+  supervisor:    ['dashboard','obras','supervisor_dashboard','expenses','operacional','billing','reports','revisions','relatos','tires','guia_pecas','orders','vehicles','admin_evidencias'],
+  operador:      ['admin_solicitacoes_app','evidencias_app'],
   viewer:        ['dashboard','reports'],
   visualizador:  ['dashboard','reports'],
 };

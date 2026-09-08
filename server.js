@@ -1787,6 +1787,314 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
     }
 })();
 
+// ====================================================================
+// MIGRAÇÃO — Guia de Peças e Reposição (part_catalog_models / _items)
+// Catálogo de referência de filtros/óleos/correias etc. por modelo de
+// equipamento. Seed idempotente (só quando a tabela de modelos está vazia).
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS part_catalog_models (
+                id                VARCHAR(36)  PRIMARY KEY,
+                marca             VARCHAR(80)  NOT NULL,
+                marca_norm        VARCHAR(80)  NOT NULL,
+                modelo            VARCHAR(120) NOT NULL,
+                modelo_norm       VARCHAR(120) NOT NULL,
+                variante          VARCHAR(120) NULL,
+                categoria_veiculo VARCHAR(40)  NULL,
+                ano_inicio        INT NULL,
+                ano_fim           INT NULL,
+                observacoes       TEXT NULL,
+                anexo_url         VARCHAR(500) NULL,
+                fonte             VARCHAR(300) NULL,
+                createdAt         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updatedAt         TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                KEY idx_pcm_busca (marca_norm, modelo_norm, ano_inicio, ano_fim)
+            )
+        `);
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS part_catalog_items (
+                id                   VARCHAR(36) PRIMARY KEY,
+                model_id             VARCHAR(36) NULL,
+                vehicle_id           VARCHAR(36) NULL,
+                categoria            VARCHAR(50) NOT NULL,
+                descricao            VARCHAR(200) NOT NULL,
+                especificacao        VARCHAR(200) NULL,
+                capacidade           VARCHAR(60)  NULL,
+                quantidade           VARCHAR(30)  NULL,
+                codigo_oem           VARCHAR(80)  NULL,
+                codigos_equivalentes JSON NULL,
+                intervalo_km         INT NULL,
+                intervalo_horas      INT NULL,
+                intervalo_meses      INT NULL,
+                status_validacao     ENUM('referencia','confirmado','revisar') NOT NULL DEFAULT 'referencia',
+                fonte                VARCHAR(300) NULL,
+                observacoes          TEXT NULL,
+                createdAt            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updatedAt            TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                KEY idx_pci_model (model_id),
+                KEY idx_pci_vehicle (vehicle_id),
+                KEY idx_pci_cat (categoria)
+            )
+        `);
+
+        // Seed idempotente: só popula quando o catálogo está vazio, para não
+        // sobrescrever edições feitas pela oficina.
+        const [[{ total }]] = await db.query('SELECT COUNT(*) AS total FROM part_catalog_models');
+        if (Number(total) === 0) {
+            const { seedPartCatalog } = require('./data/partCatalogSeed');
+            const inserted = await seedPartCatalog(db);
+            console.log(`✅ [seed] Guia de Peças: ${inserted.models} modelos / ${inserted.items} itens de referência inseridos.`);
+        }
+        console.log('✅ Migração part_catalog concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] part_catalog:', e.message);
+    }
+})();
+
+// ====================================================================
+// 📸 Evidências de Campo — Fase 2 (§6). MySQL 8, sem FK, idempotente.
+// IDs de referência são VARCHAR(255) (users/obras/vehicles/employees);
+// PKs novas VARCHAR(36) (crypto.randomUUID()).
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_registro (
+                id             VARCHAR(36)  PRIMARY KEY,
+                client_id      VARCHAR(36)  NOT NULL,
+                obra_id        VARCHAR(255) NOT NULL,
+                veiculo_id     VARCHAR(255) NOT NULL,
+                employee_id    VARCHAR(255) DEFAULT NULL,
+                user_id        VARCHAR(255) DEFAULT NULL,
+                tipo    ENUM('horimetro_inicio','horimetro_fim','foto_manha','foto_tarde','extra') NOT NULL,
+                data_ref       DATE NOT NULL,
+                turno          ENUM('manha','tarde','indefinido') NOT NULL DEFAULT 'indefinido',
+                arquivo_rel    VARCHAR(400) NOT NULL,
+                arquivo_bytes  BIGINT NOT NULL,
+                arquivo_mime   VARCHAR(60) NOT NULL,
+                sha256         CHAR(64) NOT NULL,
+                largura_px     INT DEFAULT NULL,
+                altura_px      INT DEFAULT NULL,
+                dev_capturado_em     DATETIME NOT NULL,
+                dev_latitude         DECIMAL(10,7) DEFAULT NULL,
+                dev_longitude        DECIMAL(10,7) DEFAULT NULL,
+                dev_precisao_m       DECIMAL(8,2)  DEFAULT NULL,
+                dev_local_texto      VARCHAR(200)  DEFAULT NULL,
+                dev_obra_nome        VARCHAR(200)  DEFAULT NULL,
+                dev_equip_label      VARCHAR(120)  DEFAULT NULL,
+                dev_operador_nome    VARCHAR(150)  DEFAULT NULL,
+                dev_exif_orientation TINYINT       DEFAULT NULL,
+                dev_clock_skew_s     INT           DEFAULT NULL,
+                dev_origem     ENUM('web_online','web_offline','mobile') NOT NULL DEFAULT 'web_online',
+                ov_capturado_em   DATETIME      DEFAULT NULL,
+                ov_latitude       DECIMAL(10,7) DEFAULT NULL,
+                ov_longitude      DECIMAL(10,7) DEFAULT NULL,
+                ov_local_texto    VARCHAR(200)  DEFAULT NULL,
+                ov_obra_nome      VARCHAR(200)  DEFAULT NULL,
+                ov_equip_label    VARCHAR(120)  DEFAULT NULL,
+                ov_operador_nome  VARCHAR(150)  DEFAULT NULL,
+                ov_linha_extra    VARCHAR(200)  DEFAULT NULL,
+                stamp_mode        ENUM('carimbado','limpo') NOT NULL DEFAULT 'carimbado',
+                stamp_posicao     ENUM('inferior','superior') NOT NULL DEFAULT 'inferior',
+                stamp_version     INT NOT NULL DEFAULT 1,
+                horimetro      DECIMAL(12,2) DEFAULT NULL,
+                odometro       DECIMAL(12,2) DEFAULT NULL,
+                estado          ENUM('ativo','arquivado','descartado') NOT NULL DEFAULT 'ativo',
+                offload_id      VARCHAR(36)  DEFAULT NULL,
+                offload_pasta   VARCHAR(300) DEFAULT NULL,
+                offload_arquivo VARCHAR(200) DEFAULT NULL,
+                offload_em      DATETIME     DEFAULT NULL,
+                offload_por     VARCHAR(255) DEFAULT NULL,
+                restaurado_em   DATETIME     DEFAULT NULL,
+                restaurado_por  VARCHAR(255) DEFAULT NULL,
+                historico       JSON         DEFAULT NULL,
+                observacao     VARCHAR(500) DEFAULT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_evid_client (client_id),
+                KEY idx_evid_obra_data (obra_id, data_ref),
+                KEY idx_evid_veic_data (veiculo_id, data_ref, tipo),
+                KEY idx_evid_emp (employee_id, data_ref),
+                KEY idx_evid_estado (estado, obra_id),
+                KEY idx_evid_sha (sha256),
+                KEY idx_evid_offload (offload_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_config (
+                obra_id           VARCHAR(255) PRIMARY KEY,
+                momentos_exigidos JSON DEFAULT NULL,
+                horarios_limite   JSON DEFAULT NULL,
+                dias_semana       JSON DEFAULT NULL,
+                raio_cerca_m      INT DEFAULT 500,
+                exigir_gps        TINYINT(1) DEFAULT 1,
+                permitir_galeria  TINYINT(1) DEFAULT 0,
+                ativa             TINYINT(1) DEFAULT 1,
+                updated_at        TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_carimbo_config (
+                id          VARCHAR(36) PRIMARY KEY,
+                escopo      ENUM('global','obra','veiculo') NOT NULL,
+                escopo_id   VARCHAR(255) DEFAULT NULL,
+                campos      JSON DEFAULT NULL,
+                updated_at  TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_carimbo_cfg (escopo, escopo_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_stamp_audit (
+                id            VARCHAR(36)  PRIMARY KEY,
+                registro_id   VARCHAR(36)  NOT NULL,
+                stamp_version_antes  INT NOT NULL,
+                stamp_version_depois INT NOT NULL,
+                acao          ENUM('editar','remover','restaurar_padrao') NOT NULL,
+                campos_antes  JSON DEFAULT NULL,
+                campos_depois JSON DEFAULT NULL,
+                motivo        VARCHAR(300) DEFAULT NULL,
+                user_id       VARCHAR(255) NOT NULL,
+                user_nome     VARCHAR(150) DEFAULT NULL,
+                ip            VARCHAR(64)  DEFAULT NULL,
+                created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_esa_registro (registro_id, created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_dispensa (
+                id             VARCHAR(36)  PRIMARY KEY,
+                obra_id        VARCHAR(255) NOT NULL,
+                veiculo_id     VARCHAR(255) DEFAULT NULL,
+                data_ref       DATE NOT NULL,
+                periodo        ENUM('dia','manha','tarde') NOT NULL DEFAULT 'dia',
+                motivo_codigo  VARCHAR(40)  DEFAULT NULL,
+                motivo_texto   VARCHAR(300) DEFAULT NULL,
+                criado_por     VARCHAR(255) NOT NULL,
+                criado_por_nome VARCHAR(150) DEFAULT NULL,
+                origem         ENUM('operador','gestor') NOT NULL DEFAULT 'operador',
+                revogada_em    DATETIME DEFAULT NULL,
+                revogada_por   VARCHAR(255) DEFAULT NULL,
+                revogada_motivo VARCHAR(300) DEFAULT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_disp_obra_data (obra_id, data_ref),
+                KEY idx_disp_veic_data (veiculo_id, data_ref)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_motivo_dispensa (
+                codigo   VARCHAR(40) PRIMARY KEY,
+                label    VARCHAR(120) NOT NULL,
+                ativo    TINYINT(1) NOT NULL DEFAULT 1,
+                ordem    INT DEFAULT 0
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+        // Seed idempotente do catálogo de motivos.
+        const [[{ mc }]] = await db.query('SELECT COUNT(*) AS mc FROM evidencia_motivo_dispensa');
+        if (Number(mc) === 0) {
+            await db.query(
+                `INSERT INTO evidencia_motivo_dispensa (codigo,label,ordem) VALUES
+                 ('chuva','Chuva',1),('manutencao','Veículo em Manutenção',2),
+                 ('problema','Veículo com problema',3),('sem_operador','Falta de operador',4),
+                 ('parado','Equipamento parado',5)`
+            );
+        }
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_aderencia_dia (
+                id          VARCHAR(36)  PRIMARY KEY,
+                obra_id     VARCHAR(255) NOT NULL,
+                veiculo_id  VARCHAR(255) NOT NULL,
+                employee_id VARCHAR(255) DEFAULT NULL,
+                data_ref    DATE NOT NULL,
+                tem_horimetro_inicio TINYINT(1) NOT NULL DEFAULT 0,
+                tem_horimetro_fim    TINYINT(1) NOT NULL DEFAULT 0,
+                tem_foto_manha       TINYINT(1) NOT NULL DEFAULT 0,
+                tem_foto_tarde       TINYINT(1) NOT NULL DEFAULT 0,
+                exigidas    TINYINT NOT NULL DEFAULT 4,
+                cumpridas   TINYINT NOT NULL DEFAULT 0,
+                dispensadas TINYINT NOT NULL DEFAULT 0,
+                completo    TINYINT(1) NOT NULL DEFAULT 0,
+                updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_evid_ader (veiculo_id, data_ref),
+                KEY idx_ader_obra_data (obra_id, data_ref, completo)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_cobranca_log (
+                id            VARCHAR(36) PRIMARY KEY,
+                veiculo_id    VARCHAR(255) NOT NULL,
+                obra_id       VARCHAR(255) DEFAULT NULL,
+                data_ref      DATE NOT NULL,
+                tipo_cobranca VARCHAR(40) NOT NULL,
+                canal         VARCHAR(20) NOT NULL,
+                enviado_em    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_cobranca (veiculo_id, data_ref, tipo_cobranca, canal),
+                KEY idx_cob_obra_data (obra_id, data_ref)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_offload (
+                id             VARCHAR(36) PRIMARY KEY,
+                obra_id        VARCHAR(255) NOT NULL,
+                periodo_inicio DATE DEFAULT NULL,
+                periodo_fim    DATE DEFAULT NULL,
+                gerado_em      DATETIME DEFAULT NULL,
+                gerado_por     VARCHAR(255) DEFAULT NULL,
+                total_fotos    INT DEFAULT 0,
+                tamanho_bytes  BIGINT DEFAULT 0,
+                caminho_zip    VARCHAR(300) DEFAULT NULL,
+                destino        VARCHAR(120) DEFAULT NULL,
+                status         ENUM('GERANDO','PRONTO','BAIXADO','CONFIRMADO','PURGADO') DEFAULT 'GERANDO',
+                baixado_em     DATETIME DEFAULT NULL,
+                confirmado_em  DATETIME DEFAULT NULL,
+                purgado_em     DATETIME DEFAULT NULL,
+                KEY idx_offload_obra (obra_id, status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        // Fila de cobrança com APROVAÇÃO MANUAL (Fase 5, modo seguro): o sistema
+        // PROJETA os faltantes aqui, mas NADA é enviado sem um gestor aprovar item
+        // a item. Evita disparo em massa a ~200 operadores enquanto não está testado.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_cobranca_fila (
+                id             VARCHAR(36) PRIMARY KEY,
+                data_ref       DATE NOT NULL,
+                obra_id        VARCHAR(255) NOT NULL,
+                veiculo_id     VARCHAR(255) NOT NULL,
+                employee_id    VARCHAR(255) DEFAULT NULL,
+                operador_user_id VARCHAR(255) DEFAULT NULL,
+                tipo           ENUM('horimetro_inicio','horimetro_fim','foto_manha','foto_tarde') NOT NULL,
+                hora_limite    TIME DEFAULT NULL,
+                veic_label     VARCHAR(120) DEFAULT NULL,
+                obra_nome      VARCHAR(200) DEFAULT NULL,
+                operador_nome  VARCHAR(150) DEFAULT NULL,
+                status         ENUM('PENDENTE','ENVIADA','IGNORADA') NOT NULL DEFAULT 'PENDENTE',
+                canal          VARCHAR(20) DEFAULT 'push',
+                criado_em      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                enviado_em     DATETIME DEFAULT NULL,
+                enviado_por    VARCHAR(255) DEFAULT NULL,
+                ignorado_em    DATETIME DEFAULT NULL,
+                UNIQUE KEY uq_cob_fila (veiculo_id, data_ref, tipo),
+                KEY idx_cobf_status (status, data_ref),
+                KEY idx_cobf_obra (obra_id, data_ref)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        console.log('✅ Migração Evidências de Campo concluída (10 tabelas).');
+    } catch (e) {
+        console.warn('⚠️ [migration] evidencias:', e.message);
+    }
+})();
+
 const { Server } = require("socket.io");
 const multer = require('multer');
 
@@ -1971,6 +2279,9 @@ const terceiroContratoRoutes      = require('./routes/terceiroContratoRoutes');
 const chatRoutes                  = require('./routes/chatRoutes');
 const holidayRoutes               = require('./routes/holidayRoutes');
 const relatoRoutes                = require('./routes/relatoRoutes');
+const partCatalogRoutes           = require('./routes/partCatalogRoutes');
+const evidenciaRoutes             = require('./routes/evidenciaRoutes');
+const evidenciaPublicRoutes       = require('./routes/evidenciaPublicRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -2015,6 +2326,12 @@ global.emitSync = (targets) => {
 // ROTAS ESTÁTICAS E MIDDLEWARE
 // ====================================================================
 
+// Evidências de Campo (§4): a subárvore /uploads/evidencias é privada — os
+// originais são prova de cobrança e NUNCA podem ser servidos publicamente. A
+// guarda vem ANTES do express.static para vencê-lo. O acesso legítimo às imagens
+// é só via /api/public/evidencias/:id/:variante (assinado por HMAC).
+app.use('/uploads/evidencias', (req, res) => res.status(404).end());
+
 // Servir arquivos estáticos (uploads)
 app.use('/uploads', express.static(uploadDir, {
   maxAge: '1d', // Cache de 1 dia
@@ -2045,6 +2362,9 @@ apiRouter.get('/', (req, res) => {
 apiRouter.use('/auth', authRoutes);
 apiRouter.use('/registrationRequests', registrationRequestRoutes);
 apiRouter.use('/operationalRequests', operationalRequestRoutes);
+// Imagem de evidência assinada por HMAC — pública de propósito (§4), acima do
+// authMiddleware porque <img src> não manda Authorization e ela se autentica só.
+apiRouter.use('/public/evidencias', evidenciaPublicRoutes);
 
 // ====================================================================
 // MIDDLEWARE DE AUTENTICAÇÃO (Aplicado a partir daqui)
@@ -2143,6 +2463,12 @@ apiRouter.use('/holidays', holidayRoutes);
 // Relato de Ocorrência e Manutenção de Frota (FRM-MAN-001).
 apiRouter.use('/relatos', relatoRoutes);
 
+// Guia de Peças e Reposição (catálogo de referência por modelo de equipamento).
+apiRouter.use('/part-catalog', partCatalogRoutes);
+
+// Evidências de Campo (fotos georreferenciadas dos equipamentos).
+apiRouter.use('/evidencias', evidenciaRoutes);
+
 // ─── WEBHOOK PÚBLICO DO CHATBOT ─────────────────────────────────────────────
 // Deve ficar ANTES de app.use('/api', apiRouter) para não passar pelo authMiddleware
 app.post('/api/whatsapp/webhook', require('./controllers/chatbotController').receberMensagem);
@@ -2207,17 +2533,20 @@ io.use((socket, next) => {
 io.on('connection', (socket) => {
   console.log(`🔌 Cliente Socket.io conectado: ${socket.id}${socket.userId ? ` | user:${socket.userId}` : ''}`);
 
+  // ── Salas de sincronização (server:sync direcionado, ver global.emitSync) ──
+  // Fail-safe: TODO socket entra em 'gestores' por padrão — inclusive o que não
+  // autenticou no handshake (token expirado: o access token vale 4h e o cliente
+  // reusa o mesmo valor nas reconexões). Antes esse join ficava dentro do
+  // `if (socket.userId)`, então um socket sem auth não entrava em sala nenhuma e
+  // parava de receber QUALQUER server:sync vindo de global.emitSync — na prática,
+  // o app do operador congelava: baixa/aprovação da ordem não chegava mais.
+  // Com io.emit isso não acontecia, porque broadcast ignora salas.
+  socket.join('gestores');
+
   // ── Presença / mensageiro ──
   if (socket.userId) {
     const uid = socket.userId;
     socket.join('user:' + uid);
-
-    // ── Salas de sincronização (server:sync direcionado, ver global.emitSync) ──
-    // Fail-safe: todo socket autenticado entra em 'gestores' por padrão, então
-    // continua recebendo tudo mesmo se a consulta de papel abaixo falhar. Só
-    // operadores são movidos para 'operadores', que recebe apenas os targets que
-    // lhes interessam — tirando os ~200 operadores do broadcast do pico.
-    socket.join('gestores');
 
     // Status inicial: usa o último status salvo do usuário (fallback disponível).
     db.query('SELECT chat_status, chat_status_msg, user_type, role FROM users WHERE id = ?', [uid])

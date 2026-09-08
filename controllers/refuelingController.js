@@ -1320,13 +1320,34 @@ const deleteRefuelingOrder = async (req, res) => {
 const negarOrdemBloqueada = async (req, res) => {
     const { id } = req.params;
     try {
-        const [[ordem]] = await db.execute('SELECT id, status FROM refuelings WHERE id = ?', [id]);
+        const [[ordem]] = await db.execute(
+            'SELECT id, status, createdFromSolicitacaoId, createdBy FROM refuelings WHERE id = ?', [id]
+        );
         if (!ordem) return res.status(404).json({ error: 'Ordem não encontrada.' });
         if (!['BloqueadoOrcamento', 'BloqueadoLeitura'].includes(ordem.status)) {
             return res.status(400).json({ error: 'Ordem não está bloqueada.' });
         }
         await db.execute('DELETE FROM refuelings WHERE id = ?', [id]);
-        global.emitSync(['refuelings']);
+
+        // A solicitação de origem já tinha ido a LIBERADO em criarOrdem. Sem estornar
+        // aqui ela ficava LIBERADO para sempre: o app do operador seguia pedindo
+        // "Enviar Cupom Agora" de uma ordem que não existe mais. deleteRefuelingOrder
+        // já fazia esse estorno — este caminho era o único que não fazia.
+        let linkedSolicitacaoId = ordem.createdFromSolicitacaoId || null;
+        if (!linkedSolicitacaoId && ordem.createdBy) {
+            try {
+                const cbObj = JSON.parse(ordem.createdBy);
+                if (cbObj.linkedSolicitacaoId) linkedSolicitacaoId = cbObj.linkedSolicitacaoId;
+            } catch (e) {}
+        }
+        if (linkedSolicitacaoId) {
+            await db.execute(
+                'UPDATE solicitacoes_abastecimento SET status = "NEGADO", motivo_negativa = "Ordem bloqueada negada pela Administração" WHERE id = ?',
+                [linkedSolicitacaoId]
+            );
+        }
+
+        global.emitSync(linkedSolicitacaoId ? ['refuelings', 'solicitacoes'] : ['refuelings']);
         res.json({ message: 'Ordem negada e excluída.' });
     } catch (error) {
         console.error('Erro ao negar ordem:', error);

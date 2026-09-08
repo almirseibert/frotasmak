@@ -1,0 +1,38 @@
+# =============================================================================
+# Spike de risco — Evidências de Campo (Fase 0). PASTA DESCARTÁVEL.
+# Não faz parte do build de produção. Apagar depois de colher as respostas.
+#
+# Prova, no MESMO base do backend/Dockerfile (node:18-alpine), que:
+#   1) require('sharp') carrega no alpine
+#   2) acento renderiza no SVG via librsvg (precisa de fontconfig + fonte)
+#   3) sharp informa se há suporte a HEIF/HEIC de ENTRADA (Plano A vs Plano B)
+#   4) a vazão de composição do carimbo é suficiente (renders/s)
+#   5) o fuso do contêiner é America/Sao_Paulo (GMT-3) — desfaz a ambiguidade do §9
+# =============================================================================
+FROM node:18-alpine
+
+# --- Base IDÊNTICA ao backend/Dockerfile ---
+RUN apk add --no-cache tzdata
+ENV TZ=America/Sao_Paulo
+
+# --- O que o §5.6 do plano manda acrescentar para o carimbo não sair em branco ---
+# Sem fontconfig + uma fonte instalada, o librsvg renderiza texto como quadrado
+# ou nada — justamente nos acentos ("Início", "Horímetro").
+RUN apk add --no-cache fontconfig ttf-dejavu && fc-cache -f
+
+# -----------------------------------------------------------------------------
+# PLANO B de HEIC (deixado COMENTADO de propósito).
+# Só descomente se o Teste 3 disser "heif.input = false" E você precisar
+# decodificar HEIC no servidor. Isso troca o sharp pré-compilado por um build
+# contra a libvips do sistema (com libheif), encarecendo imagem e tempo de build.
+# A alternativa mais barata é decodificar HEIC no CLIENTE (heic2any) antes de
+# enfileirar — ver README.md, seção "Se o HEIC reprovar".
+# -----------------------------------------------------------------------------
+# RUN apk add --no-cache vips vips-heif vips-dev build-base python3
+# ENV SHARP_IGNORE_GLOBAL_LIBVIPS=0
+# (e trocar a linha de install abaixo por:  npm install --build-from-source sharp@0.33.5 )
+
+WORKDIR /spike
+RUN npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund sharp@0.33.5
+COPY spike.js ./
+CMD ["node", "spike.js"]
