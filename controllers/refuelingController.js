@@ -408,6 +408,251 @@ const getAllRefuelings = async (req, res) => {
     }
 };
 
+// Agregação de consumo por obra/combustível — feita no banco para não trafegar
+// a tabela inteira (~23 mil linhas / 34 MB) só para o front somar.
+//
+// Espelha EXATAMENTE o cálculo do FuelConsumptionReport.js:
+//   - considera apenas status = 'Concluída'
+//   - valor por ordem = litrosAbastecidos * pricePerLiter + outrosValor
+//   - agrupa por obraId + fuelType, contando as ordens
+// Filtros opcionais (querystring): obraId, fuelType, startDate, endDate ('YYYY-MM-DD').
+// O nome/format da obra continua sendo resolvido no front (tem `obras` em mãos);
+// aqui devolvemos obraId cru (null = "sem obra vinculada").
+const getAggregatesByObra = async (req, res) => {
+    try {
+        const { obraId, fuelType, startDate, endDate } = req.query;
+
+        // Mesma regra de visibilidade de ordens reservadas do getAllRefuelings.
+        let where = HIDDEN_VISIBILITY_CLAUSE + " AND status = 'Concluída'";
+        const params = [req.user?.id || null];
+
+        if (obraId) {
+            where += ' AND obraId = ?';
+            params.push(obraId);
+        }
+        if (fuelType) {
+            where += ' AND fuelType = ?';
+            params.push(fuelType);
+        }
+        // start/end aplicados de forma independente (espelha o FuelConsumptionReport,
+        // que aceita só "de" ou só "até"). endDate é inclusivo.
+        if (startDate) {
+            where += ' AND data >= ?';
+            params.push(startDate);
+        }
+        if (endDate) {
+            where += ' AND data < DATE_ADD(?, INTERVAL 1 DAY)';
+            params.push(endDate);
+        }
+
+        const [rows] = await db.query(
+            `SELECT
+                 obraId,
+                 fuelType,
+                 COUNT(*) AS ordens,
+                 COALESCE(SUM(COALESCE(litrosAbastecidos, 0)), 0) AS litros,
+                 COALESCE(SUM(
+                     (COALESCE(litrosAbastecidos, 0) * COALESCE(pricePerLiter, 0))
+                     + COALESCE(outrosValor, 0)
+                 ), 0) AS valor
+             FROM refuelings
+             WHERE ${where}
+             GROUP BY obraId, fuelType`,
+            params
+        );
+
+        res.json(rows.map(r => ({
+            obraId: r.obraId,
+            fuelType: r.fuelType,
+            ordens: Number(r.ordens) || 0,
+            litros: parseFloat(r.litros) || 0,
+            valor: parseFloat(r.valor) || 0,
+        })));
+    } catch (error) {
+        console.error('Erro GET refuelings/aggregates/by-obra:', error);
+        res.status(500).json({ error: 'Erro ao agregar consumo por obra.' });
+    }
+};
+
+// Último abastecimento (data) por veículo+obra — para o AlertsPanel do dashboard,
+// que calcula dias de inatividade a partir do último abastecimento do veículo na
+// SUA obra atual. Antes varria os 23 mil registros no cliente. Só status Concluída.
+const getLastRefuelByVehicleObra = async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            `SELECT vehicleId, obraId, MAX(data) AS lastDate
+               FROM refuelings
+              WHERE status = 'Concluída' AND obraId IS NOT NULL AND vehicleId IS NOT NULL
+              GROUP BY vehicleId, obraId`
+        );
+        res.json(rows);
+    } catch (error) {
+        console.error('Erro GET refuelings/aggregates/last-by-vehicle-obra:', error);
+        res.status(500).json({ error: 'Erro ao agregar últimos abastecimentos.' });
+    }
+};
+
+// Eficiência de consumo por veículo — para o FuelEfficiencyRanking do dashboard.
+// Faz a parte pesada (primeira/última leitura por data, soma de litros) no banco;
+// a unidade km/hr e o cálculo final (computeConsumption) ficam no front, onde vive
+// a taxonomia de veículos.
+//
+// NOTA: corrige um bug do cálculo antigo, que ordenava o histórico por `r.date`
+// (campo inexistente — o correto é `data`), o que zerava a ordenação. Aqui a
+// ordem é por (data, id), então "primeira" e "última" leitura ficam corretas.
+// Consequência: os números do ranking mudam (para melhor) em relação ao anterior.
+const getEfficiencyByVehicle = async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            `SELECT vehicleId, cnt, sumLitrosAll, firstLitros,
+                    firstOdo, lastOdo, firstHor, lastHor
+               FROM (
+                 SELECT
+                   vehicleId,
+                   COUNT(*)                        OVER (PARTITION BY vehicleId) AS cnt,
+                   SUM(COALESCE(litrosAbastecidos,0)) OVER (PARTITION BY vehicleId) AS sumLitrosAll,
+                   FIRST_VALUE(COALESCE(litrosAbastecidos,0)) OVER w AS firstLitros,
+                   FIRST_VALUE(COALESCE(odometro,0))  OVER w AS firstOdo,
+                   LAST_VALUE(COALESCE(odometro,0))   OVER w AS lastOdo,
+                   FIRST_VALUE(COALESCE(horimetro,0)) OVER w AS firstHor,
+                   LAST_VALUE(COALESCE(horimetro,0))  OVER w AS lastHor,
+                   ROW_NUMBER() OVER (PARTITION BY vehicleId ORDER BY data ASC, id ASC) AS rn
+                 FROM refuelings
+                 WHERE status = 'Concluída' AND vehicleId IS NOT NULL
+                 WINDOW w AS (PARTITION BY vehicleId ORDER BY data ASC, id ASC
+                              ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+               ) t
+              WHERE rn = 1 AND cnt >= 2`
+        );
+        res.json(rows.map(r => ({
+            vehicleId: r.vehicleId,
+            count: Number(r.cnt) || 0,
+            // litros do intervalo = total menos o primeiro abastecimento (marco zero),
+            // igual à regra original (history.slice(1)).
+            totalLiters: (parseFloat(r.sumLitrosAll) || 0) - (parseFloat(r.firstLitros) || 0),
+            firstOdo: parseFloat(r.firstOdo) || 0,
+            lastOdo: parseFloat(r.lastOdo) || 0,
+            firstHor: parseFloat(r.firstHor) || 0,
+            lastHor: parseFloat(r.lastHor) || 0,
+        })));
+    } catch (error) {
+        console.error('Erro GET refuelings/aggregates/efficiency-by-vehicle:', error);
+        res.status(500).json({ error: 'Erro ao agregar eficiência por veículo.' });
+    }
+};
+
+// Médias/uso por veículo — para o AveragesReport. Devolve por veículo a soma de
+// litros e o mín/máx das leituras (odômetro e horímetro, ignorando zeros); a
+// unidade (km/hr) e o cálculo final (computeConsumption) ficam no front, onde
+// vive a taxonomia de veículos. Filtros opcionais: startDate, endDate, obraId,
+// vehicleIds (CSV).
+//
+// NOTA (correção): o uso vem de MAX(leitura)-MIN(leitura). O fallback antigo de
+// "uma leitura só" (que usava odometroAnterior) foi descartado — para veículos
+// com uma única leitura no período o uso fica 0 (média "sem dados suficientes"),
+// que já era o comportamento na prática na maioria dos casos.
+const getAveragesByVehicle = async (req, res) => {
+    try {
+        const { startDate, endDate, obraId } = req.query;
+
+        let where = HIDDEN_VISIBILITY_CLAUSE;
+        const params = [req.user?.id || null];
+
+        if (obraId) {
+            where += ' AND obraId = ?';
+            params.push(obraId);
+        }
+        const vehicleIds = (req.query.vehicleIds || '').split(',').map(s => s.trim()).filter(Boolean);
+        if (vehicleIds.length > 0) {
+            where += ` AND vehicleId IN (${vehicleIds.map(() => '?').join(',')})`;
+            params.push(...vehicleIds);
+        }
+        if (startDate) { where += ' AND data >= ?'; params.push(startDate); }
+        if (endDate) { where += ' AND data < DATE_ADD(?, INTERVAL 1 DAY)'; params.push(endDate); }
+
+        const [rows] = await db.query(
+            `SELECT
+                 vehicleId,
+                 COALESCE(SUM(COALESCE(litrosAbastecidos,0)),0) AS sumLitros,
+                 MIN(NULLIF(odometro,0))  AS odoMin,
+                 MAX(NULLIF(odometro,0))  AS odoMax,
+                 SUM(CASE WHEN COALESCE(odometro,0)  > 0 THEN 1 ELSE 0 END) AS odoCount,
+                 MIN(NULLIF(horimetro,0)) AS horMin,
+                 MAX(NULLIF(horimetro,0)) AS horMax,
+                 SUM(CASE WHEN COALESCE(horimetro,0) > 0 THEN 1 ELSE 0 END) AS horCount
+             FROM refuelings
+             WHERE ${where} AND vehicleId IS NOT NULL
+             GROUP BY vehicleId`,
+            params
+        );
+
+        res.json(rows.map(r => ({
+            vehicleId: r.vehicleId,
+            totalLiters: parseFloat(r.sumLitros) || 0,
+            odoMin: r.odoMin != null ? parseFloat(r.odoMin) : 0,
+            odoMax: r.odoMax != null ? parseFloat(r.odoMax) : 0,
+            odoCount: Number(r.odoCount) || 0,
+            horMin: r.horMin != null ? parseFloat(r.horMin) : 0,
+            horMax: r.horMax != null ? parseFloat(r.horMax) : 0,
+            horCount: Number(r.horCount) || 0,
+        })));
+    } catch (error) {
+        console.error('Erro GET refuelings/aggregates/averages-by-vehicle:', error);
+        res.status(500).json({ error: 'Erro ao agregar médias por veículo.' });
+    }
+};
+
+// Abastecimentos de um CONJUNTO de veículos — para o módulo de terceirizados,
+// que calcula o diesel abatido por contrato sobre as máquinas do contrato. Em vez
+// de baixar a tabela inteira, traz só as linhas dessas máquinas; o cálculo do
+// contrato (período, preço por parceiro, etc.) segue idêntico no cliente.
+const getRefuelingsByVehicles = async (req, res) => {
+    try {
+        const vehicleIds = (req.query.vehicleIds || '').split(',').map(s => s.trim()).filter(Boolean);
+        if (vehicleIds.length === 0) return res.json([]);
+
+        const placeholders = vehicleIds.map(() => '?').join(',');
+        const [rows] = await db.query(
+            `SELECT * FROM refuelings
+              WHERE vehicleId IN (${placeholders})
+                AND ${HIDDEN_VISIBILITY_CLAUSE}
+              ORDER BY id DESC`,
+            [...vehicleIds, req.user?.id || null]
+        );
+        res.json(parseRefuelingRows(rows));
+    } catch (error) {
+        console.error('Erro GET refuelings/by-vehicles:', error);
+        res.status(500).json({ error: 'Erro ao buscar abastecimentos dos veículos.' });
+    }
+};
+
+// Checagem de nota fiscal duplicada (posto + número da NF) — feita no banco,
+// usando o índice idx_partner_invoice. Antes o BaixaForm varria o array inteiro
+// de refuelings no cliente para descobrir isso; a checagem é CROSS-veículo (a NF
+// de um posto pode estar em qualquer veículo), então não pode ser escopada por
+// veículo. Não aplica a cláusula de visibilidade: uma NF repetida em ordem
+// reservada ainda é duplicata.
+const checkInvoiceDuplicate = async (req, res) => {
+    try {
+        const { partnerId, invoiceNumber, excludeId } = req.query;
+        if (!partnerId || !invoiceNumber) return res.json({ duplicate: false });
+
+        const params = [partnerId, String(invoiceNumber).trim()];
+        let sql = 'SELECT 1 FROM refuelings WHERE partnerId = ? AND invoiceNumber = ?';
+        if (excludeId) {
+            sql += ' AND id <> ?';
+            params.push(excludeId);
+        }
+        sql += ' LIMIT 1';
+
+        const [rows] = await db.query(sql, params);
+        res.json({ duplicate: rows.length > 0 });
+    } catch (error) {
+        console.error('Erro GET refuelings/check-invoice:', error);
+        res.status(500).json({ error: 'Erro ao verificar nota fiscal.' });
+    }
+};
+
 // Abastecimentos de UM veículo (aba "Abastecimento" no histórico do veículo).
 // Escopado por vehicleId para não trafegar a tabela inteira no modal.
 const getRefuelingsByVehicle = async (req, res) => {
@@ -474,6 +719,12 @@ const getOpenRefuelingByVehicle = async (req, res) => {
 const getObraFuelStatus = async (req, res) => {
     try {
         const { obraId } = req.params;
+        // includeNoContract=1: retorna o gasto mesmo quando a obra não tem contrato
+        // definido (usado pelo painel de Solicitações, que exibe "Contrato Total:
+        // Não definido"). O default segue devolvendo null nesse caso, para não
+        // mudar o comportamento do RefuelingOrderModal (que trata null como
+        // "sem portão de orçamento").
+        const includeNoContract = req.query.includeNoContract === '1';
         const [[obra]] = await db.query(
             'SELECT valorTotalContrato FROM obras WHERE id = ?',
             [obraId]
@@ -481,7 +732,7 @@ const getObraFuelStatus = async (req, res) => {
         if (!obra) return res.json(null);
 
         const valorContrato = parseFloat(obra.valorTotalContrato) || 0;
-        if (valorContrato <= 0) return res.json(null);
+        if (valorContrato <= 0 && !includeNoContract) return res.json(null);
 
         const [[expRow]] = await db.query(
             `SELECT COALESCE(SUM(amount), 0) AS total
@@ -509,7 +760,7 @@ const getObraFuelStatus = async (req, res) => {
         res.json({
             totalGasto,
             valorContrato,
-            percentual: (totalGasto / valorContrato) * 100,
+            percentual: valorContrato > 0 ? (totalGasto / valorContrato) * 100 : null,
         });
     } catch (error) {
         console.error('Erro GET refuelings/obra-status:', error);
@@ -1455,6 +1706,12 @@ const revelarOrdemOculta = async (req, res) => {
 module.exports = {
     criarOrdem,
     getAllRefuelings,
+    getAggregatesByObra,
+    getLastRefuelByVehicleObra,
+    getEfficiencyByVehicle,
+    getAveragesByVehicle,
+    getRefuelingsByVehicles,
+    checkInvoiceDuplicate,
     getOpenRefuelingByVehicle,
     getObraFuelStatus,
     getRefuelingsByVehicle,
