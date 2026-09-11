@@ -174,6 +174,29 @@ async function ingest(req, res) {
         let data_ref = (b.data_ref || '').trim() || hojeRef();
         if (Math.abs(skewS) > 3600) data_ref = hojeRef(); // relógio muito fora → servidor manda
 
+        // --- Dedup cross-operador (B2): um registro por (veículo, dia, tipo) para
+        //     os 4 momentos fixos. Evita que operadores diferentes (com escopo
+        //     offline defasado) enviem várias fotos do mesmo equipamento no mesmo
+        //     dia. 'extra' continua livre (fotos adicionais). Responde 200 com o
+        //     registro existente (nunca erro), então a fila trata como "já feito"
+        //     e descarta a foto redundante em silêncio. O card já mostra "Enviado".
+        if (tipo !== 'extra') {
+            const [[jaDoDia]] = await db.query(
+                `SELECT id, stamp_version FROM evidencia_registro
+                  WHERE veiculo_id = ? AND data_ref = ? AND tipo = ? AND estado <> 'descartado'
+                  LIMIT 1`,
+                [veiculo_id, data_ref, tipo]
+            );
+            if (jaDoDia) {
+                limparUpload(f);
+                return res.status(200).json({
+                    jaExistia: true, duplicado: true,
+                    id: jaDoDia.id,
+                    urls: assinarTodas(jaDoDia.id, jaDoDia.stamp_version || 1),
+                });
+            }
+        }
+
         // --- grava o arquivo: inbox (multer) -> orig/<obra>/<AAAA>/<MM>/<id>.<ext> ---
         const id = randomUUID();
         const buf = fs.readFileSync(f.path);
@@ -252,8 +275,40 @@ async function meuEscopo(req, res) {
             [employeeId]
         );
 
-        // Só equipamentos no escopo §2 (horímetro).
-        const equipamentos = linhas.filter(v => exigeEvidencia(v.tipo));
+        // B1 — Equipamentos que JÁ SAÍRAM da obra recentemente (até 7 dias), para
+        // permitir inclusões retroativas. Aparecem marcados (saiuDaObra) e, ao
+        // capturar, usam a data de saída como referência (o último dia na obra).
+        const [saidas] = await db.query(
+            `SELECT v.id, v.placa, v.registroInterno, v.modelo, v.tipo,
+                    h.obraId AS obra_id, o.nome AS obra_nome, o.regiao, o.latitude, o.longitude,
+                    MAX(h.dataSaida) AS saiu_em
+               FROM obras_historico_veiculos h
+               JOIN vehicles v ON v.id = h.veiculoId
+               LEFT JOIN obras o ON o.id = h.obraId
+              WHERE h.dataSaida IS NOT NULL
+                AND h.dataSaida >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+                AND h.obraId IN (
+                    SELECT DISTINCT h2.obraId FROM obras_historico_veiculos h2
+                     WHERE h2.employeeId = ? AND h2.dataSaida IS NULL
+                )
+                AND h.veiculoId NOT IN (
+                    SELECT h3.veiculoId FROM obras_historico_veiculos h3
+                     WHERE h3.dataSaida IS NULL
+                )
+              GROUP BY v.id, h.obraId`,
+            [employeeId]
+        );
+
+        // Só equipamentos no escopo §2 (horímetro). Os que saíram vêm marcados.
+        const ativos = linhas.filter(v => exigeEvidencia(v.tipo));
+        const saiuFmt = saidas
+            .filter(v => exigeEvidencia(v.tipo))
+            .map(v => ({
+                ...v,
+                saiuDaObra: true,
+                saiuEm: v.saiu_em ? new Date(v.saiu_em).toLocaleDateString('en-CA') : null,
+            }));
+        const equipamentos = [...ativos, ...saiuFmt];
         const obraIds = [...new Set(equipamentos.map(v => v.obra_id).filter(Boolean))];
         const obras = [];
         for (const oid of obraIds) {
@@ -265,16 +320,29 @@ async function meuEscopo(req, res) {
             });
         }
 
-        // O que já foi enviado hoje: { veiculoId: [tipos] }
+        // O que já foi enviado na data de referência de cada equipamento:
+        // { veiculoId: [tipos] }. Para equipamentos ativos a data é hoje; para os
+        // que saíram (B1) é a data de saída (dia do envio retroativo).
         const hojeEnviado = {};
         if (equipamentos.length) {
             const ids = equipamentos.map(v => v.id);
+            const dataPorVeic = {};
+            equipamentos.forEach(v => { dataPorVeic[v.id] = (v.saiuDaObra && v.saiuEm) ? v.saiuEm : data; });
+            const datas = [...new Set(Object.values(dataPorVeic))];
             const [envs] = await db.query(
-                `SELECT veiculo_id, tipo FROM evidencia_registro
-                  WHERE data_ref = ? AND estado <> 'descartado' AND veiculo_id IN (${ids.map(() => '?').join(',')})`,
-                [data, ...ids]
+                `SELECT veiculo_id, tipo, data_ref FROM evidencia_registro
+                  WHERE estado <> 'descartado'
+                    AND veiculo_id IN (${ids.map(() => '?').join(',')})
+                    AND data_ref IN (${datas.map(() => '?').join(',')})`,
+                [...ids, ...datas]
             );
-            for (const e of envs) (hojeEnviado[e.veiculo_id] = hojeEnviado[e.veiculo_id] || []).push(e.tipo);
+            for (const e of envs) {
+                const relevante = dataPorVeic[e.veiculo_id];
+                const eData = e.data_ref instanceof Date
+                    ? e.data_ref.toLocaleDateString('en-CA')
+                    : String(e.data_ref).slice(0, 10);
+                if (eData === relevante) (hojeEnviado[e.veiculo_id] = hojeEnviado[e.veiculo_id] || []).push(e.tipo);
+            }
         }
 
         return res.json({ data, obras, equipamentos, hojeEnviado });
@@ -416,6 +484,74 @@ async function minhas(req, res) {
     } catch (err) {
         console.error('❌ [evidencias] minhas:', err.code, '|', err.sqlMessage || err.message);
         return res.status(500).json({ error: 'Falha ao carregar suas evidências.' });
+    }
+}
+
+// =============================================================================
+// GET /api/evidencias/veiculo/:vehicleId/calendario — quadro por equipamento (B4)
+// Por data em que o equipamento esteve na obra (últimos 30 dias), diz se as
+// imagens foram enviadas, faltam, ou o dia foi dispensado.
+// =============================================================================
+async function veiculoCalendario(req, res) {
+    try {
+        const veiculoId = req.params.vehicleId;
+        const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+        const janelaIni = new Date(hoje); janelaIni.setDate(janelaIni.getDate() - 29);
+
+        // Estadias do equipamento em obra (para saber em quais dias ele esteve lá).
+        const [stays] = await db.query(
+            `SELECT dataEntrada, dataSaida FROM obras_historico_veiculos
+              WHERE veiculoId = ? AND dataEntrada IS NOT NULL
+              ORDER BY dataEntrada DESC LIMIT 30`,
+            [veiculoId]
+        );
+
+        const diasNaObra = new Set();
+        for (const s of stays) {
+            const ent = new Date(s.dataEntrada); ent.setHours(0, 0, 0, 0);
+            const sai = s.dataSaida ? new Date(s.dataSaida) : new Date(hoje); sai.setHours(0, 0, 0, 0);
+            let d = new Date(Math.max(ent.getTime(), janelaIni.getTime()));
+            const fim = new Date(Math.min(sai.getTime(), hoje.getTime()));
+            for (; d <= fim; d.setDate(d.getDate() + 1)) diasNaObra.add(d.toLocaleDateString('en-CA'));
+        }
+        if (diasNaObra.size === 0) return res.json({ dias: [] });
+
+        const datas = [...diasNaObra].sort();
+        const min = datas[0], max = datas[datas.length - 1];
+        const key = (v) => (v instanceof Date ? v.toLocaleDateString('en-CA') : String(v).slice(0, 10));
+
+        const [regs] = await db.query(
+            `SELECT data_ref, tipo FROM evidencia_registro
+              WHERE veiculo_id = ? AND estado <> 'descartado' AND data_ref BETWEEN ? AND ?`,
+            [veiculoId, min, max]
+        );
+        const [disp] = await db.query(
+            `SELECT data_ref FROM evidencia_dispensa
+              WHERE (veiculo_id = ? OR veiculo_id IS NULL) AND revogada_em IS NULL
+                AND data_ref BETWEEN ? AND ?`,
+            [veiculoId, min, max]
+        );
+
+        const FIXOS = ['horimetro_inicio', 'horimetro_fim', 'foto_manha', 'foto_tarde'];
+        const porDia = {};
+        regs.forEach(r => { const k = key(r.data_ref); (porDia[k] = porDia[k] || new Set()).add(r.tipo); });
+        const dispDia = new Set(disp.map(d => key(d.data_ref)));
+
+        const dias = datas.map(d => {
+            const tipos = porDia[d] || new Set();
+            const enviados = FIXOS.filter(t => tipos.has(t)).length;
+            let status;
+            if (dispDia.has(d)) status = 'dispensado';
+            else if (enviados >= 4) status = 'completo';
+            else if (enviados > 0) status = 'parcial';
+            else status = 'faltando';
+            return { data: d, enviados, exigidas: 4, status };
+        });
+
+        return res.json({ dias });
+    } catch (err) {
+        console.error('❌ [evidencias] calendario:', err.code, '|', err.sqlMessage || err.message);
+        return res.status(500).json({ error: 'Falha ao carregar o calendário do equipamento.' });
     }
 }
 
@@ -936,7 +1072,7 @@ async function resumoObra(req, res) {
 
 module.exports = {
     ingest, meuEscopo, listar, detalhe, servirVariante,
-    minhas, motivosDispensa, registrarDispensa,
+    minhas, veiculoCalendario, motivosDispensa, registrarDispensa,
     carimboEditar, carimboRemover, carimboRestaurar,
     getConfig, putConfig, aderencia, consolidar,
     cobrancasListar, cobrancaAprovar, cobrancasAprovarLote, cobrancaIgnorar,

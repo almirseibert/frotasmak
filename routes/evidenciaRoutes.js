@@ -48,6 +48,7 @@ const uploadRestore = multer({
 router.post('/', requireApp, upload.single('foto'), ctrl.ingest);
 router.get('/meu-escopo', requireApp, ctrl.meuEscopo);
 router.get('/minhas', requireApp, ctrl.minhas);
+router.get('/veiculo/:vehicleId/calendario', requireApp, ctrl.veiculoCalendario);
 router.get('/motivos-dispensa', requireApp, ctrl.motivosDispensa);
 router.post('/dispensa', requireApp, ctrl.registrarDispensa);
 
