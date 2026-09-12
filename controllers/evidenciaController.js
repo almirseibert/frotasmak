@@ -878,6 +878,14 @@ async function divergencia(req, res) {
 async function veiculoCalendario(req, res) {
     try {
         const veiculoId = req.params.vehicleId;
+
+        // Mesma checagem de escopo do /historico: sem ela um operador enumeraria
+        // o calendário de qualquer veículo da frota, não só dos seus.
+        const { equipamentos } = await equipamentosDoOperador(req.user.id);
+        if (!equipamentos.some(v => String(v.id) === String(veiculoId))) {
+            return res.status(403).json({ error: 'Equipamento fora do seu escopo.' });
+        }
+
         const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
         const janelaIni = new Date(hoje); janelaIni.setDate(janelaIni.getDate() - 29);
 
