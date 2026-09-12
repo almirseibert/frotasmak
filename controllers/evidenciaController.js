@@ -972,6 +972,21 @@ async function registrarDispensa(req, res) {
         if (!obra_id) return res.status(400).json({ error: 'Obra obrigatória.' });
         if (!b.motivo_codigo && !b.motivo_texto) return res.status(400).json({ error: 'Informe um motivo.' });
 
+        // A dispensa também pode ser retroativa: se ninguém informou a chuva no
+        // dia, o operador precisa poder regularizar depois — senão o dia fica
+        // cobrado para sempre. Mesma janela do anexo retroativo de foto.
+        const hoje = hojeRef();
+        if (data_ref > hoje) return res.status(400).json({ error: 'Data no futuro.', campo: 'data_ref' });
+        if (data_ref < hoje) {
+            const regra = await resolveRegraObra(db, obra_id);
+            if (diasEntre(data_ref, hoje) > regra.retroativo_max_dias) {
+                return res.status(400).json({
+                    error: `Só é possível dispensar os últimos ${regra.retroativo_max_dias} dias.`,
+                    campo: 'data_ref',
+                });
+            }
+        }
+
         const origem = (req.user?.role || req.user?.user_type) === 'operador' ? 'operador' : 'gestor';
         const id = randomUUID();
         await db.query(
