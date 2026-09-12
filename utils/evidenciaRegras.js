@@ -54,7 +54,12 @@ const HORARIOS_PADRAO = {
     foto_tarde:       '15:30',
     horimetro_fim:    '18:00',
 };
-const DIAS_SEMANA_PADRAO = [1, 2, 3, 4, 5, 6]; // 0 = domingo
+// 0 = domingo. Fase 10: sábado saiu do padrão — fim de semana não é exibido como
+// solicitação (mas continua podendo ser preenchido se o equipamento trabalhou).
+// Obra que trabalha sábado liga o dia 6 na config, na aba Configurações.
+const DIAS_SEMANA_PADRAO = [1, 2, 3, 4, 5];
+const RETROATIVO_MAX_DIAS_PADRAO = 14;
+const HISTORICO_DIAS_PADRAO = 14;
 
 const parseJsonCol = (v, fallback) => {
     if (v == null) return fallback;
@@ -78,7 +83,68 @@ async function resolveRegraObra(db, obraId) {
         exigir_gps:        row ? row.exigir_gps !== 0 : true,
         permitir_galeria:  row ? row.permitir_galeria === 1 : false,
         ativa:             row ? row.ativa !== 0 : true,
+        // Fase 10 — anexo retroativo e janela do histórico.
+        retroativo_max_dias:  row?.retroativo_max_dias != null ? Number(row.retroativo_max_dias) : RETROATIVO_MAX_DIAS_PADRAO,
+        retroativo_horimetro: row?.retroativo_horimetro != null ? row.retroativo_horimetro !== 0 : true,
+        historico_dias:       row?.historico_dias != null ? Number(row.historico_dias) : HISTORICO_DIAS_PADRAO,
     };
+}
+
+// ---- Dia de solicitação (Fase 10) ----------------------------------------------
+// Fim de semana e feriado não são exibidos como solicitação nem cobrados, mas o
+// envio continua liberado (o equipamento pode ter trabalhado).
+//
+// O 'T12:00:00' é OBRIGATÓRIO: new Date('2026-09-11') parseia como UTC meia-noite
+// e cai no dia anterior em BRT — errar isso desloca todo o calendário em um dia,
+// silenciosamente. Mesmo cuidado documentado em businessDays.js:7-9.
+const diaDaSemana = (ymd) => new Date(`${ymd}T12:00:00`).getDay();
+
+const diaSolicitado = (ymd, regra, feriadoSet = null) => {
+    const dias = (regra && regra.dias_semana) || DIAS_SEMANA_PADRAO;
+    if (!dias.includes(diaDaSemana(ymd))) return false;
+    return !(feriadoSet && feriadoSet.has(ymd));
+};
+
+const somarDias = (ymd, n) => {
+    const d = new Date(`${ymd}T12:00:00`);
+    d.setDate(d.getDate() + n);
+    return d.toLocaleDateString('en-CA');
+};
+
+// Quantos dias solicitados existem em [de, ate). Semanas inteiras por aritmética
+// + resto de no máximo 6 dias — nunca um laço dia a dia sobre meses inteiros.
+// Feriados são descontados só dentro da janela (o Set é pequeno e local).
+function contarDiasSolicitados(de, ate, diasSemana, feriadoSet = null) {
+    if (de >= ate) return 0;
+    const ini = new Date(`${de}T12:00:00`);
+    const fim = new Date(`${ate}T12:00:00`);
+    const totalDias = Math.round((fim - ini) / 86400000);
+    const semanas = Math.floor(totalDias / 7);
+    let n = semanas * diasSemana.length;
+    for (let i = semanas * 7; i < totalDias; i++) {
+        const d = new Date(ini); d.setDate(d.getDate() + i);
+        if (diasSemana.includes(d.getDay())) n++;
+    }
+    if (feriadoSet && feriadoSet.size) {
+        for (const f of feriadoSet) {
+            if (f >= de && f < ate && diasSemana.includes(diaDaSemana(f))) n--;
+        }
+    }
+    return n;
+}
+
+// Devolve o k-ésimo (0-based) dia solicitado a partir de `de`, inclusive.
+function nEsimoDiaSolicitado(de, k, diasSemana, feriadoSet = null) {
+    let ymd = de;
+    let vistos = 0;
+    for (let i = 0; i < 400; i++) { // trava de segurança
+        if (diasSemana.includes(diaDaSemana(ymd)) && !(feriadoSet && feriadoSet.has(ymd))) {
+            if (vistos === k) return ymd;
+            vistos++;
+        }
+        ymd = somarDias(ymd, 1);
+    }
+    return null;
 }
 
 // ---- Haversine (metros) --------------------------------------------------------
@@ -134,6 +200,8 @@ module.exports = {
     EVIDENCIAS_ROOT, SUBDIRS, garantirDirs, resolverCaminho, relativizar,
     exigeEvidencia,
     RAIO_CERCA_PADRAO_M, MOMENTOS_PADRAO, HORARIOS_PADRAO, DIAS_SEMANA_PADRAO,
+    RETROATIVO_MAX_DIAS_PADRAO, HISTORICO_DIAS_PADRAO,
     resolveRegraObra, haversineM,
+    diaDaSemana, diaSolicitado, somarDias, contarDiasSolicitados, nEsimoDiaSolicitado,
     VARIANTES, assinarVariante, assinarTodas, verificarAssinatura,
 };

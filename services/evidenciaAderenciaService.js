@@ -8,7 +8,10 @@
 // -----------------------------------------------------------------------------
 const db = require('../database');
 const { randomUUID } = require('crypto');
-const { resolveRegraObra, exigeEvidencia } = require('../utils/evidenciaRegras');
+const { resolveRegraObra, exigeEvidencia, diaSolicitado } = require('../utils/evidenciaRegras');
+const { loadHolidaySet } = require('../utils/businessDays');
+const rotinaSvc = require('./evidenciaRotinaService');
+const { TIPOS_ROTINA } = require('../utils/evidenciaRotinas');
 
 const TODOS_MOMENTOS = ['horimetro_inicio', 'foto_manha', 'foto_tarde', 'horimetro_fim'];
 const MOMENTO_COL = {
@@ -29,13 +32,25 @@ function momentosDoPeriodo(periodo) {
 async function veiculosAlocados() {
     const [rows] = await db.query(
         `SELECT DISTINCT v.id, v.tipo, v.placa, v.registroInterno, v.modelo,
-                h.obraId AS obra_id, h.employeeId AS employee_id, o.nome AS obra_nome
+                h.obraId AS obra_id, h.employeeId AS employee_id,
+                o.nome AS obra_nome, o.regiao
            FROM obras_historico_veiculos h
            JOIN vehicles v ON v.id = h.veiculoId
            LEFT JOIN obras o ON o.id = h.obraId
           WHERE h.dataSaida IS NULL`
     );
     return rows.filter(v => exigeEvidencia(v.tipo));
+}
+
+// Cache de feriados por região dentro de uma consolidação (o próprio
+// businessDays já tem TTL de 5 min; isto evita o round-trip repetido).
+async function _feriadosPorRegiao(cache, regiao) {
+    const chave = regiao || '';
+    if (!(chave in cache)) {
+        try { cache[chave] = await loadHolidaySet(db, { regiao: regiao || null }); }
+        catch { cache[chave] = new Set(); }
+    }
+    return cache[chave];
 }
 
 async function dispensasDoDia(dataRef) {
@@ -60,10 +75,14 @@ async function registrosDoDia(dataRef) {
 async function consolidarDia(dataRef) {
     const [veics, disp, enviados] = await Promise.all([veiculosAlocados(), dispensasDoDia(dataRef), registrosDoDia(dataRef)]);
     const regraCache = {};
+    const feriadoCache = {};
     let n = 0;
     for (const v of veics) {
         if (!regraCache[v.obra_id]) regraCache[v.obra_id] = await resolveRegraObra(db, v.obra_id);
-        const exigidosBase = (regraCache[v.obra_id].momentos_exigidos || TODOS_MOMENTOS).filter(m => TODOS_MOMENTOS.includes(m));
+        const regra = regraCache[v.obra_id];
+        const feriadoSet = await _feriadosPorRegiao(feriadoCache, v.regiao);
+        const solicitado = diaSolicitado(dataRef, regra, feriadoSet);
+        const exigidosBase = (regra.momentos_exigidos || TODOS_MOMENTOS).filter(m => TODOS_MOMENTOS.includes(m));
 
         const dispSet = new Set();
         disp.filter(d => d.obra_id === v.obra_id && (d.veiculo_id === v.id || d.veiculo_id == null))
@@ -73,26 +92,40 @@ async function consolidarDia(dataRef) {
         const flags = { tem_horimetro_inicio: 0, tem_foto_manha: 0, tem_foto_tarde: 0, tem_horimetro_fim: 0 };
         for (const m of TODOS_MOMENTOS) if (presentes.has(m)) flags[MOMENTO_COL[m]] = 1;
 
-        const exigidas = exigidosBase.filter(m => !dispSet.has(m));
-        const cumpridas = exigidas.filter(m => presentes.has(m)).length;
-        const dispensadas = exigidosBase.filter(m => dispSet.has(m)).length;
-        const completo = exigidas.length > 0 && cumpridas >= exigidas.length ? 1 : (exigidas.length === 0 ? 1 : 0);
+        // Sábado/domingo/feriado: nada é EXIGIDO, mas o que o equipamento
+        // eventualmente enviou continua contado e visível no painel. Não basta
+        // pular a linha — o dia trabalhado no fim de semana tem que aparecer.
+        const exigidas = solicitado ? exigidosBase.filter(m => !dispSet.has(m)) : [];
+        const cumpridas = solicitado
+            ? exigidas.filter(m => presentes.has(m)).length
+            : exigidosBase.filter(m => presentes.has(m)).length;
+        const dispensadas = solicitado ? exigidosBase.filter(m => dispSet.has(m)).length : 0;
+        const completo = exigidas.length === 0 ? 1 : (cumpridas >= exigidas.length ? 1 : 0);
+
+        // Rotinas contam À PARTE. Entrar em exigidas/cumpridas derrubaria a
+        // métrica 4/4 de toda a frota no deploy e quebraria o corte do WhatsApp.
+        let rot = { exigidas: 0, cumpridas: 0 };
+        try { rot = await rotinaSvc.contarDoDia(db, v.id, dataRef); } catch { /* */ }
 
         await db.query(
             `INSERT INTO evidencia_aderencia_dia
                (id, obra_id, veiculo_id, employee_id, data_ref,
                 tem_horimetro_inicio, tem_horimetro_fim, tem_foto_manha, tem_foto_tarde,
-                exigidas, cumpridas, dispensadas, completo)
-             VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?)
+                exigidas, cumpridas, dispensadas, completo,
+                dia_solicitado, rotinas_exigidas, rotinas_cumpridas)
+             VALUES (?,?,?,?,?, ?,?,?,?, ?,?,?,?, ?,?,?)
              ON DUPLICATE KEY UPDATE
                obra_id=VALUES(obra_id), employee_id=VALUES(employee_id),
                tem_horimetro_inicio=VALUES(tem_horimetro_inicio), tem_horimetro_fim=VALUES(tem_horimetro_fim),
                tem_foto_manha=VALUES(tem_foto_manha), tem_foto_tarde=VALUES(tem_foto_tarde),
                exigidas=VALUES(exigidas), cumpridas=VALUES(cumpridas),
-               dispensadas=VALUES(dispensadas), completo=VALUES(completo)`,
+               dispensadas=VALUES(dispensadas), completo=VALUES(completo),
+               dia_solicitado=VALUES(dia_solicitado),
+               rotinas_exigidas=VALUES(rotinas_exigidas), rotinas_cumpridas=VALUES(rotinas_cumpridas)`,
             [randomUUID(), v.obra_id, v.id, v.employee_id, dataRef,
              flags.tem_horimetro_inicio, flags.tem_horimetro_fim, flags.tem_foto_manha, flags.tem_foto_tarde,
-             exigidas.length, cumpridas, dispensadas, completo]
+             exigidas.length, cumpridas, dispensadas, completo,
+             solicitado ? 1 : 0, rot.exigidas, rot.cumpridas]
         );
         n++;
     }
@@ -104,10 +137,15 @@ async function consolidarDia(dataRef) {
 async function projetarCobrancas(dataRef) {
     const [veics, disp, enviados] = await Promise.all([veiculosAlocados(), dispensasDoDia(dataRef), registrosDoDia(dataRef)]);
     const regraCache = {};
+    const feriadoCache = {};
     let criadas = 0;
     for (const v of veics) {
         if (!regraCache[v.obra_id]) regraCache[v.obra_id] = await resolveRegraObra(db, v.obra_id);
         const regra = regraCache[v.obra_id];
+        // Fim de semana e feriado não geram cobrança. O envio continua liberado.
+        const feriadoSet = await _feriadosPorRegiao(feriadoCache, v.regiao);
+        if (!diaSolicitado(dataRef, regra, feriadoSet)) continue;
+
         const exigidosBase = (regra.momentos_exigidos || TODOS_MOMENTOS).filter(m => TODOS_MOMENTOS.includes(m));
 
         const dispSet = new Set();
@@ -116,6 +154,22 @@ async function projetarCobrancas(dataRef) {
 
         const presentes = enviados[v.id] || new Set();
         const faltantes = exigidosBase.filter(m => !presentes.has(m) && !dispSet.has(m));
+
+        // Rotinas semanais abertas (inclusive arrastadas de dias anteriores) entram
+        // na MESMA fila de aprovação manual — elas não contam na aderência 4/4, mas
+        // o gestor precisa conseguir cobrá-las.
+        if (!dispSet.size) {
+            try {
+                const [abertas] = await db.query(
+                    `SELECT tipo FROM evidencia_rotina_agenda
+                      WHERE veiculo_id = ? AND status = 'PENDENTE' AND data_prevista <= ?`,
+                    [v.id, dataRef]);
+                for (const a of abertas) {
+                    if (TIPOS_ROTINA.includes(a.tipo) && !presentes.has(a.tipo)) faltantes.push(a.tipo);
+                }
+            } catch { /* tabela ainda não criada */ }
+        }
+
         if (!faltantes.length) continue;
 
         // operador (user) do veículo, para o push manual.

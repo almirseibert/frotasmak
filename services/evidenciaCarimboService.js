@@ -1,18 +1,27 @@
 // backend/services/evidenciaCarimboService.js
 // -----------------------------------------------------------------------------
-// Render do carimbo — Evidências de Campo, Fase 2 (§5).
+// Render do carimbo — Evidências de Campo, Fase 2 (§5) + Fase 10.
 // NÃO-DESTRUTIVO: o original nunca é tocado. As variantes são geradas sob demanda
 // e cacheadas por stamp_version em cache/<registroId>/<variante>_v<versao>.jpg.
 //   thumb   (400px)  — gerada na hora do ingest e a cada edição de carimbo
 //   stamped (1600px) — preguiçosa, com mapa de promessas em voo (§5.1)
 //   clean            — original só com .rotate(), EXIF removido (§5.5)
-// A fonte no carimbo é DejaVu (mono na tarja), instalada no contêiner via
+// A fonte no carimbo é DejaVu (mono na 1ª linha), instalada no contêiner via
 // fontconfig+ttf-dejavu (§5.6) — provado na Fase 0.
+//
+// Fase 10: o carimbo perdeu a tarja (retângulo escuro + barra marrom lateral).
+// O texto agora é branco com CONTORNO PRETO, legível sobre qualquer fundo.
 // -----------------------------------------------------------------------------
 const path = require('path');
 const fs = require('fs');
 const sharp = require('sharp');
 const { SUBDIRS, resolverCaminho, relativizar } = require('../utils/evidenciaRegras');
+
+// Revisão do DESENHO do carimbo. Incrementar sempre que montarSvgTexto mudar:
+// entra no nome do arquivo em cache e força o re-render das variantes 'stamped'
+// já geradas. NÃO usar stamp_version para isso — ela entra no HMAC das URLs
+// (evidenciaRegras.js:104-106) e bumpá-la invalidaria toda URL assinada em voo.
+const STAMP_RENDER_REV = 2;
 
 const emVoo = new Map(); // chave absoluta -> Promise, para não renderizar 2x
 
@@ -20,40 +29,70 @@ const escaparXml = (s) => String(s ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
+// Só 'stamped' carrega a revisão de render: thumb e clean não mudaram de desenho,
+// e a thumb em cache é a ÚLTIMA CÓPIA DE PIXELS de um registro arquivado
+// (evidenciaOffloadService.purgarVariantes preserva thumb* de propósito).
 const caminhoVariante = (registroId, variante, versao) =>
-    path.join(SUBDIRS.cache, String(registroId), `${variante}_v${versao}.jpg`);
+    path.join(SUBDIRS.cache, String(registroId),
+        variante === 'stamped'
+            ? `stamped_v${versao}_r${STAMP_RENDER_REV}.jpg`
+            : `${variante}_v${versao}.jpg`);
 
-// ---- Faixa SVG do carimbo ------------------------------------------------------
+// ---- Texto do carimbo (sem tarja) ----------------------------------------------
 // `linhas` é um array de strings já resolvidas (valores efetivos COALESCE(ov,dev)).
-function montarSvgFaixa(width, height, linhas) {
-    const faixa = Math.round(height * 0.22);
-    const y0 = height - faixa;
-    // Tamanho por ALTURA (cabe as N linhas na tarja)...
-    const fsAltura = Math.max(14, Math.round(faixa / (linhas.length + 1.5)));
+//
+// Cada linha é desenhada DUAS VEZES: uma cópia preta preenchida e contornada por
+// baixo, a branca por cima. Poderia ser uma passada só com paint-order="stroke
+// fill" (SVG 2), mas se o librsvg do contêiner ignorasse a propriedade o stroke
+// pintaria SOBRE o fill e o texto viraria um borrão preto ilegível — falha
+// silenciosa que só apareceria numa foto já entregue ao cliente. A dupla passada
+// usa só primitivas SVG 1.1.
+const ENTRELINHA = 1.35;  // bold + contorno precisa de mais respiro que texto fino
+const PAD_RODAPE = 1.0;   // em múltiplos de fs0 — inclui folga p/ os descendentes
+
+function montarSvgTexto(width, height, linhas) {
+    const area = Math.round(height * 0.22);   // mesma região de layout de antes
+    // Tamanho por ALTURA: as N linhas mais o respiro do rodapé cabem na área.
+    const fsAltura = Math.max(14, Math.floor(area / (linhas.length * ENTRELINHA + PAD_RODAPE)));
     // ...e por LARGURA (a linha mais longa não pode transbordar). Avanço médio de
     // ~0.62em cobre o mono da 1ª linha e o proporcional das demais.
     const padX = Math.round(fsAltura * 0.8);
     const maisLonga = Math.max(1, ...linhas.map(l => String(l).length));
     const fsLargura = Math.floor((width - padX * 2) / (maisLonga * 0.62));
     const fs0 = Math.max(12, Math.min(fsAltura, fsLargura));
-    const linhasSvg = linhas.map((txt, i) => {
-        const y = y0 + Math.round(fs0 * (i + 1.15));
+    const sw = Math.max(2, Math.round(fs0 * 0.14)); // espessura do contorno
+    // Ancora pelo RODAPÉ e empilha para cima: sem a tarja, o que precisa ficar
+    // estável é a distância até a borda de baixo, não o topo do bloco.
+    const yUltima = height - Math.round(fs0 * PAD_RODAPE);
+
+    const corpo = linhas.map((txt, i) => {
+        const y = yUltima - Math.round((linhas.length - 1 - i) * fs0 * ENTRELINHA);
         const fonte = i === 0 ? 'DejaVu Sans Mono' : 'DejaVu Sans';
-        const cor = i === linhas.length - 1 ? '#e9d9bf' : '#ffffff';
-        return `<text x="${padX}" y="${y}" font-family="${fonte}" font-size="${fs0}" font-weight="${i === 0 ? 'bold' : 'normal'}" fill="${cor}">${escaparXml(txt)}</text>`;
+        const t = escaparXml(txt);
+        // bold em TODAS as linhas: glifo fino não sustenta contorno.
+        const comuns = `x="${padX}" y="${y}" font-family="${fonte}" font-size="${fs0}"`
+            + ` font-weight="bold" xml:space="preserve"`;
+        return `<text ${comuns} fill="#000000" stroke="#000000" stroke-width="${sw}"`
+            + ` stroke-linejoin="round" stroke-linecap="round">${t}</text>`
+            + `<text ${comuns} fill="#ffffff">${t}</text>`;
     }).join('');
+
     return Buffer.from(
-        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
-           <rect x="0" y="${y0}" width="${width}" height="${faixa}" fill="rgba(28,26,23,0.80)"/>
-           <rect x="0" y="${y0}" width="${Math.max(6, Math.round(width * 0.008))}" height="${faixa}" fill="#9E7A42"/>
-           ${linhasSvg}
-         </svg>`
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">${corpo}</svg>`
     );
 }
 
 // Monta as linhas do carimbo a partir dos valores efetivos do registro + regra.
 // `campos` (config nos 3 níveis) pode ocultar linhas; coordenada é SEMPRE impressa.
-function montarLinhas(dados, campos = {}) {
+// `reduzido` (anexo retroativo, Fase 10): só a imagem e o aviso de que a foto foi
+// alocada depois. Precisa de um branch próprio justamente porque a coordenada é
+// incondicional abaixo — sem ele sairia "?, ?".
+function montarLinhas(dados, campos = {}, { reduzido = false } = {}) {
+    if (reduzido) {
+        const linhas = [`Anexada posteriormente · referente a ${dados.dataRefBr || '-'}`];
+        if (dados.codigo) linhas.push(dados.codigo);
+        return linhas;
+    }
     const mostra = (chave) => campos[chave] !== false; // default: mostra tudo
     const linhas = [];
     // Linha 1 (mono, negrito): data/hora + fuso
@@ -78,14 +117,14 @@ function montarLinhas(dados, campos = {}) {
     return linhas.slice(0, 6);
 }
 
-async function _renderStamped(origAbs, destAbs, dados, campos) {
+async function _renderStamped(origAbs, destAbs, dados, campos, opts = {}) {
     const img = sharp(origAbs).rotate(); // aplica EXIF orientation (§5.5)
     const meta = await img.metadata();
     const largura = Math.min(meta.width || 1600, 1600);
     const base = await img.resize({ width: largura, withoutEnlargement: true }).toBuffer();
     const b = sharp(base);
     const m2 = await b.metadata();
-    const svg = montarSvgFaixa(m2.width, m2.height, montarLinhas(dados, campos));
+    const svg = montarSvgTexto(m2.width, m2.height, montarLinhas(dados, campos, opts));
     fs.mkdirSync(path.dirname(destAbs), { recursive: true });
     await sharp(base)
         .composite([{ input: svg, top: 0, left: 0 }])
@@ -109,7 +148,6 @@ async function _renderThumb(origAbs, destAbs) {
 }
 
 // Gera (se preciso) e devolve o caminho ABSOLUTO da variante pedida.
-// `carregarDados(id)` é uma função que devolve { origRel, versao, dados, campos }.
 async function obterVariante(registro, variante) {
     const { id, arquivo_rel, stamp_version } = registro;
     const versao = stamp_version || 1;
@@ -128,7 +166,9 @@ async function obterVariante(registro, variante) {
         if (variante === 'thumb') return _renderThumb(origAbs, destAbs);
         // Carimbo removido pelo admin (§5.2): a variante 'stamped' vira limpa.
         if (registro.stamp_mode === 'limpo') return _renderClean(origAbs, destAbs);
-        return _renderStamped(origAbs, destAbs, registro._dados || {}, registro._campos || {});
+        // Anexo retroativo (Fase 10): carimbo reduzido, sem GPS nem dados de campo.
+        const reduzido = registro.stamp_mode === 'reduzido';
+        return _renderStamped(origAbs, destAbs, registro._dados || {}, registro._campos || {}, { reduzido });
     })().finally(() => emVoo.delete(destAbs));
 
     emVoo.set(destAbs, p);
@@ -150,7 +190,28 @@ function limparCache(registroId) {
     try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
+// Varre o cache apagando variantes 'stamped' de revisões de render antigas.
+// NUNCA toca em thumb*/clean*: para um registro arquivado a thumb é a última
+// cópia de pixels no servidor (purgarVariantes preserva). Idempotente.
+function varrerStampedAntigos() {
+    let apagados = 0;
+    let dirs = [];
+    try { dirs = fs.readdirSync(SUBDIRS.cache); } catch { return { apagados: 0 }; }
+    for (const dir of dirs) {
+        const abs = path.join(SUBDIRS.cache, dir);
+        let arquivos = [];
+        try { arquivos = fs.readdirSync(abs); } catch { continue; }
+        for (const f of arquivos) {
+            if (!f.startsWith('stamped_')) continue;               // nunca thumb/clean
+            if (f.endsWith(`_r${STAMP_RENDER_REV}.jpg`)) continue; // já é da revisão atual
+            try { fs.unlinkSync(path.join(abs, f)); apagados++; } catch { /* */ }
+        }
+    }
+    return { apagados };
+}
+
 module.exports = {
     obterVariante, gerarThumbIngest, limparCache, caminhoVariante,
-    montarLinhas, // exportado para o dossiê/preview reutilizar
+    montarLinhas, montarSvgTexto, // exportados para o dossiê/preview reutilizarem
+    varrerStampedAntigos, STAMP_RENDER_REV,
 };

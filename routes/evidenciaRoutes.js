@@ -48,8 +48,12 @@ const uploadRestore = multer({
 router.post('/', requireApp, upload.single('foto'), ctrl.ingest);
 router.get('/meu-escopo', requireApp, ctrl.meuEscopo);
 router.get('/minhas', requireApp, ctrl.minhas);
+// Faixa de dias do equipamento (valida o escopo do operador lá dentro).
+router.get('/historico', requireApp, ctrl.historico);
 router.get('/motivos-dispensa', requireApp, ctrl.motivosDispensa);
 router.post('/dispensa', requireApp, ctrl.registrarDispensa);
+// Aviso de divergência de escopo (equipamento faltando/sobrando, operador errado).
+router.post('/divergencia', requireApp, ctrl.divergencia);
 
 // ---- Gestor: consolidação, aderência, cobrança manual, config ----
 // (declaradas ANTES de '/:id' para não serem capturadas pela rota paramétrica)
@@ -61,6 +65,15 @@ router.post('/cobrancas/:id/aprovar', requireGestor, ctrl.cobrancaAprovar);
 router.put('/cobrancas/:id/ignorar', requireGestor, ctrl.cobrancaIgnorar);
 router.get('/config/:obraId', requireGestor, ctrl.getConfig);
 router.put('/config/:obraId', requireGestor, ctrl.putConfig);
+// Rotinas semanais: config em 3 níveis + prévia do calendário determinístico.
+router.get('/rotinas/config', requireGestor, ctrl.rotinasConfig);
+router.put('/rotinas/config', requireGestor, ctrl.rotinasConfig);
+router.get('/rotinas/preview', requireGestor, ctrl.rotinasPreview);
+// Campos do carimbo: leitura para qualquer gestor, escrita só para quem edita
+// carimbo — mesmo split de corte/config (linhas 66-67).
+router.get('/carimbo/config', requireGestor, ctrl.carimboConfig);
+router.put('/carimbo/config', requireEditorCarimbo, ctrl.carimboConfig);
+router.get('/carimbo/preview', requireGestor, ctrl.carimboPreview);
 router.post('/dossie', requireGestor, ctrl.dossie);
 // Corte do WhatsApp (Fase 9) — parâmetro, prontidão e resumo manual.
 router.get('/corte/config', requireGestor, ctrl.corteConfig);

@@ -1858,7 +1858,10 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
 // IDs de referência são VARCHAR(255) (users/obras/vehicles/employees);
 // PKs novas VARCHAR(36) (crypto.randomUUID()).
 // ====================================================================
-(async () => {
+// A promise é exportada para a migração da Fase 10 AGUARDAR esta: as duas são
+// IIFEs disparadas no load e, sem o encadeamento, corriam em paralelo — a Fase 10
+// tentava ALTER numa tabela que a Fase 2 ainda não tinha criado.
+const migracaoEvidenciasFase2 = (async () => {
     try {
         await db.query(`
             CREATE TABLE IF NOT EXISTS evidencia_registro (
@@ -2092,6 +2095,144 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
         console.log('✅ Migração Evidências de Campo concluída (10 tabelas).');
     } catch (e) {
         console.warn('⚠️ [migration] evidencias:', e.message);
+    }
+})();
+
+// ====================================================================
+// 📸 Evidências de Campo — Fase 10: rotinas semanais, anexo retroativo,
+// dias da semana efetivos e canal de divergência.
+// ====================================================================
+(async () => {
+    // Sem este await a Fase 10 corre junto com a Fase 2 e altera tabelas que
+    // ainda não existem — a primeira falha aborta todo o resto do bloco.
+    await migracaoEvidenciasFase2;
+    // Cada DDL isolado: uma falha não pode pular as migrações seguintes.
+    const passo = async (rotulo, fn) => {
+        try { await fn(); } catch (e) { console.warn(`⚠️ [migration evid10] ${rotulo}:`, e.message); }
+    };
+    try {
+        // ---- Novos momentos. O prefixo rotina_ permite excluí-los das contagens
+        // de aderência com um único teste, sem manter lista paralela de tipos.
+        await passo('enum tipo registro', () => db.query(`
+            ALTER TABLE evidencia_registro MODIFY COLUMN tipo
+            ENUM('horimetro_inicio','horimetro_fim','foto_manha','foto_tarde','extra',
+                 'rotina_filtro','rotina_graxa') NOT NULL`));
+        await passo('enum tipo cobranca', () => db.query(`
+            ALTER TABLE evidencia_cobranca_fila MODIFY COLUMN tipo
+            ENUM('horimetro_inicio','horimetro_fim','foto_manha','foto_tarde',
+                 'rotina_filtro','rotina_graxa') NOT NULL`));
+
+        // ---- Carimbo reduzido do anexo retroativo ----
+        await passo('enum stamp_mode', () => db.query(`
+            ALTER TABLE evidencia_registro MODIFY COLUMN stamp_mode
+            ENUM('carimbado','limpo','reduzido') NOT NULL DEFAULT 'carimbado'`));
+
+        // ---- Rastro do anexo retroativo ----
+        await addColumnIfMissing(db, 'evidencia_registro', 'origem_anexo',
+            "ENUM('campo','retroativo') NOT NULL DEFAULT 'campo'", 'evid10');
+        await addColumnIfMissing(db, 'evidencia_registro', 'anexado_em',
+            'DATETIME DEFAULT NULL', 'evid10');
+        await addColumnIfMissing(db, 'evidencia_registro', 'anexado_por',
+            'VARCHAR(255) DEFAULT NULL', 'evid10');
+        await addIndexIfMissing(db, 'evidencia_registro', 'idx_evid_retro',
+            '`origem_anexo`, `data_ref`', 'evid10');
+
+        // ---- Aderência: dia solicitado + rotinas INFORMATIVAS ----
+        // As rotinas NÃO entram em exigidas/cumpridas: isso derrubaria a métrica
+        // 4/4 de toda a frota no dia do deploy e quebraria o corte do WhatsApp,
+        // calibrado em 90%. Elas são cobradas pela evidencia_cobranca_fila.
+        await addColumnIfMissing(db, 'evidencia_aderencia_dia', 'dia_solicitado',
+            'TINYINT(1) NOT NULL DEFAULT 1', 'evid10');
+        await addColumnIfMissing(db, 'evidencia_aderencia_dia', 'rotinas_exigidas',
+            'TINYINT NOT NULL DEFAULT 0', 'evid10');
+        await addColumnIfMissing(db, 'evidencia_aderencia_dia', 'rotinas_cumpridas',
+            'TINYINT NOT NULL DEFAULT 0', 'evid10');
+
+        // ---- Config da obra: retroativo + histórico ----
+        await addColumnIfMissing(db, 'evidencia_config', 'retroativo_max_dias',
+            'INT DEFAULT NULL', 'evid10');
+        await addColumnIfMissing(db, 'evidencia_config', 'retroativo_horimetro',
+            'TINYINT(1) DEFAULT NULL', 'evid10');
+        await addColumnIfMissing(db, 'evidencia_config', 'historico_dias',
+            'INT DEFAULT NULL', 'evid10');
+
+        // ---- Config das rotinas em 3 níveis (espelha evidencia_carimbo_config) ----
+        // Colunas NULL = "herda do nível acima".
+        // escopo_id é NOT NULL DEFAULT '' de propósito: em índice UNIQUE o MySQL
+        // trata cada NULL como distinto, então com NULL daria para cadastrar N
+        // linhas 'global' e o resolvedor pegaria uma qualquer.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_rotina_config (
+                id              VARCHAR(36) PRIMARY KEY,
+                escopo          ENUM('global','obra','veiculo') NOT NULL,
+                escopo_id       VARCHAR(255) NOT NULL DEFAULT '',
+                ativa           TINYINT(1) DEFAULT NULL,
+                freq_dias       INT        DEFAULT NULL,
+                defasagem_dias  INT        DEFAULT NULL,
+                carry_dias      INT        DEFAULT NULL,
+                alternar_ordem  TINYINT(1) DEFAULT NULL,
+                tipos           JSON       DEFAULT NULL,
+                updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_rotina_cfg (escopo, escopo_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        // ---- Agenda materializada das rotinas ----
+        // A data de vencimento é função PURA da config + calendário; esta tabela
+        // existe por duas razões que a função pura não cobre: carry-over (a
+        // exigência não pode evaporar se o operador não fizer no dia) e
+        // estabilidade histórica (mudar freq_dias não pode reescrever o passado).
+        // A UNIQUE é a trava de idempotência — INSERT IGNORE, nunca dedupe pela PK.
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS evidencia_rotina_agenda (
+                id            VARCHAR(36) PRIMARY KEY,
+                veiculo_id    VARCHAR(255) NOT NULL,
+                obra_id       VARCHAR(255) DEFAULT NULL,
+                tipo          ENUM('rotina_filtro','rotina_graxa') NOT NULL,
+                data_prevista DATE NOT NULL,
+                ciclo         INT DEFAULT NULL,
+                status        ENUM('PENDENTE','CUMPRIDA','DISPENSADA','EXPIRADA')
+                              NOT NULL DEFAULT 'PENDENTE',
+                registro_id   VARCHAR(36) DEFAULT NULL,
+                cumprida_em   DATETIME DEFAULT NULL,
+                gerada_em     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_rotina_agenda (veiculo_id, tipo, data_prevista),
+                KEY idx_rot_pend (veiculo_id, status, data_prevista),
+                KEY idx_rot_obra (obra_id, data_prevista, status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci
+        `);
+
+        // ---- Conserta o UNIQUE latente de evidencia_carimbo_config (mesmo motivo) ----
+        await passo('carimbo_config escopo_id', async () => {
+            await db.query(`UPDATE evidencia_carimbo_config SET escopo_id = '' WHERE escopo_id IS NULL`);
+            await db.query(`ALTER TABLE evidencia_carimbo_config
+                            MODIFY COLUMN escopo_id VARCHAR(255) NOT NULL DEFAULT ''`);
+        });
+
+        console.log('✅ Migração Evidências Fase 10 concluída.');
+    } catch (e) {
+        console.warn('⚠️ [migration] evidencias fase10:', e.message);
+    }
+})();
+
+// Varredura única do cache de carimbo após uma mudança no DESENHO (Fase 10:
+// saíram a tarja escura e a barra marrom). Só apaga variantes 'stamped' de
+// revisões antigas — NUNCA thumb*, que para um registro arquivado é a última
+// cópia de pixels no servidor (evidenciaOffloadService.purgarVariantes preserva).
+(async () => {
+    try {
+        const carimboSvc = require('./services/evidenciaCarimboService');
+        const rev = String(carimboSvc.STAMP_RENDER_REV);
+        const [[row]] = await db.query(
+            "SELECT value FROM system_settings WHERE `key` = 'evid_stamp_rev_swept' LIMIT 1");
+        if (row?.value === rev) return;
+        const { apagados } = carimboSvc.varrerStampedAntigos();
+        await db.query(
+            "INSERT INTO system_settings (`key`, value) VALUES ('evid_stamp_rev_swept', ?)"
+            + ' ON DUPLICATE KEY UPDATE value = VALUES(value)', [rev]);
+        console.log(`✅ Cache de carimbo varrido p/ revisão ${rev} (${apagados} arquivos).`);
+    } catch (e) {
+        console.warn('⚠️ [evidencias] varredura do cache de carimbo:', e.message);
     }
 })();
 

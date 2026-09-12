@@ -14,6 +14,7 @@ const { randomUUID } = require('crypto');
 // require()-á-lo. Carregamos via import() dinâmico dentro de gerarLote (lazy).
 const { SUBDIRS, resolverCaminho, relativizar, garantirDirs } = require('../utils/evidenciaRegras');
 const carimbo = require('./evidenciaCarimboService');
+const carimboCfg = require('./evidenciaCarimboConfigService');
 
 const CAP_ARQUIVOS = 5000;
 const CAP_BYTES = 2 * 1024 * 1024 * 1024; // 2 GB
@@ -25,7 +26,11 @@ const slug = (s) => String(s || '')
 // Dados efetivos p/ o carimbo (compacto — evita depender do controller).
 function buildDados(r) {
     const cap = r.ov_capturado_em || r.dev_capturado_em;
-    const MOMENTO = { horimetro_inicio: 'Início do expediente', horimetro_fim: 'Fim do expediente', foto_manha: 'Trabalho (manhã)', foto_tarde: 'Trabalho (tarde)', extra: 'Extra' };
+    const MOMENTO = {
+        horimetro_inicio: 'Início do expediente', horimetro_fim: 'Fim do expediente',
+        foto_manha: 'Trabalho (manhã)', foto_tarde: 'Trabalho (tarde)', extra: 'Extra',
+        rotina_filtro: 'Limpeza de filtro', rotina_graxa: 'Engraxamento',
+    };
     let leitura = null;
     if (r.horimetro != null) leitura = `Horímetro ${Number(r.horimetro).toLocaleString('pt-BR')} h`;
     else if (r.odometro != null) leitura = `Odômetro ${Number(r.odometro).toLocaleString('pt-BR')} km`;
@@ -40,6 +45,11 @@ function buildDados(r) {
         leitura,
         codigo: `EV-${String(r.id).slice(0, 8).toUpperCase()}`,
         momentoLabel: MOMENTO[r.tipo] || null,
+        linha_livre: r.ov_linha_extra || r.observacao || null,
+        // Sem isto o carimbo REDUZIDO de um anexo retroativo sairia no ZIP como
+        // "Anexada posteriormente · referente a -".
+        retroativo: r.origem_anexo === 'retroativo',
+        dataRefBr: r.data_ref ? String(r.data_ref).slice(0, 10).split('-').reverse().join('/') : '',
     };
 }
 
@@ -97,7 +107,9 @@ async function gerarLote(obraId, { de, ate, geradoPor } = {}) {
             for (const r of regs) {
                 idx++;
                 r._equip_label = [r._reg, r._placa].filter(Boolean).join(' · ') || r.modelo || null;
-                r._dados = buildDados(r); r._campos = {};
+                r._dados = buildDados(r);
+                try { r._campos = await carimboCfg.resolveCampos(db, r.obra_id, r.veiculo_id); }
+                catch { r._campos = {}; }
                 const mes = String(r.data_ref).slice(0, 7);
                 const hash8 = String(r.sha256 || '').slice(0, 8);
                 const nome = `${String(r.data_ref).slice(0, 10)}_${slug(r._reg)}_${slug(r._placa)}_${r.tipo}_${String(idx).padStart(3, '0')}_${hash8}.jpg`;
@@ -114,6 +126,9 @@ async function gerarLote(obraId, { de, ate, geradoPor } = {}) {
                     dev: { capturado_em: r.dev_capturado_em, latitude: r.dev_latitude, longitude: r.dev_longitude, precisao_m: r.dev_precisao_m, operador: r.dev_operador_nome, obra: r.dev_obra_nome, equip: r.dev_equip_label },
                     ov: { capturado_em: r.ov_capturado_em, latitude: r.ov_latitude, longitude: r.ov_longitude, operador: r.ov_operador_nome, obra: r.ov_obra_nome, equip: r.ov_equip_label, linha_extra: r.ov_linha_extra },
                     stamp_version: r.stamp_version, stamp_mode: r.stamp_mode,
+                    // Proveniência: o ZIP é o artefato que sai da empresa, então
+                    // precisa dizer quais fotos foram anexadas depois do dia.
+                    origem_anexo: r.origem_anexo, anexado_em: r.anexado_em,
                     horimetro: r.horimetro, odometro: r.odometro,
                 });
                 csv.push([r.data_ref, r._equip_label, r.tipo, r._dados.operador || '', r._dados.latitude ?? '', r._dados.longitude ?? '', r.horimetro ?? '', nome].join(';'));

@@ -12,16 +12,24 @@ const { randomUUID } = require('crypto');
 const {
     SUBDIRS, resolverCaminho, relativizar, exigeEvidencia,
     resolveRegraObra, haversineM, assinarTodas, assinarVariante, verificarAssinatura,
+    diaSolicitado, somarDias,
 } = require('../utils/evidenciaRegras');
 const carimbo = require('../services/evidenciaCarimboService');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
 const { getAllowedReadingTypes } = require('../utils/vehicleRules');
 const aderenciaSvc = require('../services/evidenciaAderenciaService');
 const offloadSvc = require('../services/evidenciaOffloadService');
+const rotinaSvc = require('../services/evidenciaRotinaService');
+const carimboCfgSvc = require('../services/evidenciaCarimboConfigService');
+const { TIPOS_ROTINA, ROTINA_LABEL, projetarCalendario } = require('../utils/evidenciaRotinas');
+const { loadHolidaySet } = require('../utils/businessDays');
 let pushService = null;
 try { pushService = require('../services/pushService'); } catch { /* opcional */ }
 
-const TIPOS_VALIDOS = ['horimetro_inicio', 'horimetro_fim', 'foto_manha', 'foto_tarde', 'extra'];
+// Os 4 momentos do dia. Rotinas e 'extra' NÃO entram aqui: é este array que
+// governa a contagem de aderência (4/4) e o corte do WhatsApp.
+const MOMENTOS_DIA = ['horimetro_inicio', 'foto_manha', 'foto_tarde', 'horimetro_fim'];
+const TIPOS_VALIDOS = [...MOMENTOS_DIA, 'extra', ...TIPOS_ROTINA];
 const TIPOS_COM_LEITURA = ['horimetro_inicio', 'horimetro_fim'];
 
 const MOMENTO_LABEL = {
@@ -30,10 +38,24 @@ const MOMENTO_LABEL = {
     foto_manha: 'Trabalho (manhã)',
     foto_tarde: 'Trabalho (tarde)',
     extra: 'Extra',
+    rotina_filtro: ROTINA_LABEL.rotina_filtro,
+    rotina_graxa: ROTINA_LABEL.rotina_graxa,
 };
 
 // data_ref no fuso do contêiner (TZ=America/Sao_Paulo). 'en-CA' => YYYY-MM-DD.
 const hojeRef = () => new Date().toLocaleDateString('en-CA');
+const paraBr = (ymd) => (ymd ? String(ymd).slice(0, 10).split('-').reverse().join('/') : '');
+const diasEntre = (a, b) => Math.round((new Date(`${b}T12:00:00`) - new Date(`${a}T12:00:00`)) / 86400000);
+
+// server:sync do módulo. O ingest antes fazia req.io.emit — BROADCAST para todos
+// os sockets, inclusive os ~200 operadores, a cada foto. Agora vai só para a sala
+// 'gestores' mais a sala do próprio remetente, que é quem precisa do refresh.
+const syncEvidencias = (req) => {
+    try { global.emitSync?.(['evidencias']); } catch { /* */ }
+    try {
+        if (req?.user?.id) req.io?.to('user:' + req.user.id).emit('server:sync', { targets: ['evidencias'] });
+    } catch { /* */ }
+};
 const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v));
 const limparUpload = (f) => { try { if (f?.path && fs.existsSync(f.path)) fs.unlinkSync(f.path); } catch { /* */ } };
 
@@ -57,7 +79,11 @@ function montarDados(r) {
         leitura,
         codigo: `EV-${String(r.id).slice(0, 8).toUpperCase()}`,
         momentoLabel: MOMENTO_LABEL[r.tipo] || null,
-        linha_livre: r.ov_linha_extra || null,
+        // A observação da foto extra era gravada e nunca exibida em lugar nenhum.
+        linha_livre: r.ov_linha_extra || r.observacao || null,
+        // Anexo retroativo: o carimbo reduzido só precisa do dia de referência.
+        retroativo: r.origem_anexo === 'retroativo',
+        dataRefBr: paraBr(r.data_ref),
     };
 }
 
@@ -119,11 +145,41 @@ async function ingest(req, res) {
         const [[veic]] = await db.query('SELECT id, tipo, placa, registroInterno, modelo FROM vehicles WHERE id = ? LIMIT 1', [veiculo_id]);
         if (!veic) { limparUpload(f); return res.status(400).json({ error: 'Veículo não encontrado.' }); }
 
-        // --- Regra da obra + GPS obrigatório (§0/§5.4) ---
+        // --- Regra da obra ---
         const regra = await resolveRegraObra(db, obra_id);
-        const dev_lat = num(b.dev_latitude);
-        const dev_lng = num(b.dev_longitude);
-        if (regra.exigir_gps && (dev_lat == null || dev_lng == null)) {
+
+        // --- data_ref e modo retroativo (decisão do SERVIDOR, nunca do cliente) ---
+        const hoje = hojeRef();
+        const devCap = b.dev_capturado_em ? new Date(b.dev_capturado_em) : new Date();
+        const skewS = Math.round((Date.now() - devCap.getTime()) / 1000);
+        let data_ref = (b.data_ref || '').trim() || hoje;
+        if (data_ref > hoje) {
+            limparUpload(f);
+            return res.status(400).json({ error: 'Data de referência no futuro.', campo: 'data_ref' });
+        }
+        const retroativo = data_ref < hoje;
+        if (retroativo) {
+            const atraso = diasEntre(data_ref, hoje);
+            if (atraso > regra.retroativo_max_dias) {
+                limparUpload(f);
+                return res.status(400).json({
+                    error: `Só é possível anexar fotos dos últimos ${regra.retroativo_max_dias} dias.`,
+                    campo: 'data_ref',
+                });
+            }
+        } else if (Math.abs(skewS) > 3600) {
+            // Relógio do aparelho muito fora → o servidor manda. NUNCA aplicar no
+            // retroativo: aqui o skew é esperado (a foto é de outro dia) e isto
+            // reescreveria data_ref para hoje, matando o anexo retroativo.
+            data_ref = hoje;
+        }
+
+        // --- GPS: obrigatório no dia, PROIBIDO no retroativo ---
+        // No retroativo os campos dev_* de localização são forçados a NULL mesmo
+        // que o cliente os envie: uma foto de arquivo não tem onde foi tirada.
+        const dev_lat = retroativo ? null : num(b.dev_latitude);
+        const dev_lng = retroativo ? null : num(b.dev_longitude);
+        if (!retroativo && regra.exigir_gps && (dev_lat == null || dev_lng == null)) {
             limparUpload(f);
             return res.status(400).json({ error: 'Coordenada obrigatória: ative a localização e tente novamente.', campo: 'gps' });
         }
@@ -137,20 +193,55 @@ async function ingest(req, res) {
                 return res.status(400).json({ error: 'Leitura obrigatória neste momento.', campo: 'leitura' });
             }
             const campoLeitura = getAllowedReadingTypes(veic.tipo)[0]; // 'horimetro' | 'odometro'
-            const [[atualRow]] = await db.query(`SELECT ${campoLeitura} AS atual FROM vehicles WHERE id = ?`, [veiculo_id]);
-            const atual = Number(atualRow?.atual || 0);
-            if (leitura < atual) {
-                // Formato que os clientes já sabem tratar (regressão de leitura).
-                limparUpload(f);
-                return res.status(400).json({
-                    error: `${campoLeitura === 'horimetro' ? 'Horímetro' : 'Odômetro'} menor que o último registrado.`,
-                    campo: campoLeitura, tipo: 'regressao',
-                    valor_informado: leitura, valor_anterior: atual,
-                });
+            const rotulo = campoLeitura === 'horimetro' ? 'Horímetro' : 'Odômetro';
+
+            if (retroativo) {
+                if (!regra.retroativo_horimetro) {
+                    limparUpload(f);
+                    return res.status(400).json({ error: 'Esta obra não aceita leitura em anexo retroativo.', campo: 'leitura' });
+                }
+                // NÃO comparar com vehicles: uma leitura passada é menor por
+                // definição. A validação útil é contra os VIZINHOS no histórico de
+                // evidências — pega tanto o valor absurdo para baixo quanto o para
+                // cima, que envenenaria qualquer MAX(horimetro) do módulo.
+                const [[viz]] = await db.query(
+                    `SELECT (SELECT MAX(${campoLeitura}) FROM evidencia_registro
+                              WHERE veiculo_id = ? AND data_ref < ? AND ${campoLeitura} IS NOT NULL
+                                AND estado <> 'descartado') AS antes,
+                            (SELECT MIN(${campoLeitura}) FROM evidencia_registro
+                              WHERE veiculo_id = ? AND data_ref > ? AND ${campoLeitura} IS NOT NULL
+                                AND estado <> 'descartado') AS depois`,
+                    [veiculo_id, data_ref, veiculo_id, data_ref]
+                );
+                const antes = viz?.antes != null ? Number(viz.antes) : null;
+                const depois = viz?.depois != null ? Number(viz.depois) : null;
+                const foraDaJanela = (antes != null && leitura < antes) || (depois != null && leitura > depois);
+                if (foraDaJanela && String(b.confirmar_fora_janela) !== '1') {
+                    limparUpload(f);
+                    return res.status(400).json({
+                        error: `${rotulo} fora da janela do histórico deste equipamento.`,
+                        campo: campoLeitura, tipo: 'fora_da_janela',
+                        valor_informado: leitura, valor_anterior: antes, valor_posterior: depois,
+                    });
+                }
+                if (campoLeitura === 'horimetro') horimetro = leitura; else odometro = leitura;
+                // ⛔ Sem updateVehicleReading: a leitura atual do equipamento NÃO muda.
+            } else {
+                const [[atualRow]] = await db.query(`SELECT ${campoLeitura} AS atual FROM vehicles WHERE id = ?`, [veiculo_id]);
+                const atual = Number(atualRow?.atual || 0);
+                if (leitura < atual) {
+                    // Formato que os clientes já sabem tratar (regressão de leitura).
+                    limparUpload(f);
+                    return res.status(400).json({
+                        error: `${rotulo} menor que o último registrado.`,
+                        campo: campoLeitura, tipo: 'regressao',
+                        valor_informado: leitura, valor_anterior: atual,
+                    });
+                }
+                if (campoLeitura === 'horimetro') horimetro = leitura; else odometro = leitura;
+                // Propaga ao veículo (só sobe — a própria função garante).
+                await updateVehicleReading(db, veiculo_id, veic.tipo, leitura, campoLeitura);
             }
-            if (campoLeitura === 'horimetro') horimetro = leitura; else odometro = leitura;
-            // Propaga ao veículo (só sobe — a própria função garante).
-            await updateVehicleReading(db, veiculo_id, veic.tipo, leitura, campoLeitura);
         }
 
         // --- employee/operador ---
@@ -167,12 +258,6 @@ async function ingest(req, res) {
 
         // --- obra + distância (só para gravar dev_obra_nome; cerca é informativa) ---
         const [[obraRow]] = await db.query('SELECT nome, latitude, longitude FROM obras WHERE id = ? LIMIT 1', [obra_id]);
-
-        // --- data_ref + clock skew ---
-        const devCap = b.dev_capturado_em ? new Date(b.dev_capturado_em) : new Date();
-        const skewS = Math.round((Date.now() - devCap.getTime()) / 1000);
-        let data_ref = (b.data_ref || '').trim() || hojeRef();
-        if (Math.abs(skewS) > 3600) data_ref = hojeRef(); // relógio muito fora → servidor manda
 
         // --- grava o arquivo: inbox (multer) -> orig/<obra>/<AAAA>/<MM>/<id>.<ext> ---
         const id = randomUUID();
@@ -203,23 +288,51 @@ async function ingest(req, res) {
                 arquivo_rel, arquivo_bytes, arquivo_mime, sha256, largura_px, altura_px,
                 dev_capturado_em, dev_latitude, dev_longitude, dev_precisao_m, dev_local_texto,
                 dev_obra_nome, dev_equip_label, dev_operador_nome, dev_clock_skew_s, dev_origem,
-                horimetro, odometro, observacao, stamp_version)
-             VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?, 1)`,
+                horimetro, odometro, observacao, stamp_mode, stamp_version,
+                origem_anexo, anexado_em, anexado_por)
+             VALUES (?,?,?,?,?,?,?,?,?, ?,?,?,?,?,?, ?,?,?,?,?, ?,?,?,?,?, ?,?,?,?, 1, ?,?,?)`,
             [
                 id, client_id, obra_id, veiculo_id, employee_id, req.user?.id || null, tipo, data_ref, turno,
                 arquivo_rel, buf.length, f.mimetype, sha256, width, height,
-                devCap, dev_lat, dev_lng, num(b.dev_precisao_m), (b.dev_local_texto || '').trim() || null,
-                obraRow?.nome || null, equipLabel, operadorNome, skewS, (b.dev_origem || 'web_online'),
+                // No retroativo dev_capturado_em guarda o instante da ANEXAÇÃO: a
+                // coluna é NOT NULL e é a chave de ordenação do arquivo. Quem conta
+                // a verdade sobre a origem é origem_anexo.
+                retroativo ? new Date() : devCap,
+                dev_lat, dev_lng,
+                retroativo ? null : num(b.dev_precisao_m),
+                retroativo ? null : ((b.dev_local_texto || '').trim() || null),
+                obraRow?.nome || null, equipLabel, operadorNome,
+                retroativo ? null : skewS,
+                (b.dev_origem || 'web_online'),
                 horimetro, odometro, (b.observacao || '').trim() || null,
+                retroativo ? 'reduzido' : 'carimbado',
+                retroativo ? 'retroativo' : 'campo',
+                retroativo ? new Date() : null,
+                retroativo ? (req.user?.id || null) : null,
             ]
         );
 
         // thumb já; stamped/clean são preguiçosas
         try { await carimbo.gerarThumbIngest({ id, arquivo_rel, stamp_version: 1 }); } catch (e) { console.warn('⚠️ thumb ingest:', e.message); }
 
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        // Fecha a ocorrência aberta da rotina, se for o caso.
+        if (TIPOS_ROTINA.includes(tipo)) {
+            try { await rotinaSvc.marcarCumprida(db, { veiculoId: veiculo_id, tipo, dataRef: data_ref, registroId: id }); }
+            catch (e) { console.warn('⚠️ [evidencias] marcarCumprida:', e.message); }
+        }
 
-        return res.status(201).json({ id, sha256, data_ref, urls: assinarTodas(id, 1) });
+        // Anexo retroativo muda um dia JÁ consolidado — sem isto os números
+        // daquele dia ficam errados até alguém clicar em "Consolidar" no admin.
+        // consolidarDia é idempotente; projetarCobrancas NÃO é chamado aqui, senão
+        // criaria cobrança nova para um dia velho.
+        if (retroativo) {
+            aderenciaSvc.consolidarDia(data_ref)
+                .catch(e => console.warn('⚠️ [evidencias] reconsolidar retroativo:', e.message));
+        }
+
+        syncEvidencias(req);
+
+        return res.status(201).json({ id, sha256, data_ref, retroativo, urls: assinarTodas(id, 1) });
     } catch (err) {
         limparUpload(f);
         console.error('❌ [evidencias] ingest:', err.code, '|', err.sqlMessage || err.message);
@@ -230,54 +343,105 @@ async function ingest(req, res) {
 // =============================================================================
 // GET /api/evidencias/meu-escopo — pacote offline do operador (§3.5)
 // =============================================================================
+// Equipamentos das obras ativas do operador (mesmo escopo de
+// vehicleDocumentsController). Extraído de meuEscopo porque o endpoint de
+// histórico precisa da MESMA lista para validar acesso — sem isso um operador
+// enumeraria o histórico de qualquer veículo da frota.
+async function equipamentosDoOperador(userId) {
+    const [[u]] = await db.query('SELECT employeeId FROM users WHERE id = ? LIMIT 1', [userId]);
+    const employeeId = u?.employeeId || null;
+    if (!employeeId) return { employeeId: null, equipamentos: [] };
+
+    const [linhas] = await db.query(
+        `SELECT DISTINCT v.id, v.placa, v.registroInterno, v.modelo, v.tipo,
+                v.horimetro, v.odometro,
+                h.obraId AS obra_id, h.employeeId AS operador_id,
+                o.nome AS obra_nome, o.regiao, o.latitude, o.longitude,
+                e.nome AS operador_nome
+           FROM obras_historico_veiculos h
+           JOIN vehicles v ON v.id = h.veiculoId
+           LEFT JOIN obras o ON o.id = h.obraId
+           LEFT JOIN employees e ON e.id = h.employeeId
+          WHERE h.dataSaida IS NULL
+            AND h.obraId IN (
+                SELECT DISTINCT h2.obraId FROM obras_historico_veiculos h2
+                 WHERE h2.employeeId = ? AND h2.dataSaida IS NULL
+            )`,
+        [employeeId]
+    );
+    // Só equipamentos no escopo §2 (horímetro).
+    return { employeeId, equipamentos: linhas.filter(v => exigeEvidencia(v.tipo)) };
+}
+
 async function meuEscopo(req, res) {
     try {
-        const [[u]] = await db.query('SELECT employeeId FROM users WHERE id = ? LIMIT 1', [req.user.id]);
-        const employeeId = u?.employeeId || null;
         const data = hojeRef();
-        if (!employeeId) return res.json({ data, obras: [], equipamentos: [], hojeEnviado: {} });
+        const { employeeId, equipamentos } = await equipamentosDoOperador(req.user.id);
+        if (!employeeId) return res.json({ data, obras: [], equipamentos: [], hojeEnviado: {}, hojeContagem: {}, rotinas: {} });
 
-        // Veículos nas obras ativas do operador (mesmo escopo de vehicleDocumentsController).
-        const [linhas] = await db.query(
-            `SELECT DISTINCT v.id, v.placa, v.registroInterno, v.modelo, v.tipo,
-                    h.obraId AS obra_id, o.nome AS obra_nome, o.regiao, o.latitude, o.longitude
-               FROM obras_historico_veiculos h
-               JOIN vehicles v ON v.id = h.veiculoId
-               LEFT JOIN obras o ON o.id = h.obraId
-              WHERE h.dataSaida IS NULL
-                AND h.obraId IN (
-                    SELECT DISTINCT h2.obraId FROM obras_historico_veiculos h2
-                     WHERE h2.employeeId = ? AND h2.dataSaida IS NULL
-                )`,
-            [employeeId]
-        );
-
-        // Só equipamentos no escopo §2 (horímetro).
-        const equipamentos = linhas.filter(v => exigeEvidencia(v.tipo));
         const obraIds = [...new Set(equipamentos.map(v => v.obra_id).filter(Boolean))];
         const obras = [];
+        const regraPorObra = {};
+        const feriadosPorRegiao = {};
         for (const oid of obraIds) {
             const info = equipamentos.find(v => v.obra_id === oid);
+            const regra = await resolveRegraObra(db, oid);
+            regraPorObra[oid] = regra;
+            const regiao = info?.regiao || null;
+            if (!(regiao in feriadosPorRegiao)) {
+                try { feriadosPorRegiao[regiao] = await loadHolidaySet(db, { regiao }); }
+                catch { feriadosPorRegiao[regiao] = new Set(); }
+            }
             obras.push({
-                id: oid, nome: info?.obra_nome || null, regiao: info?.regiao || null,
+                id: oid, nome: info?.obra_nome || null, regiao,
                 latitude: info?.latitude ?? null, longitude: info?.longitude ?? null,
-                regra: await resolveRegraObra(db, oid),
+                regra,
+                solicitado_hoje: diaSolicitado(data, regra, feriadosPorRegiao[regiao]),
             });
         }
 
-        // O que já foi enviado hoje: { veiculoId: [tipos] }
+        // O que já foi enviado hoje. `hojeEnviado` (array de tipos) é mantido por
+        // compatibilidade; `hojeContagem` é o que permite N fotos extras no mesmo
+        // dia sem que o badge do equipamento fique verde com 4 extras e 0 momentos.
         const hojeEnviado = {};
+        const hojeContagem = {};
         if (equipamentos.length) {
             const ids = equipamentos.map(v => v.id);
             const [envs] = await db.query(
-                `SELECT veiculo_id, tipo FROM evidencia_registro
-                  WHERE data_ref = ? AND estado <> 'descartado' AND veiculo_id IN (${ids.map(() => '?').join(',')})`,
+                `SELECT veiculo_id, tipo, COUNT(*) AS n FROM evidencia_registro
+                  WHERE data_ref = ? AND estado <> 'descartado' AND veiculo_id IN (${ids.map(() => '?').join(',')})
+                  GROUP BY veiculo_id, tipo`,
                 [data, ...ids]
             );
-            for (const e of envs) (hojeEnviado[e.veiculo_id] = hojeEnviado[e.veiculo_id] || []).push(e.tipo);
+            for (const e of envs) {
+                (hojeEnviado[e.veiculo_id] = hojeEnviado[e.veiculo_id] || []).push(e.tipo);
+                (hojeContagem[e.veiculo_id] = hojeContagem[e.veiculo_id] || {})[e.tipo] = Number(e.n);
+            }
         }
 
-        return res.json({ data, obras, equipamentos, hojeEnviado });
+        // Rotinas semanais abertas. A materialização roda aqui porque este é o
+        // caminho que o operador percorre todo dia; em try/catch porque falhar
+        // numa rotina não pode derrubar a tela inteira (mesma postura do
+        // gerarThumbIngest). garantirAgenda é idempotente.
+        const rotinas = {};
+        for (const v of equipamentos) {
+            const regra = regraPorObra[v.obra_id];
+            if (!regra) continue;
+            try {
+                const cfg = await rotinaSvc.resolveRegraRotina(db, v.obra_id, v.id);
+                rotinas[v.id] = await rotinaSvc.garantirAgenda(db, {
+                    veiculoId: v.id, obraId: v.obra_id, dataRef: data,
+                    diasSemana: regra.dias_semana,
+                    feriadoSet: feriadosPorRegiao[v.regiao || null],
+                    cfg,
+                });
+            } catch (e) {
+                console.warn('⚠️ [evidencias] agenda de rotinas:', e.message);
+                rotinas[v.id] = [];
+            }
+        }
+
+        return res.json({ data, obras, equipamentos, hojeEnviado, hojeContagem, rotinas });
     } catch (err) {
         console.error('❌ [evidencias] meu-escopo:', err.code, '|', err.sqlMessage || err.message);
         return res.status(500).json({ error: 'Falha ao carregar escopo.' });
@@ -314,7 +478,7 @@ async function listar(req, res) {
         const [rows] = await db.query(
             `SELECT r.id, r.obra_id, r.veiculo_id, r.employee_id, r.tipo, r.turno, r.data_ref,
                     r.dev_capturado_em, r.dev_latitude, r.dev_longitude, r.horimetro, r.odometro,
-                    r.estado, r.stamp_version, r.dev_clock_skew_s,
+                    r.estado, r.stamp_version, r.dev_clock_skew_s, r.origem_anexo, r.anexado_em,
                     o.nome AS obra_nome, v.placa, v.registroInterno, e.nome AS operador_nome
                FROM evidencia_registro r
                LEFT JOIN obras o ON o.id = r.obra_id
@@ -380,7 +544,10 @@ async function servirVariante(req, res) {
         if (r.estado === 'arquivado') return res.status(410).json({ error: 'Evidência arquivada (bytes fora do servidor).' });
 
         r._dados = montarDados(r);
-        r._campos = {}; // Fase 4 traz a config de campos por nível
+        // Config de campos nos 3 níveis (global/obra/veículo). Ficou como TODO
+        // desde a Fase 2 com a tabela criada e nunca lida.
+        try { r._campos = await carimboCfgSvc.resolveCampos(db, r.obra_id, r.veiculo_id); }
+        catch { r._campos = {}; }
         const abs = await carimbo.obterVariante(r, variante);
         res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
         res.setHeader('Content-Type', 'image/jpeg');
@@ -420,6 +587,197 @@ async function minhas(req, res) {
 }
 
 // =============================================================================
+// GET /api/evidencias/historico?veiculo_id=&dias= — faixa de dias do operador
+// Teto rígido de 30 dias: é payload de celular, não passa pelo teto de 92 do
+// `listar`. Três queries na janela inteira + laço em JS — nada de N+1 por dia.
+// =============================================================================
+const HISTORICO_TETO_DIAS = 30;
+
+async function historico(req, res) {
+    try {
+        const veiculoId = (req.query.veiculo_id || '').trim();
+        if (!veiculoId) return res.status(400).json({ error: 'Equipamento obrigatório.' });
+
+        const { equipamentos } = await equipamentosDoOperador(req.user.id);
+        const equip = equipamentos.find(v => String(v.id) === veiculoId);
+        if (!equip) return res.status(403).json({ error: 'Equipamento fora do seu escopo.' });
+
+        const regra = await resolveRegraObra(db, equip.obra_id);
+        let feriadoSet = new Set();
+        try { feriadoSet = await loadHolidaySet(db, { regiao: equip.regiao || null }); } catch { /* */ }
+
+        const hoje = hojeRef();
+        const pedido = parseInt(req.query.dias || regra.historico_dias, 10);
+        const janela = Math.min(HISTORICO_TETO_DIAS, Math.max(1, isNaN(pedido) ? regra.historico_dias : pedido));
+        const desde = somarDias(hoje, -(janela - 1));
+
+        const [regs] = await db.query(
+            `SELECT data_ref, tipo, COUNT(*) AS n FROM evidencia_registro
+              WHERE veiculo_id = ? AND data_ref BETWEEN ? AND ? AND estado <> 'descartado'
+              GROUP BY data_ref, tipo`,
+            [veiculoId, desde, hoje]
+        );
+        const [disps] = await db.query(
+            `SELECT data_ref, periodo, motivo_codigo, motivo_texto FROM evidencia_dispensa
+              WHERE obra_id = ? AND (veiculo_id = ? OR veiculo_id IS NULL)
+                AND data_ref BETWEEN ? AND ? AND revogada_em IS NULL`,
+            [equip.obra_id, veiculoId, desde, hoje]
+        );
+        const [rots] = await db.query(
+            `SELECT tipo, data_prevista, status FROM evidencia_rotina_agenda
+              WHERE veiculo_id = ? AND data_prevista BETWEEN ? AND ?`,
+            [veiculoId, desde, hoje]
+        );
+
+        const porDia = {};
+        for (const r of regs) {
+            const d = String(r.data_ref).slice(0, 10);
+            (porDia[d] = porDia[d] || {})[r.tipo] = Number(r.n);
+        }
+        const dispPorDia = {};
+        for (const d of disps) dispPorDia[String(d.data_ref).slice(0, 10)] = d;
+        const rotPorDia = {};
+        for (const r of rots) {
+            const d = String(r.data_prevista).slice(0, 10);
+            (rotPorDia[d] = rotPorDia[d] || []).push({ tipo: r.tipo, status: r.status, label: ROTINA_LABEL[r.tipo] });
+        }
+
+        const exigidos = (regra.momentos_exigidos || MOMENTOS_DIA).filter(m => MOMENTOS_DIA.includes(m));
+        const dias = [];
+        for (let i = 0; i < janela; i++) {
+            const data = somarDias(desde, i);
+            const contagem = porDia[data] || {};
+            const enviados = Object.keys(contagem);
+            const solicitado = diaSolicitado(data, regra, feriadoSet);
+            const atraso = diasEntre(data, hoje);
+            const cumpridas = exigidos.filter(m => contagem[m]).length;
+            dias.push({
+                data,
+                dow: new Date(`${data}T12:00:00`).getDay(),
+                solicitado,
+                feriado: feriadoSet.has(data),
+                dispensado: !!dispPorDia[data],
+                dispensa: dispPorDia[data] || null,
+                momentos: exigidos,
+                contagem,
+                enviados,
+                extras: contagem.extra || 0,
+                rotinas: rotPorDia[data] || [],
+                exigidas: solicitado ? exigidos.length : 0,
+                cumpridas,
+                completo: solicitado ? cumpridas >= exigidos.length : true,
+                // Hoje não é "retroativo" — é o fluxo normal, com câmera e GPS.
+                retroativo_permitido: atraso > 0 && atraso <= regra.retroativo_max_dias,
+            });
+        }
+
+        // Janela de leitura para o aviso de "horímetro anterior": o front pré-valida
+        // com isto, porque um 400 depois de enfileirar vira `recusado` silencioso.
+        const campoLeitura = getAllowedReadingTypes(equip.tipo)[0];
+        const [[viz]] = await db.query(
+            `SELECT MIN(${campoLeitura}) AS minimo, MAX(${campoLeitura}) AS maximo
+               FROM evidencia_registro
+              WHERE veiculo_id = ? AND ${campoLeitura} IS NOT NULL AND estado <> 'descartado'`,
+            [veiculoId]
+        );
+
+        return res.json({
+            veiculo_id: veiculoId,
+            obra_id: equip.obra_id,
+            hoje,
+            janela_dias: janela,
+            retroativo_max_dias: regra.retroativo_max_dias,
+            retroativo_horimetro: regra.retroativo_horimetro,
+            permitir_galeria: regra.permitir_galeria,
+            campo_leitura: campoLeitura,
+            leitura_atual: equip[campoLeitura] != null ? Number(equip[campoLeitura]) : null,
+            leitura_min: viz?.minimo != null ? Number(viz.minimo) : null,
+            leitura_max: viz?.maximo != null ? Number(viz.maximo) : null,
+            dias: dias.reverse(), // mais recente primeiro
+        });
+    } catch (err) {
+        console.error('❌ [evidencias] historico:', err.code, '|', err.sqlMessage || err.message);
+        return res.status(500).json({ error: 'Falha ao carregar o histórico.' });
+    }
+}
+
+// =============================================================================
+// POST /api/evidencias/divergencia — operador avisa que o escopo está errado
+// Grava em operational_requests, que existe exatamente para "sugerir ao admin a
+// real obra/operador de um veículo" e já tem aba própria + pop-up no admin.
+// Não usa POST /api/operationalRequests porque aquela rota é montada ACIMA do
+// authMiddleware (server.js:2364 vs 2372): req.user chegaria vazio e o reporte
+// sairia sem solicitante.
+// =============================================================================
+const MOTIVO_DIVERGENCIA = {
+    faltando: 'Equipamento na obra não aparece na lista',
+    saiu: 'Equipamento já saiu da obra e continua na lista',
+    operador_errado: 'Operador do equipamento está errado',
+    outro: 'Outra divergência',
+};
+
+async function divergencia(req, res) {
+    try {
+        const b = req.body || {};
+        const motivo = MOTIVO_DIVERGENCIA[b.motivo] ? b.motivo : 'outro';
+        const obra_id = (b.obra_id || '').trim();
+        const veiculo_id = (b.veiculo_id || '').trim() || null;
+        const texto = (b.texto || '').trim();
+        if (!obra_id) return res.status(400).json({ error: 'Obra obrigatória.' });
+        if (!texto) return res.status(400).json({ error: 'Descreva a divergência.', campo: 'texto' });
+
+        // Anti-repique: o operador cansado de esperar reenvia o mesmo aviso.
+        const [[recente]] = await db.query(
+            `SELECT id FROM operational_requests
+              WHERE tipo = 'divergencia_evidencias' AND solicitante_id = ? AND obra_atual_id = ?
+                AND created_at > DATE_SUB(NOW(), INTERVAL 5 MINUTE) LIMIT 1`,
+            [String(req.user?.id || ''), obra_id]
+        );
+        if (recente) {
+            return res.status(429).json({ error: 'Você acabou de enviar um aviso desta obra. Aguarde alguns minutos.' });
+        }
+
+        const [[obra]] = await db.query('SELECT nome FROM obras WHERE id = ? LIMIT 1', [obra_id]);
+        let veicLabel = null, operadorNome = null;
+        if (veiculo_id) {
+            const [[v]] = await db.query(
+                `SELECT v.registroInterno, v.placa, v.modelo, e.nome AS operador
+                   FROM vehicles v
+                   LEFT JOIN obras_historico_veiculos h ON h.veiculoId = v.id AND h.dataSaida IS NULL
+                   LEFT JOIN employees e ON e.id = h.employeeId
+                  WHERE v.id = ? LIMIT 1`, [veiculo_id]);
+            veicLabel = [v?.registroInterno, v?.placa].filter(Boolean).join(' · ') || v?.modelo || null;
+            operadorNome = v?.operador || null;
+        }
+
+        const [result] = await db.query(
+            `INSERT INTO operational_requests
+               (tipo, veiculo_id, veiculo_registro, obra_atual_id, obra_atual_nome,
+                operador_atual_nome, valor_sugerido_id, valor_sugerido_nome, observacao,
+                status, solicitante_id, solicitante_email)
+             VALUES ('divergencia_evidencias', ?,?,?,?,?, NULL, ?, ?, 'pendente', ?, ?)`,
+            [veiculo_id || '', veicLabel, obra_id, obra?.nome || null, operadorNome,
+             MOTIVO_DIVERGENCIA[motivo], texto,
+             req.user?.id || null, req.user?.email || null]
+        );
+
+        // Os dois eventos que a aba Requisições do admin já consome.
+        try { req.io?.emit('server:sync', { targets: ['operationalRequests'] }); } catch { /* */ }
+        try {
+            req.io?.emit('admin:notificacao', {
+                tipo: 'requisicao_operacional',
+                mensagem: `Evidências: ${MOTIVO_DIVERGENCIA[motivo].toLowerCase()} na obra ${obra?.nome || obra_id}.`,
+            });
+        } catch { /* */ }
+
+        return res.status(201).json({ id: result.insertId });
+    } catch (err) {
+        console.error('❌ [evidencias] divergencia:', err.code, '|', err.sqlMessage || err.message);
+        return res.status(500).json({ error: 'Falha ao registrar o aviso.' });
+    }
+}
+
+// =============================================================================
 // GET /api/evidencias/motivos-dispensa — catálogo de motivos ativos
 // =============================================================================
 async function motivosDispensa(req, res) {
@@ -454,7 +812,7 @@ async function registrarDispensa(req, res) {
             [id, obra_id, veiculo_id, data_ref, periodo, (b.motivo_codigo || '').trim() || null,
              (b.motivo_texto || '').trim() || null, req.user?.id || null, req.user?.name || null, origem]
         );
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        syncEvidencias(req);
         return res.status(201).json({ id });
     } catch (err) {
         console.error('❌ [evidencias] dispensa:', err.code, '|', err.sqlMessage || err.message);
@@ -502,7 +860,7 @@ async function carimboEditar(req, res) {
         await db.query(`UPDATE evidencia_registro SET ${sets.join(', ')}, stamp_version = ? WHERE id = ?`, [...params, novaVersao, reg.id]);
         await _auditar(reg, 'editar', antes, depois, b.motivo, req);
         carimbo.limparCache(reg.id);
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        syncEvidencias(req);
         return res.json({ ok: true, stamp_version: novaVersao, urls: assinarTodas(reg.id, novaVersao) });
     } catch (err) {
         console.error('❌ [evidencias] carimboEditar:', err.code, '|', err.sqlMessage || err.message);
@@ -519,7 +877,7 @@ async function carimboRemover(req, res) {
         await db.query(`UPDATE evidencia_registro SET stamp_mode = 'limpo', stamp_version = ? WHERE id = ?`, [novaVersao, reg.id]);
         await _auditar(reg, 'remover', { stamp_mode: reg.stamp_mode }, { stamp_mode: 'limpo' }, req.body.motivo, req);
         carimbo.limparCache(reg.id);
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        syncEvidencias(req);
         return res.json({ ok: true, stamp_version: novaVersao, urls: assinarTodas(reg.id, novaVersao) });
     } catch (err) {
         console.error('❌ [evidencias] carimboRemover:', err.message);
@@ -553,16 +911,27 @@ async function getConfig(req, res) {
 async function putConfig(req, res) {
     try {
         const b = req.body || {};
+        const faixa = (v, min, max, def) => {
+            if (v == null || v === '') return def;
+            const n = Number(v);
+            return isNaN(n) ? def : Math.max(min, Math.min(max, n));
+        };
         await db.query(
-            `INSERT INTO evidencia_config (obra_id, momentos_exigidos, horarios_limite, dias_semana, raio_cerca_m, exigir_gps, permitir_galeria, ativa)
-             VALUES (?,?,?,?,?,?,?,?)
+            `INSERT INTO evidencia_config (obra_id, momentos_exigidos, horarios_limite, dias_semana, raio_cerca_m,
+                exigir_gps, permitir_galeria, ativa, retroativo_max_dias, retroativo_horimetro, historico_dias)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)
              ON DUPLICATE KEY UPDATE momentos_exigidos=VALUES(momentos_exigidos), horarios_limite=VALUES(horarios_limite),
                dias_semana=VALUES(dias_semana), raio_cerca_m=VALUES(raio_cerca_m), exigir_gps=VALUES(exigir_gps),
-               permitir_galeria=VALUES(permitir_galeria), ativa=VALUES(ativa)`,
+               permitir_galeria=VALUES(permitir_galeria), ativa=VALUES(ativa),
+               retroativo_max_dias=VALUES(retroativo_max_dias), retroativo_horimetro=VALUES(retroativo_horimetro),
+               historico_dias=VALUES(historico_dias)`,
             [req.params.obraId,
              JSON.stringify(b.momentos_exigidos || null), JSON.stringify(b.horarios_limite || null),
              JSON.stringify(b.dias_semana || null), b.raio_cerca_m ?? 500,
-             b.exigir_gps === false ? 0 : 1, b.permitir_galeria === true ? 1 : 0, b.ativa === false ? 0 : 1]
+             b.exigir_gps === false ? 0 : 1, b.permitir_galeria === true ? 1 : 0, b.ativa === false ? 0 : 1,
+             faixa(b.retroativo_max_dias, 0, 60, null),
+             b.retroativo_horimetro == null ? null : (b.retroativo_horimetro === false ? 0 : 1),
+             faixa(b.historico_dias, 1, 30, null)]
         );
         return res.json({ ok: true });
     } catch (err) { return res.status(500).json({ error: err.message }); }
@@ -641,6 +1010,7 @@ async function cobrancasListar(req, res) {
 const MOMENTO_CURTO = {
     horimetro_inicio: 'horímetro de início', horimetro_fim: 'horímetro final',
     foto_manha: 'foto da manhã', foto_tarde: 'foto da tarde',
+    rotina_filtro: 'foto da limpeza de filtro', rotina_graxa: 'foto do engraxamento',
 };
 
 // Aprova e ENVIA um item (push direto ao operador). É o ÚNICO ponto de disparo.
@@ -679,7 +1049,7 @@ async function cobrancaAprovar(req, res) {
         if (!item) return res.status(404).json({ error: 'Cobrança não encontrada.' });
         if (item.status !== 'PENDENTE') return res.status(400).json({ error: 'Cobrança já processada.' });
         const r = await _enviarCobranca(item, req);
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        syncEvidencias(req);
         return res.json(r);
     } catch (err) {
         console.error('❌ [evidencias] cobrancaAprovar:', err.message);
@@ -699,7 +1069,7 @@ async function cobrancasAprovarLote(req, res) {
                 if (r.enviado) enviadas++; else semToken++;
             }
         }
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        syncEvidencias(req);
         return res.json({ ok: true, enviadas, semToken });
     } catch (err) {
         console.error('❌ [evidencias] cobrancasAprovarLote:', err.message);
@@ -750,7 +1120,9 @@ async function dossie(req, res) {
 
         const W = doc.page.width - 80;
         for (const r of regs) {
-            r._dados = montarDados(r); r._campos = {};
+            r._dados = montarDados(r);
+            try { r._campos = await carimboCfgSvc.resolveCampos(db, r.obra_id, r.veiculo_id); }
+            catch { r._campos = {}; }
             let imgPath = null;
             try { imgPath = await carimbo.obterVariante(r, 'stamped'); } catch { /* imagem indisponível */ }
             const aspect = (r.altura_px && r.largura_px) ? r.altura_px / r.largura_px : 0.75;
@@ -787,7 +1159,7 @@ async function offloadGerar(req, res) {
         const b = req.body || {};
         if (!b.obra_id) return res.status(400).json({ error: 'Obra obrigatória.' });
         const r = await offloadSvc.gerarLote(b.obra_id, { de: b.de || null, ate: b.ate || null, geradoPor: req.user?.id });
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        syncEvidencias(req);
         return res.status(201).json(r);
     } catch (err) {
         console.error('❌ [evidencias] offloadGerar:', err.code, '|', err.message);
@@ -814,7 +1186,7 @@ async function offloadDownload(req, res) {
 async function offloadConfirmar(req, res) {
     try {
         const r = await offloadSvc.confirmarBaixa(req.params.id, { userId: req.user?.id });
-        try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ }
+        syncEvidencias(req);
         return res.json({ ok: true, ...r });
     } catch (err) {
         console.error('❌ [evidencias] offloadConfirmar:', err.code, '|', err.message);
@@ -828,7 +1200,7 @@ async function restaurar(req, res) {
         if (!files.length) return res.status(400).json({ error: 'Envie ao menos um arquivo de imagem.' });
         const dry = String(req.query.preflight || req.body?.preflight || '') === '1' || req.path.endsWith('/preflight');
         const resultados = await offloadSvc.restaurarArquivos(files, { dry, userId: req.user?.id });
-        if (!dry) { try { req.io?.emit('server:sync', { resource: 'evidencias', targets: ['evidencias'] }); } catch { /* */ } }
+        if (!dry) { syncEvidencias(req); }
         const casados = resultados.filter(r => r.match === 'sha256' || r.match === 'hash8').length;
         return res.json({ dry, total: resultados.length, casados, resultados });
     } catch (err) {
@@ -852,11 +1224,18 @@ const setSetting = async (k, v) => {
     await db.query('INSERT INTO system_settings (`key`, value) VALUES (?, ?) ON DUPLICATE KEY UPDATE value = ?', [k, String(v), String(v)]);
 };
 
-// Últimos N dias úteis (pula domingo) terminando hoje.
-function ultimosDiasUteis(n) {
+// Últimos N dias úteis terminando hoje.
+//
+// ⚠️ Antes pulava SÓ domingo. Quando o sábado deixou de ser dia de solicitação
+// (Fase 10), ele passou a consolidar com exigidas=0 — e aí corteStatus calculava
+// pct=null → ok=false → `pronto` NUNCA mais ficaria verde. Pular sábado também
+// (e feriados, quando o Set é informado) é o que mantém o corte funcionando.
+function ultimosDiasUteis(n, feriadoSet = null) {
     const out = []; const d = new Date();
-    while (out.length < n) {
-        if (d.getDay() !== 0) out.push(d.toLocaleDateString('en-CA'));
+    for (let i = 0; i < 400 && out.length < n; i++) {
+        const ymd = d.toLocaleDateString('en-CA');
+        const dow = d.getDay();
+        if (dow !== 0 && dow !== 6 && !(feriadoSet && feriadoSet.has(ymd))) out.push(ymd);
         d.setDate(d.getDate() - 1);
     }
     return out.reverse();
@@ -881,7 +1260,14 @@ async function corteStatus(req, res) {
         const obra_id = req.query.obra_id || null;
         const pctMeta = Number(await getSetting('evid_corte_pct', 90));
         const diasMeta = Number(await getSetting('evid_corte_dias', 5));
-        const datas = ultimosDiasUteis(diasMeta);
+        let feriadoSet = null;
+        if (obra_id) {
+            try {
+                const [[o]] = await db.query('SELECT regiao FROM obras WHERE id = ? LIMIT 1', [obra_id]);
+                feriadoSet = await loadHolidaySet(db, { regiao: o?.regiao || null });
+            } catch { /* */ }
+        }
+        const datas = ultimosDiasUteis(diasMeta, feriadoSet);
         const dias = [];
         for (const data of datas) {
             const where = ['data_ref = ?']; const params = [data];
@@ -889,8 +1275,11 @@ async function corteStatus(req, res) {
             const [[r]] = await db.query(
                 `SELECT COALESCE(SUM(cumpridas),0) AS cumpr, COALESCE(SUM(exigidas),0) AS exig
                    FROM evidencia_aderencia_dia WHERE ${where.join(' AND ')}`, params);
+            // exig = 0 significa "nada era exigido neste dia" (dia não solicitado ou
+            // tudo dispensado) — isso é conformidade, não falha. Antes virava
+            // pct=null → ok=false e travava a prontidão do corte.
             const pct = r.exig > 0 ? Math.round((r.cumpr / r.exig) * 100) : null;
-            dias.push({ data, pct, ok: pct != null && pct >= pctMeta });
+            dias.push({ data, pct, sem_exigencia: r.exig == 0, ok: pct == null || pct >= pctMeta });
         }
         const pronto = dias.length > 0 && dias.every(d => d.ok);
         return res.json({ pct_meta: pctMeta, dias_meta: diasMeta, pronto, dias });
@@ -934,11 +1323,150 @@ async function resumoObra(req, res) {
     }
 }
 
+// =============================================================================
+// CONFIG DAS ROTINAS SEMANAIS (3 níveis) + pré-visualização
+// =============================================================================
+async function rotinasConfig(req, res) {
+    try {
+        const escopo = ['global', 'obra', 'veiculo'].includes(req.query.escopo || req.body?.escopo)
+            ? (req.query.escopo || req.body.escopo) : 'global';
+        const escopoId = String((req.query.escopo_id ?? req.body?.escopo_id) || '');
+
+        if (req.method === 'PUT') {
+            const b = req.body || {};
+            await rotinaSvc.salvarRegraRotina(db, {
+                escopo, escopo_id: escopoId,
+                ativa: b.ativa,
+                freq_dias: b.freq_dias == null ? null : Math.max(2, Math.min(60, Number(b.freq_dias))),
+                defasagem_dias: b.defasagem_dias == null ? null : Math.max(1, Math.min(30, Number(b.defasagem_dias))),
+                carry_dias: b.carry_dias == null ? null : Math.max(0, Math.min(30, Number(b.carry_dias))),
+                alternar_ordem: b.alternar_ordem,
+                tipos: Array.isArray(b.tipos) ? b.tipos : null,
+            });
+            return res.json({ ok: true });
+        }
+
+        // Devolve a linha CRUA do nível (para o formulário saber o que é herdado)
+        // e a regra EFETIVA resolvida (para o gestor ver o que vale de fato).
+        const [[row]] = await db.query(
+            'SELECT * FROM evidencia_rotina_config WHERE escopo = ? AND escopo_id = ? LIMIT 1',
+            [escopo, escopoId]
+        );
+        let obraId = null, veiculoId = null;
+        if (escopo === 'obra') obraId = escopoId;
+        if (escopo === 'veiculo') {
+            veiculoId = escopoId;
+            const [[h]] = await db.query(
+                'SELECT obraId FROM obras_historico_veiculos WHERE veiculoId = ? AND dataSaida IS NULL LIMIT 1',
+                [escopoId]);
+            obraId = h?.obraId || null;
+        }
+        const efetiva = await rotinaSvc.resolveRegraRotina(db, obraId, veiculoId);
+        return res.json({ escopo, escopo_id: escopoId, propria: row || null, efetiva });
+    } catch (err) {
+        console.error('❌ [evidencias] rotinasConfig:', err.code, '|', err.sqlMessage || err.message);
+        return res.status(500).json({ error: 'Falha na configuração de rotinas.' });
+    }
+}
+
+// O agendador é determinístico e por isso invisível: sem esta prévia o gestor
+// configuraria às cegas e só descobriria o efeito semanas depois.
+async function rotinasPreview(req, res) {
+    try {
+        const veiculoId = (req.query.veiculo_id || '').trim();
+        if (!veiculoId) return res.status(400).json({ error: 'Equipamento obrigatório.' });
+        const de = (req.query.de || '').trim() || hojeRef();
+        const ate = (req.query.ate || '').trim() || somarDias(de, 30);
+
+        const [[h]] = await db.query(
+            `SELECT h.obraId, o.regiao FROM obras_historico_veiculos h
+               LEFT JOIN obras o ON o.id = h.obraId
+              WHERE h.veiculoId = ? AND h.dataSaida IS NULL LIMIT 1`, [veiculoId]);
+        const obraId = h?.obraId || null;
+        const regra = await resolveRegraObra(db, obraId);
+        const cfg = await rotinaSvc.resolveRegraRotina(db, obraId, veiculoId);
+        let feriadoSet = new Set();
+        try { feriadoSet = await loadHolidaySet(db, { regiao: h?.regiao || null }); } catch { /* */ }
+
+        const itens = projetarCalendario(veiculoId, de, ate, {
+            diasSemana: regra.dias_semana, feriadoSet, cfg,
+        });
+        return res.json({ veiculo_id: veiculoId, de, ate, cfg, dias_semana: regra.dias_semana, itens });
+    } catch (err) {
+        console.error('❌ [evidencias] rotinasPreview:', err.message);
+        return res.status(500).json({ error: 'Falha ao projetar as rotinas.' });
+    }
+}
+
+// =============================================================================
+// CONFIG DE CAMPOS DO CARIMBO (3 níveis) + pré-visualização em imagem
+// =============================================================================
+async function carimboConfig(req, res) {
+    try {
+        const escopo = ['global', 'obra', 'veiculo'].includes(req.query.escopo || req.body?.escopo)
+            ? (req.query.escopo || req.body.escopo) : 'global';
+        const escopoId = String((req.query.escopo_id ?? req.body?.escopo_id) || '');
+        if (req.method === 'PUT') {
+            const campos = await carimboCfgSvc.salvarCampos(db, escopo, escopoId, req.body?.campos || {});
+            return res.json({ ok: true, campos });
+        }
+        const propria = await carimboCfgSvc.lerCampos(db, escopo, escopoId);
+        const efetiva = await carimboCfgSvc.resolveCampos(db,
+            escopo === 'obra' ? escopoId : null,
+            escopo === 'veiculo' ? escopoId : null);
+        return res.json({ escopo, escopo_id: escopoId, chaves: carimboCfgSvc.CHAVES_CAMPO, propria, efetiva });
+    } catch (err) {
+        console.error('❌ [evidencias] carimboConfig:', err.message);
+        return res.status(500).json({ error: 'Falha na configuração do carimbo.' });
+    }
+}
+
+// Gera uma imagem sintética pelo MESMO caminho de render das fotos reais. Sem
+// isto o admin edita os campos às cegas e só vê o resultado na próxima foto.
+async function carimboPreview(req, res) {
+    try {
+        const sharp = require('sharp');
+        const escopo = req.query.escopo || 'global';
+        const escopoId = String(req.query.escopo_id || '');
+        const campos = await carimboCfgSvc.resolveCampos(db,
+            escopo === 'obra' ? escopoId : null,
+            escopo === 'veiculo' ? escopoId : null);
+        const reduzido = String(req.query.reduzido) === '1';
+
+        const dados = {
+            dataHora: new Date().toLocaleString('pt-BR', { hour12: false }),
+            latitude: -29.4521, longitude: -51.9633, precisao_m: 8,
+            distancia_obra_m: 120, obra: 'Obra de exemplo',
+            equipamento: 'MAK-000 · ABC1D23', operador: 'Operador de exemplo',
+            leitura: 'Horímetro 4.812,50 h', codigo: 'EV-PREVIEW0',
+            momentoLabel: MOMENTO_LABEL.horimetro_inicio,
+            linha_livre: null, dataRefBr: paraBr(somarDias(hojeRef(), -3)),
+        };
+        const linhas = carimbo.montarLinhas(dados, campos, { reduzido });
+        const W = 900, H = 600;
+        // Duas faixas (clara e escura) para conferir a legibilidade do contorno.
+        const clara = await sharp({ create: { width: W, height: Math.round(H / 2), channels: 3, background: '#efeeea' } }).png().toBuffer();
+        const base = await sharp({ create: { width: W, height: H, channels: 3, background: '#25301a' } })
+            .composite([{ input: clara, top: Math.round(H / 2), left: 0 }]).png().toBuffer();
+        const buf = await sharp(base)
+            .composite([{ input: carimbo.montarSvgTexto(W, H, linhas), top: 0, left: 0 }])
+            .jpeg({ quality: 85 }).toBuffer();
+
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Cache-Control', 'no-store');
+        return res.end(buf);
+    } catch (err) {
+        console.error('❌ [evidencias] carimboPreview:', err.message);
+        return res.status(500).end();
+    }
+}
+
 module.exports = {
     ingest, meuEscopo, listar, detalhe, servirVariante,
-    minhas, motivosDispensa, registrarDispensa,
+    minhas, historico, divergencia, motivosDispensa, registrarDispensa,
     carimboEditar, carimboRemover, carimboRestaurar,
     getConfig, putConfig, aderencia, consolidar,
+    rotinasConfig, rotinasPreview, carimboConfig, carimboPreview,
     cobrancasListar, cobrancaAprovar, cobrancasAprovarLote, cobrancaIgnorar,
     dossie,
     offloadListar, offloadGerar, offloadDownload, offloadConfirmar, restaurar,
