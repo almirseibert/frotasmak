@@ -39,6 +39,9 @@ router.get('/by-vehicles', refuelingController.getRefuelingsByVehicles);
 router.get('/open', refuelingController.getOpenRefuelingByVehicle);
 router.get('/obra-status/:obraId', refuelingController.getObraFuelStatus);
 // Abastecimentos de um veículo — DEVE vir antes de /:id (senão "vehicle" vira um id)
+// Só o último concluído (posto + combustível) — alimenta a sugestão do
+// formulário sem baixar o histórico inteiro no celular do operador.
+router.get('/vehicle/:vehicleId/ultimo', refuelingController.getUltimoRefuelingByVehicle);
 router.get('/vehicle/:vehicleId', refuelingController.getRefuelingsByVehicle);
 router.get('/:id', refuelingController.getRefuelingById);
 router.post('/', podeOperar, refuelingController.createRefuelingOrder);

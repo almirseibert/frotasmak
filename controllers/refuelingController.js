@@ -668,6 +668,30 @@ const getRefuelingsByVehicle = async (req, res) => {
     }
 };
 
+// Último abastecimento CONCLUÍDO de um veículo, só com o que alimenta a sugestão
+// do formulário (posto e tipo de combustível). Existe separado do histórico
+// completo porque quem mais precisa disso é a tela do operador, no celular: ela
+// não pode baixar centenas de linhas para ler a primeira.
+const getUltimoRefuelingByVehicle = async (req, res) => {
+    try {
+        // A coluna de data é `data` (timestamp). Não existe `date` na tabela — o
+        // `r.data || r.date` que aparece no frontend é defensivo, não reflete o
+        // schema, e usá-lo aqui derrubaria a query com ER_BAD_FIELD_ERROR.
+        const [[row]] = await db.query(
+            `SELECT id, partnerId, partnerName, fuelType, litrosAbastecidos, data
+               FROM refuelings
+              WHERE vehicleId = ? AND status = 'Concluída' AND ${HIDDEN_VISIBILITY_CLAUSE}
+              ORDER BY data DESC, id DESC
+              LIMIT 1`,
+            [req.params.vehicleId, req.user?.id || null]
+        );
+        return res.json(row || null);
+    } catch (error) {
+        console.error('Erro GET último abastecimento do veículo:', error);
+        return res.status(500).json({ error: 'Erro ao buscar o último abastecimento.' });
+    }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Regras que antes rodavam no cliente sobre a tabela inteira de refuelings.
 //
@@ -1715,6 +1739,7 @@ module.exports = {
     getOpenRefuelingByVehicle,
     getObraFuelStatus,
     getRefuelingsByVehicle,
+    getUltimoRefuelingByVehicle,
     getRefuelingById,
     createRefuelingOrder,
     updateRefuelingOrder,
