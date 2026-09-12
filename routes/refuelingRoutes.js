@@ -25,6 +25,16 @@ router.post('/send-email', podeOperar, refuelingController.sendOrderEmail);
 
 // Rotas CRUD padrão
 router.get('/', refuelingController.getAllRefuelings);
+// Agregação de consumo por obra (soma no banco) — DEVE vir antes de /:id
+router.get('/aggregates/by-obra', refuelingController.getAggregatesByObra);
+// Checagem de NF duplicada (posto + número) — DEVE vir antes de /:id
+router.get('/check-invoice', refuelingController.checkInvoiceDuplicate);
+// Agregações do dashboard — DEVEM vir antes de /:id
+router.get('/aggregates/last-by-vehicle-obra', refuelingController.getLastRefuelByVehicleObra);
+router.get('/aggregates/efficiency-by-vehicle', refuelingController.getEfficiencyByVehicle);
+router.get('/aggregates/averages-by-vehicle', refuelingController.getAveragesByVehicle);
+// Abastecimentos de um conjunto de veículos (terceirizados) — antes de /:id
+router.get('/by-vehicles', refuelingController.getRefuelingsByVehicles);
 // Regras pontuais — DEVEM vir antes de /:id, senão viram um id de abastecimento
 router.get('/open', refuelingController.getOpenRefuelingByVehicle);
 router.get('/obra-status/:obraId', refuelingController.getObraFuelStatus);

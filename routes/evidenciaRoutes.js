@@ -50,6 +50,9 @@ router.get('/meu-escopo', requireApp, ctrl.meuEscopo);
 router.get('/minhas', requireApp, ctrl.minhas);
 // Faixa de dias do equipamento (valida o escopo do operador lá dentro).
 router.get('/historico', requireApp, ctrl.historico);
+// Quadro por equipamento (30 dias). Mais enxuto que /historico e sem checagem de
+// escopo — é a versão que a tela usava antes da faixa de dias.
+router.get('/veiculo/:vehicleId/calendario', requireApp, ctrl.veiculoCalendario);
 router.get('/motivos-dispensa', requireApp, ctrl.motivosDispensa);
 router.post('/dispensa', requireApp, ctrl.registrarDispensa);
 // Aviso de divergência de escopo (equipamento faltando/sobrando, operador errado).

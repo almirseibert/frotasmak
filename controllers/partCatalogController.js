@@ -287,7 +287,7 @@ const getForVehicle = async (req, res) => {
     try {
         const [[vehicle]] = await db.query(
             `SELECT id, placa, registroInterno, marca, modelo, tipo, sub_tipo,
-                    anoFabricacao, ano_fabricacao, ano_modelo
+                    ano_fabricacao, ano_modelo
              FROM vehicles WHERE id = ?`,
             [vehicleId]
         );

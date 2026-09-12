@@ -300,13 +300,12 @@ const gerarContratoPdf = async (req, res) => {
         const buffer = await generateContratoPdf({ contrato, locador, obra });
 
         fs.mkdirSync(CONTRATOS_PDF_DIR, { recursive: true });
-        // Nome do arquivo: numero + empresa contratada + obra, para identificar o
-        // contrato pelo proprio arquivo salvo (pedido do faturamento).
+        // Nome do arquivo: terceiro + obra + numero do contrato, nessa ordem, para
+        // que a listagem da pasta agrupe naturalmente por terceiro.
         const partes = [
-            'contrato',
-            slugArquivo(contrato.numero || id, 40),
             slugArquivo(locador.razaoSocial || locador.nome, 40),
             slugArquivo(obra.nome || obra.nome_obra, 40),
+            slugArquivo(contrato.numero || id, 40),
         ].filter(Boolean);
         const filename = `${partes.join('_')}.pdf`;
         fs.writeFileSync(path.join(CONTRATOS_PDF_DIR, filename), buffer);

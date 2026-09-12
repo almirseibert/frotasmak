@@ -259,6 +259,33 @@ async function ingest(req, res) {
         // --- obra + distância (só para gravar dev_obra_nome; cerca é informativa) ---
         const [[obraRow]] = await db.query('SELECT nome, latitude, longitude FROM obras WHERE id = ? LIMIT 1', [obra_id]);
 
+        // --- Dedup cross-operador (B2): um registro por (veículo, dia, tipo).
+        //     Evita que operadores diferentes (com escopo offline defasado) enviem
+        //     várias fotos do mesmo equipamento no mesmo dia. 'extra' continua
+        //     livre (fotos adicionais são o ponto dela). Responde 200 com o
+        //     registro existente (nunca erro), então a fila trata como "já feito"
+        //     e descarta a foto redundante em silêncio. O card já mostra "Enviado".
+        //
+        //     Vale também para o anexo retroativo: a dedup é por data_ref, então
+        //     mandar a foto de ontem não colide com a de hoje — só impede duas
+        //     fotos do MESMO momento no MESMO dia.
+        if (tipo !== 'extra') {
+            const [[jaDoDia]] = await db.query(
+                `SELECT id, stamp_version FROM evidencia_registro
+                  WHERE veiculo_id = ? AND data_ref = ? AND tipo = ? AND estado <> 'descartado'
+                  LIMIT 1`,
+                [veiculo_id, data_ref, tipo]
+            );
+            if (jaDoDia) {
+                limparUpload(f);
+                return res.status(200).json({
+                    jaExistia: true, duplicado: true,
+                    id: jaDoDia.id,
+                    urls: assinarTodas(jaDoDia.id, jaDoDia.stamp_version || 1),
+                });
+            }
+        }
+
         // --- grava o arquivo: inbox (multer) -> orig/<obra>/<AAAA>/<MM>/<id>.<ext> ---
         const id = randomUUID();
         const buf = fs.readFileSync(f.path);
@@ -369,8 +396,49 @@ async function equipamentosDoOperador(userId) {
             )`,
         [employeeId]
     );
-    // Só equipamentos no escopo §2 (horímetro).
-    return { employeeId, equipamentos: linhas.filter(v => exigeEvidencia(v.tipo)) };
+
+    // B1 — Equipamentos que JÁ SAÍRAM da obra recentemente (até 7 dias). Sem isto
+    // o operador perde a chance de regularizar o último dia assim que a máquina
+    // deixa a obra. Vêm marcados com saiuDaObra/saiuEm e a faixa de dias usa a
+    // data de saída como último dia disponível.
+    const [saidas] = await db.query(
+        // ANY_VALUE nos campos do operador: o GROUP BY colapsa as estadias e o
+        // sql_mode=only_full_group_by recusaria h.employeeId/e.nome soltos. Para o
+        // card de um equipamento que já saiu, o operador é informativo.
+        `SELECT v.id, v.placa, v.registroInterno, v.modelo, v.tipo,
+                v.horimetro, v.odometro,
+                h.obraId AS obra_id, ANY_VALUE(h.employeeId) AS operador_id,
+                o.nome AS obra_nome, o.regiao, o.latitude, o.longitude,
+                ANY_VALUE(e.nome) AS operador_nome,
+                MAX(h.dataSaida) AS saiu_em
+           FROM obras_historico_veiculos h
+           JOIN vehicles v ON v.id = h.veiculoId
+           LEFT JOIN obras o ON o.id = h.obraId
+           LEFT JOIN employees e ON e.id = h.employeeId
+          WHERE h.dataSaida IS NOT NULL
+            AND h.dataSaida >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+            AND h.obraId IN (
+                SELECT DISTINCT h2.obraId FROM obras_historico_veiculos h2
+                 WHERE h2.employeeId = ? AND h2.dataSaida IS NULL
+            )
+            AND h.veiculoId NOT IN (
+                SELECT h3.veiculoId FROM obras_historico_veiculos h3
+                 WHERE h3.dataSaida IS NULL
+            )
+          GROUP BY v.id, h.obraId`,
+        [employeeId]
+    );
+
+    // Só equipamentos no escopo §2 (horímetro). Os que saíram vêm marcados.
+    const ativos = linhas.filter(v => exigeEvidencia(v.tipo));
+    const saiuFmt = saidas
+        .filter(v => exigeEvidencia(v.tipo))
+        .map(v => ({
+            ...v,
+            saiuDaObra: true,
+            saiuEm: v.saiu_em ? new Date(v.saiu_em).toLocaleDateString('en-CA') : null,
+        }));
+    return { employeeId, equipamentos: [...ativos, ...saiuFmt] };
 }
 
 async function meuEscopo(req, res) {
@@ -400,20 +468,36 @@ async function meuEscopo(req, res) {
             });
         }
 
-        // O que já foi enviado hoje. `hojeEnviado` (array de tipos) é mantido por
-        // compatibilidade; `hojeContagem` é o que permite N fotos extras no mesmo
-        // dia sem que o badge do equipamento fique verde com 4 extras e 0 momentos.
+        // O que já foi enviado na data de referência de cada equipamento: hoje para
+        // os ativos, a data de saída para os que saíram da obra (B1). `hojeEnviado`
+        // (array de tipos) é mantido por compatibilidade; `hojeContagem` é o que
+        // permite N fotos extras no mesmo dia sem que o badge do equipamento fique
+        // verde com 4 extras e nenhum momento cumprido.
         const hojeEnviado = {};
         const hojeContagem = {};
         if (equipamentos.length) {
             const ids = equipamentos.map(v => v.id);
+            const dataPorVeic = {};
+            equipamentos.forEach(v => { dataPorVeic[v.id] = (v.saiuDaObra && v.saiuEm) ? v.saiuEm : data; });
+            const datas = [...new Set(Object.values(dataPorVeic))];
             const [envs] = await db.query(
-                `SELECT veiculo_id, tipo, COUNT(*) AS n FROM evidencia_registro
-                  WHERE data_ref = ? AND estado <> 'descartado' AND veiculo_id IN (${ids.map(() => '?').join(',')})
-                  GROUP BY veiculo_id, tipo`,
-                [data, ...ids]
+                // Agrupado por (veículo, dia, tipo): a CONTAGEM é o que permite N
+                // fotos extras no mesmo dia, e o filtro por data_ref é o que faz o
+                // equipamento que saiu da obra ser medido no ÚLTIMO dia em que
+                // esteve lá, não em hoje.
+                `SELECT veiculo_id, tipo, data_ref, COUNT(*) AS n FROM evidencia_registro
+                  WHERE estado <> 'descartado'
+                    AND veiculo_id IN (${ids.map(() => '?').join(',')})
+                    AND data_ref IN (${datas.map(() => '?').join(',')})
+                  GROUP BY veiculo_id, tipo, data_ref`,
+                [...ids, ...datas]
             );
             for (const e of envs) {
+                const relevante = dataPorVeic[e.veiculo_id];
+                const eData = e.data_ref instanceof Date
+                    ? e.data_ref.toLocaleDateString('en-CA')
+                    : String(e.data_ref).slice(0, 10);
+                if (eData !== relevante) continue;
                 (hojeEnviado[e.veiculo_id] = hojeEnviado[e.veiculo_id] || []).push(e.tipo);
                 (hojeContagem[e.veiculo_id] = hojeContagem[e.veiculo_id] || {})[e.tipo] = Number(e.n);
             }
@@ -607,26 +691,30 @@ async function historico(req, res) {
         try { feriadoSet = await loadHolidaySet(db, { regiao: equip.regiao || null }); } catch { /* */ }
 
         const hoje = hojeRef();
+        // Equipamento que já saiu da obra (B1): a faixa termina no último dia em
+        // que ele esteve lá. Sem isto a tela ofereceria dias em que o equipamento
+        // nem estava na obra — e o operador registraria um dia que não existiu.
+        const ultimoDia = (equip.saiuDaObra && equip.saiuEm && equip.saiuEm < hoje) ? equip.saiuEm : hoje;
         const pedido = parseInt(req.query.dias || regra.historico_dias, 10);
         const janela = Math.min(HISTORICO_TETO_DIAS, Math.max(1, isNaN(pedido) ? regra.historico_dias : pedido));
-        const desde = somarDias(hoje, -(janela - 1));
+        const desde = somarDias(ultimoDia, -(janela - 1));
 
         const [regs] = await db.query(
             `SELECT data_ref, tipo, COUNT(*) AS n FROM evidencia_registro
               WHERE veiculo_id = ? AND data_ref BETWEEN ? AND ? AND estado <> 'descartado'
               GROUP BY data_ref, tipo`,
-            [veiculoId, desde, hoje]
+            [veiculoId, desde, ultimoDia]
         );
         const [disps] = await db.query(
             `SELECT data_ref, periodo, motivo_codigo, motivo_texto FROM evidencia_dispensa
               WHERE obra_id = ? AND (veiculo_id = ? OR veiculo_id IS NULL)
                 AND data_ref BETWEEN ? AND ? AND revogada_em IS NULL`,
-            [equip.obra_id, veiculoId, desde, hoje]
+            [equip.obra_id, veiculoId, desde, ultimoDia]
         );
         const [rots] = await db.query(
             `SELECT tipo, data_prevista, status FROM evidencia_rotina_agenda
               WHERE veiculo_id = ? AND data_prevista BETWEEN ? AND ?`,
-            [veiculoId, desde, hoje]
+            [veiculoId, desde, ultimoDia]
         );
 
         const porDia = {};
@@ -685,6 +773,11 @@ async function historico(req, res) {
             veiculo_id: veiculoId,
             obra_id: equip.obra_id,
             hoje,
+            // Para equipamento que saiu da obra, ultimo_dia < hoje: a faixa termina
+            // no último dia em que ele esteve lá e tudo nela é retroativo.
+            ultimo_dia: ultimoDia,
+            saiu_da_obra: !!equip.saiuDaObra,
+            saiu_em: equip.saiuEm || null,
             janela_dias: janela,
             retroativo_max_dias: regra.retroativo_max_dias,
             retroativo_horimetro: regra.retroativo_horimetro,
@@ -774,6 +867,74 @@ async function divergencia(req, res) {
     } catch (err) {
         console.error('❌ [evidencias] divergencia:', err.code, '|', err.sqlMessage || err.message);
         return res.status(500).json({ error: 'Falha ao registrar o aviso.' });
+    }
+}
+
+// =============================================================================
+// GET /api/evidencias/veiculo/:vehicleId/calendario — quadro por equipamento (B4)
+// Por data em que o equipamento esteve na obra (últimos 30 dias), diz se as
+// imagens foram enviadas, faltam, ou o dia foi dispensado.
+// =============================================================================
+async function veiculoCalendario(req, res) {
+    try {
+        const veiculoId = req.params.vehicleId;
+        const hoje = new Date(); hoje.setHours(0, 0, 0, 0);
+        const janelaIni = new Date(hoje); janelaIni.setDate(janelaIni.getDate() - 29);
+
+        // Estadias do equipamento em obra (para saber em quais dias ele esteve lá).
+        const [stays] = await db.query(
+            `SELECT dataEntrada, dataSaida FROM obras_historico_veiculos
+              WHERE veiculoId = ? AND dataEntrada IS NOT NULL
+              ORDER BY dataEntrada DESC LIMIT 30`,
+            [veiculoId]
+        );
+
+        const diasNaObra = new Set();
+        for (const s of stays) {
+            const ent = new Date(s.dataEntrada); ent.setHours(0, 0, 0, 0);
+            const sai = s.dataSaida ? new Date(s.dataSaida) : new Date(hoje); sai.setHours(0, 0, 0, 0);
+            let d = new Date(Math.max(ent.getTime(), janelaIni.getTime()));
+            const fim = new Date(Math.min(sai.getTime(), hoje.getTime()));
+            for (; d <= fim; d.setDate(d.getDate() + 1)) diasNaObra.add(d.toLocaleDateString('en-CA'));
+        }
+        if (diasNaObra.size === 0) return res.json({ dias: [] });
+
+        const datas = [...diasNaObra].sort();
+        const min = datas[0], max = datas[datas.length - 1];
+        const key = (v) => (v instanceof Date ? v.toLocaleDateString('en-CA') : String(v).slice(0, 10));
+
+        const [regs] = await db.query(
+            `SELECT data_ref, tipo FROM evidencia_registro
+              WHERE veiculo_id = ? AND estado <> 'descartado' AND data_ref BETWEEN ? AND ?`,
+            [veiculoId, min, max]
+        );
+        const [disp] = await db.query(
+            `SELECT data_ref FROM evidencia_dispensa
+              WHERE (veiculo_id = ? OR veiculo_id IS NULL) AND revogada_em IS NULL
+                AND data_ref BETWEEN ? AND ?`,
+            [veiculoId, min, max]
+        );
+
+        const FIXOS = ['horimetro_inicio', 'horimetro_fim', 'foto_manha', 'foto_tarde'];
+        const porDia = {};
+        regs.forEach(r => { const k = key(r.data_ref); (porDia[k] = porDia[k] || new Set()).add(r.tipo); });
+        const dispDia = new Set(disp.map(d => key(d.data_ref)));
+
+        const dias = datas.map(d => {
+            const tipos = porDia[d] || new Set();
+            const enviados = FIXOS.filter(t => tipos.has(t)).length;
+            let status;
+            if (dispDia.has(d)) status = 'dispensado';
+            else if (enviados >= 4) status = 'completo';
+            else if (enviados > 0) status = 'parcial';
+            else status = 'faltando';
+            return { data: d, enviados, exigidas: 4, status };
+        });
+
+        return res.json({ dias });
+    } catch (err) {
+        console.error('❌ [evidencias] calendario:', err.code, '|', err.sqlMessage || err.message);
+        return res.status(500).json({ error: 'Falha ao carregar o calendário do equipamento.' });
     }
 }
 
@@ -1463,7 +1624,7 @@ async function carimboPreview(req, res) {
 
 module.exports = {
     ingest, meuEscopo, listar, detalhe, servirVariante,
-    minhas, historico, divergencia, motivosDispensa, registrarDispensa,
+    minhas, historico, veiculoCalendario, divergencia, motivosDispensa, registrarDispensa,
     carimboEditar, carimboRemover, carimboRestaurar,
     getConfig, putConfig, aderencia, consolidar,
     rotinasConfig, rotinasPreview, carimboConfig, carimboPreview,
