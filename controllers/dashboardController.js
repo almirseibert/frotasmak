@@ -1,4 +1,5 @@
 const db = require('../database');
+const { chaveNoNivelDoMapa } = require('../utils/planoItem');
 const { _computeAnalyticsCore, _fmtDate } = require('./obraSupervisorController');
 
 const HORAS_PADRAO_DIA = 8;
@@ -40,15 +41,22 @@ const computeProjecoesLeves = async (obraIds) => {
         obraIds
     );
 
+    // Traz o item declarado na alocação e o grupo do veículo lado a lado. Qual dos
+    // dois vale é decidido por `chaveNoNivelDoMapa` na hora de consultar
+    // `valoresPorTipo`, que é nível GRUPO: `planoItemKey` costuma ser SUBGRUPO, e
+    // consultar o mapa de preços com chave de subgrupo devolve 0 em silêncio.
+    // Ver docs/item-de-contrato-e-substituicao-plano.md.
     const logs = await safeQuery(`
-        SELECT l.obraId, v.tipo AS tipo_veiculo,
+        SELECT l.obraId,
+               NULLIF(l.planoItemKey, '') AS itemKey,
+               v.tipo                     AS grupoVeiculo,
                SUM(l.totalHours) AS horas,
                MIN(DATE_FORMAT(l.date, '%Y-%m-%d')) AS primeira_data,
                COUNT(DISTINCT DATE(l.date)) AS dias_lancamento
           FROM daily_work_logs l
           LEFT JOIN vehicles v ON v.id = l.vehicleId
          WHERE l.obraId IN (${placeholders})
-         GROUP BY l.obraId, tipo_veiculo
+         GROUP BY l.obraId, itemKey, grupoVeiculo
     `, obraIds);
 
     const refuels = await safeQuery(`
@@ -88,7 +96,8 @@ const computeProjecoesLeves = async (obraIds) => {
 
         let faturamento = 0;
         for (const t of entry.porTipo) {
-            const preco = parseFloat(valoresPorTipo[t.tipo_veiculo] || valoresPorTipo[(t.tipo_veiculo || '').trim()] || 0);
+            const chave = chaveNoNivelDoMapa(t.itemKey, t.grupoVeiculo, valoresPorTipo) || '';
+            const preco = parseFloat(valoresPorTipo[chave] || valoresPorTipo[chave.trim()] || 0);
             faturamento += (parseFloat(t.horas) || 0) * preco;
         }
 

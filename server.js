@@ -137,6 +137,19 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
         // ex. Escavadeira 13t vs 26t. Campos antigos (…PorTipo) seguem como fallback.
         { table: 'obras',                  column: 'horasContratadasPorSubTipo',       def: 'JSON DEFAULT NULL' },
         { table: 'obras',                  column: 'valoresPorSubTipo',                def: 'JSON DEFAULT NULL' },
+        // ── Item do plano de trabalho que a máquina desempenha ──
+        // Ver docs/item-de-contrato-e-substituicao-plano.md.
+        // Até aqui, a hora era atribuída ao item do plano por IGUALDADE DE STRING entre
+        // a chave do plano e o subgrupo do veículo. Quando o contrato tem item de 23T e
+        // mandamos uma 11T fazer o serviço, a hora não achava item nenhum — sumia do
+        // progresso da obra e era valorada pelo preço errado.
+        // Agora a ALOCAÇÃO declara qual item aquela máquina desempenha, e o apontamento
+        // carimba o item vigente no momento em que é criado (carimbar, e não derivar,
+        // evita que editar a alocação reescreva o passado em silêncio).
+        // NULL = comportamento legado: classifica pelo subgrupo do veículo. Alocações
+        // antigas permanecem nulas de propósito — não há backfill nem fila de pendência.
+        { table: 'obras_historico_veiculos', column: 'planoItemKey',                    def: 'VARCHAR(120) DEFAULT NULL' },
+        { table: 'daily_work_logs',          column: 'planoItemKey',                    def: 'VARCHAR(120) DEFAULT NULL' },
         // ── Geolocalização / Mapa Operacional (cidades IBGE do RS) ──
         // cidade_ibge liga obra/funcionário ao município do RS (código IBGE 7 díg.)
         // para posicionar no mapa (centroide da cidade) e casar proximidade.
@@ -455,6 +468,88 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
         console.log('✅ Migração taxonomia de veículos concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] taxonomia de veículos:', e.message);
+    }
+})();
+
+// ====================================================================
+// MIGRAÇÃO — Subgrupo em vários grupos (vínculo N:N)
+//
+// O mesmo subgrupo ("Caçamba Basculante 12m³") precisa valer para
+// Caçamba Truckado, Traçado, Toco e Bitruck. Com `vehicle_sub_types.type_id`
+// cada subgrupo tem um dono só, e a única saída era duplicar o nome — que é
+// justamente o que faz contrato e frota pararem de se conversar.
+//
+// `type_id` NÃO é removida: fica nula e sem uso, como rede de reversão.
+// Remover só numa limpeza posterior, depois que a tela nova estiver estável.
+// ====================================================================
+(async () => {
+    const tolerar = (e, ...codigos) => {
+        if (codigos.includes(e.code) || /check that column\/key exists|Duplicate key name/i.test(e.message)) return;
+        throw e;
+    };
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_type_sub_types (
+                type_id      VARCHAR(36) NOT NULL,
+                sub_type_id  VARCHAR(36) NOT NULL,
+                created_at   TIMESTAMP   DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (type_id, sub_type_id),
+                KEY idx_vtst_sub (sub_type_id),
+                CONSTRAINT fk_vtst_type FOREIGN KEY (type_id)
+                    REFERENCES vehicle_types(id) ON DELETE CASCADE,
+                CONSTRAINT fk_vtst_sub FOREIGN KEY (sub_type_id)
+                    REFERENCES vehicle_sub_types(id) ON DELETE CASCADE
+            )
+        `);
+
+        // Backfill dos vínculos que já existem. Idempotente.
+        await db.query(`
+            INSERT IGNORE INTO vehicle_type_sub_types (type_id, sub_type_id)
+            SELECT type_id, id FROM vehicle_sub_types WHERE type_id IS NOT NULL
+        `);
+
+        // O nome do subgrupo passa a ser único GLOBAL (antes era único por tipo).
+        // Só aplica se não houver nome repetido — com repetido, a unificação teria
+        // de ser decidida por gente, não por migração.
+        const [[{ dups }]] = await db.query(`
+            SELECT COUNT(*) AS dups FROM (
+                SELECT nome FROM vehicle_sub_types GROUP BY nome HAVING COUNT(*) > 1
+            ) x
+        `);
+        if (dups === 0) {
+            // A FK fk_vst_type usava uk_type_nome(type_id, nome) como índice dela.
+            // Sem um índice próprio antes, o DROP falha com ER_DROP_INDEX_FK.
+            try {
+                await db.query('ALTER TABLE vehicle_sub_types ADD KEY idx_vst_type (type_id)');
+            } catch (e) { tolerar(e, 'ER_DUP_KEYNAME'); }
+            try {
+                await db.query('ALTER TABLE vehicle_sub_types DROP INDEX uk_type_nome');
+            } catch (e) { tolerar(e, 'ER_CANT_DROP_FIELD_OR_KEY', 'ER_DROP_INDEX_FK'); }
+            try {
+                await db.query('ALTER TABLE vehicle_sub_types ADD UNIQUE KEY uk_sub_nome (nome)');
+            } catch (e) { tolerar(e, 'ER_DUP_KEYNAME'); }
+        } else {
+            console.warn(`⚠️ [migration] ${dups} nome(s) de subgrupo repetidos — índice único global não aplicado. Unifique antes.`);
+        }
+
+        try {
+            await db.query('ALTER TABLE vehicle_sub_types MODIFY type_id VARCHAR(36) NULL');
+        } catch (e) { tolerar(e, 'ER_BAD_FIELD_ERROR'); }
+
+        const [[{ total }]] = await db.query('SELECT COUNT(*) AS total FROM vehicle_type_sub_types');
+        console.log(`✅ Migração subgrupo N:N concluída (${total} vínculos).`);
+    } catch (e) {
+        // Diferente das demais migrações deste arquivo, o código novo DEPENDE da
+        // tabela criada aqui: sem ela, taxonomia, alocação e Panorama respondem 500
+        // por ER_NO_SUCH_TABLE. Um warn entre dezenas de linhas ✅ não daria pista
+        // nenhuma da causa, então o erro é gritado e repetido no fim do boot.
+        console.error('❌ [migration] subgrupo N:N FALHOU:', e);
+        console.error('❌ A taxonomia de veículos, a alocação em obra e o Panorama de '
+            + 'Capacidade vão responder erro até isto ser resolvido. '
+            + 'Rode migrations/subgrupo_n_para_n.sql manualmente.');
+        process.on('beforeExit', () => {
+            console.error('❌ LEMBRETE: a migração subgrupo N:N não foi aplicada.');
+        });
     }
 })();
 

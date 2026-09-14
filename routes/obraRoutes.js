@@ -9,6 +9,10 @@ router.use(authMiddleware); // Protegendo todas as rotas de obras
 router.get('/', obraController.getAllObras);
 // Painel de planejamento estratégico — precisa vir antes de '/:id'
 router.get('/planejamento', require('../controllers/planejamentoController').getPlanejamento);
+// Panorama de capacidade (aba Panorama) — idem, antes de '/:id'
+router.get('/planejamento/panorama', require('../controllers/planejamentoController').getPanorama);
+// Itens do plano de trabalho + resolução do item para uma máquina (tela de alocação)
+router.get('/:id/plano-itens', obraController.getPlanoItens);
 router.get('/:id', obraController.getObraById);
 router.post('/', obraController.createObra);
 router.put('/:id', obraController.updateObra);

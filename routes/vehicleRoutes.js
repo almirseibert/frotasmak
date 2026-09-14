@@ -76,6 +76,7 @@ router.get('/meus-documentos', vehicleDocumentsController.listMyObraDocuments);
 
 // Rotas CRUD padrão
 router.get('/', vehicleController.getAllVehicles);
+router.patch('/bulk-sub-tipo', vehicleController.bulkSetSubTipo);
 router.get('/:id', vehicleController.getVehicleById);
 router.post('/', vehicleController.createVehicle);
 router.put('/:id', vehicleController.updateVehicle);

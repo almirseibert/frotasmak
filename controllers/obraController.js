@@ -2,6 +2,7 @@ const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
 const { dispatchAsync } = require('../services/notificationDispatcher');
+const { itensDoPlano, carregarTaxonomia, resolverItemDaAlocacao, verificarItensRemovidos, chaveNoNivelDoMapa } = require('../utils/planoItem');
 
 // ===================================================================================
 // FUNÇÃO AUXILIAR DE PARSE SEGURO
@@ -103,23 +104,39 @@ const getObraById = async (req, res) => {
             [req.params.id]
         );
 
+        // Horas realizadas por item do plano. Traz a chave declarada na alocação e o
+        // grupo do veículo lado a lado; quem decide qual das duas usar é
+        // `chaveNoNivelDoMapa`, logo abaixo — o consumidor (ObraDetailModal) casa
+        // contra `horasContratadasPorTipo`, que é nível GRUPO.
+        // Ver docs/item-de-contrato-e-substituicao-plano.md.
         const [billingByTypeRows] = await db.query(`
-            SELECT v.tipo, SUM(l.totalHours) as totalHoras
+            SELECT NULLIF(l.planoItemKey, '') AS itemKey,
+                   v.tipo                     AS grupoVeiculo,
+                   SUM(l.totalHours)          AS totalHoras
             FROM daily_work_logs l
             JOIN vehicles v ON l.vehicleId = v.id
             WHERE l.obraId = ?
-            GROUP BY v.tipo
+            GROUP BY itemKey, grupoVeiculo
         `, [req.params.id]);
 
         const realizadoPorTipo = {};
         let totalRealizadoGeral = 0;
 
-        billingByTypeRows.forEach(row => {
-            realizadoPorTipo[row.tipo] = parseFloat(row.totalHoras) || 0;
-            totalRealizadoGeral += parseFloat(row.totalHoras) || 0;
-        });
-        
+        // `planoItemKey` vem no nível do plano da obra (normalmente SUBGRUPO), mas
+        // quem consome `realizadoPorTipo` casa contra `horasContratadasPorTipo`, que
+        // é nível GRUPO. Sem resolver o nível, a hora de uma máquina com item
+        // declarado sumiria do realizado. Ver chaveNoNivelDoMapa.
         const obra = parseObraJsonFields(rows[0]);
+        const planoPorTipo = obra.horasContratadasPorTipo || {};
+
+        billingByTypeRows.forEach(row => {
+            const horas = parseFloat(row.totalHoras) || 0;
+            const chave = chaveNoNivelDoMapa(row.itemKey, row.grupoVeiculo, planoPorTipo);
+            if (!chave) return;
+            realizadoPorTipo[chave] = (realizadoPorTipo[chave] || 0) + horas;
+            totalRealizadoGeral += horas;
+        });
+
         obra.historicoVeiculos = historyRows; 
         obra.realizadoPorTipo = realizadoPorTipo; 
         obra.totalHorasRealizadas = totalRealizadoGeral;
@@ -212,6 +229,35 @@ const updateObra = async (req, res) => {
     delete data.id;
     // dataInicio é derivado dos logs (MIN(date)) — nunca gravado pela edição de obra.
     delete data.dataInicio;
+
+    // Trava: remover ou renomear item do plano que já tem máquina alocada orfanaria
+    // o vínculo (gravado pela CHAVE do item) e faria as horas sumirem em silêncio.
+    // Ver docs/item-de-contrato-e-substituicao-plano.md, seção 2.1.
+    if (data.horasContratadasPorSubTipo !== undefined || data.horasContratadasPorTipo !== undefined) {
+        try {
+            const [atualRows] = await db.query(
+                'SELECT horasContratadasPorTipo, horasContratadasPorSubTipo FROM obras WHERE id = ?', [id]
+            );
+            if (atualRows[0]) {
+                // Plano vigente = o por subgrupo quando existe; o payload segue a mesma regra.
+                const novoSub = data.horasContratadasPorSubTipo;
+                const novoTipo = data.horasContratadasPorTipo;
+                const planoNovo = (novoSub && Object.keys(novoSub).length > 0) ? novoSub : (novoTipo || {});
+                const check = await verificarItensRemovidos(db, id, atualRows[0], planoNovo);
+                if (!check.ok) return res.status(400).json({ error: check.erro, itens: check.itens });
+            }
+        } catch (e) {
+            // FALHA FECHADA, de propósito. Esta é a única barreira entre editar o
+            // plano e orfanar as horas já apontadas naquele item. Se a verificação
+            // não pôde ser feita, não sabemos se é seguro salvar — e responder 500
+            // é reversível, enquanto deixar passar não é.
+            console.error('❌ [planoItem] Falha ao verificar itens removidos:', e);
+            return res.status(500).json({
+                error: 'Não foi possível verificar se algum item do plano de trabalho tem máquina alocada. '
+                    + 'A edição foi cancelada por segurança — tente novamente em instantes.',
+            });
+        }
+    }
 
     if (data.horasContratadasPorTipo) data.horasContratadasPorTipo = JSON.stringify(data.horasContratadasPorTipo);
     if (data.valoresPorTipo) data.valoresPorTipo = JSON.stringify(data.valoresPorTipo);
@@ -587,6 +633,41 @@ const deleteObraHistoryEntry = async (req, res) => {
     }
 };
 
+// GET /api/obras/:id/plano-itens?vehicleId=…
+// Alimenta a confirmação do item na tela de alocação: devolve os itens do plano de
+// trabalho da obra e, quando `vehicleId` vem junto, o que o sistema decidiu para
+// aquela máquina — automático, ou qual sugestão levar para o usuário aprovar.
+// Ver docs/item-de-contrato-e-substituicao-plano.md.
+const getPlanoItens = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { vehicleId } = req.query;
+
+        const [obraRows] = await db.query(
+            `SELECT id, nome, horasContratadasPorTipo, horasContratadasPorSubTipo
+               FROM obras WHERE id = ?`,
+            [id]
+        );
+        const obra = obraRows[0];
+        if (!obra) return res.status(404).json({ error: 'Obra não encontrada.' });
+
+        const itens = itensDoPlano(obra);
+        if (!vehicleId) return res.json({ obraId: obra.id, itens, resolucao: null });
+
+        const [vehRows] = await db.query('SELECT id, tipo, sub_tipo FROM vehicles WHERE id = ?', [vehicleId]);
+        const veiculo = vehRows[0];
+        if (!veiculo) return res.status(404).json({ error: 'Veículo não encontrado.' });
+
+        const grupoDoSubtipo = await carregarTaxonomia(db);
+        const resolucao = resolverItemDaAlocacao({ obra, veiculo, grupoDoSubtipo });
+
+        res.json({ obraId: obra.id, itens, resolucao });
+    } catch (error) {
+        console.error('Erro ao listar itens do plano:', error);
+        res.status(500).json({ error: 'Erro ao listar itens do plano de trabalho.' });
+    }
+};
+
 module.exports = {
     getAllObras,
     getObraById,
@@ -595,5 +676,6 @@ module.exports = {
     deleteObra,
     finishObra,
     updateObraHistoryEntry,
-    deleteObraHistoryEntry
+    deleteObraHistoryEntry,
+    getPlanoItens
 };

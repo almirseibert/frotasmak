@@ -15,6 +15,7 @@ router.post('/types', ctrl.createType);
 router.put('/types/:id', ctrl.updateType);
 router.delete('/types/:id', ctrl.deleteType);
 
+router.get('/sub-types', ctrl.listSubTypes);
 router.post('/sub-types', ctrl.createSubType);
 router.put('/sub-types/:id', ctrl.updateSubType);
 router.delete('/sub-types/:id', ctrl.deleteSubType);

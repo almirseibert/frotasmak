@@ -4,6 +4,8 @@ const fs = require('fs');
 const path = require('path');
 const { ensureComboioPartner, deactivateComboioPartner } = require('../utils/ensureComboioPartner');
 const { openPeriod: openComboioPeriod, closeActivePeriod: closeComboioPeriod } = require('../utils/comboioPeriodo');
+// Item do plano de trabalho desempenhado pela maquina (docs/item-de-contrato-e-substituicao-plano.md)
+const { validarItemKey } = require('../utils/planoItem');
 // Transições de estado do veículo: a lógica vive no service para poder rodar
 // dentro da transação de outro fluxo (fechamento de relato de ocorrência).
 const {
@@ -307,8 +309,8 @@ const deleteVehicle = async (req, res) => {
 
 const allocateToObra = async (req, res) => {
     const { id } = req.params; 
-    const { obraId, employeeId, dataEntrada, readingType, readingValue, observacoes } = req.body;
-    
+    const { obraId, employeeId, dataEntrada, readingType, readingValue, observacoes, planoItemKey } = req.body;
+
     if (!obraId || !employeeId) {
         return res.status(400).json({ error: "IDs de Obra e Funcionário são obrigatórios." });
     }
@@ -321,7 +323,11 @@ const allocateToObra = async (req, res) => {
         const employeeIdStr = String(employeeId);
         const readingVal = parseFloat(readingValue) || 0;
 
-        const [obraRows] = await connection.execute('SELECT nome, status, dataInicio FROM obras WHERE id = ?', [obraIdStr]);
+        const [obraRows] = await connection.execute(
+            `SELECT nome, status, dataInicio, horasContratadasPorTipo, horasContratadasPorSubTipo
+               FROM obras WHERE id = ?`,
+            [obraIdStr]
+        );
         const [employeeRows] = await connection.execute('SELECT nome FROM employees WHERE id = ?', [employeeIdStr]);
         const [vehicleRows] = await connection.execute('SELECT * FROM vehicles WHERE id = ?', [id]);
 
@@ -332,7 +338,18 @@ const allocateToObra = async (req, res) => {
         if (!obra || !employee || !vehicle) {
             throw new Error("Obra, Funcionário ou Veículo não encontrado (ID inválido).");
         }
-        
+
+        // Item do plano que a máquina vai desempenhar. Chave inexistente é recusada:
+        // deixar passar criaria vínculo órfão, que é justamente o que se quer evitar.
+        const validacaoItem = validarItemKey(obra, planoItemKey);
+        if (!validacaoItem.ok) {
+            const err = new Error(validacaoItem.erro);
+            err.statusCode = 400;
+            throw err;
+        }
+        const planoItemKeyValidado = validacaoItem.itemKey;
+
+
         const newHistoryEntry = {
             vehicleId: id,
             historyType: 'obra',
@@ -401,8 +418,12 @@ const allocateToObra = async (req, res) => {
             odometroEntrada: readingType === 'odometro' ? readingVal : 0,
             odometroSaida: 0, 
             horimetroEntrada: readingType === 'horimetro' ? readingVal : 0,
-            horimetroSaida: 0, 
-            observacoes: observacoes || ''
+            horimetroSaida: 0,
+            observacoes: observacoes || '',
+            // Item do plano de trabalho que esta máquina vai desempenhar. Quem aloca
+            // decide (ver utils/planoItem.js); NULL mantém o comportamento legado de
+            // classificar a hora pelo subgrupo do veículo.
+            planoItemKey: planoItemKeyValidado
         };
         
         const obraHistoryFields = Object.keys(newObraHistoryEntryData);
@@ -440,6 +461,12 @@ const allocateToObra = async (req, res) => {
         res.status(200).json({ message: 'Veículo alocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
+        // Item de plano inválido é erro do cliente (400), não falha do servidor —
+        // o frontend precisa distinguir para reabrir a escolha em vez de dizer
+        // "falha ao alocar".
+        if (error.statusCode === 400) {
+            return res.status(400).json({ error: error.message });
+        }
         console.error("Erro CRÍTICO ao alocar (Obra):", error);
         res.status(500).json({ error: 'Falha ao alocar veículo.', details: error.message });
     } finally {
@@ -1004,6 +1031,99 @@ const endMaintenance = async (req, res) => {
     }
 };
 
+// ── Cadastro de subgrupo em lote ─────────────────────────────────────────────
+//
+// 94% da frota está sem `sub_tipo`, enquanto os planos de obra são escritos em
+// subgrupo — por isso a execução some do item do plano. Corrigir isso máquina a
+// máquina são 149 aberturas de modal só nas caçambas; na prática, não acontece.
+//
+// A validação é a mesma regra da taxonomia: o subgrupo precisa estar vinculado
+// ao GRUPO de cada veículo selecionado. Sem isso o lote reintroduz justamente a
+// inconsistência que a tela nova existe para eliminar.
+// Teto por requisição: o maior grupo da frota tem ~108 máquinas, então 500 cobre
+// qualquer lote legítimo com folga e impede que um IN(...) cresça sem limite.
+const BULK_SUB_TIPO_MAX = 500;
+
+const bulkSetSubTipo = async (req, res) => {
+    // Mutação em massa: o botão escondido no frontend é só UI, o papel precisa ser
+    // verificado aqui. Sem isso, qualquer token válido reclassifica a frota inteira.
+    const role = (req.user?.role || req.user?.user_type || '').toLowerCase();
+    if (!['admin', 'editor'].includes(role)) {
+        return res.status(403).json({ error: 'Apenas administrador ou editor pode definir subgrupo em lote.' });
+    }
+
+    const { ids, sub_tipo } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: 'Selecione pelo menos um veículo.' });
+    }
+    const idsUnicos = [...new Set(ids.filter(v => typeof v === 'string' || typeof v === 'number').map(String))];
+    if (idsUnicos.length === 0) {
+        return res.status(400).json({ error: 'Nenhum identificador de veículo válido na seleção.' });
+    }
+    if (idsUnicos.length > BULK_SUB_TIPO_MAX) {
+        return res.status(400).json({
+            error: `Seleção grande demais: ${idsUnicos.length} veículos. O limite por vez é ${BULK_SUB_TIPO_MAX}.`,
+        });
+    }
+    const subTipo = (sub_tipo || '').trim() || null;
+
+    try {
+        const placeholders = idsUnicos.map(() => '?').join(',');
+        const [veiculos] = await db.query(
+            `SELECT id, registroInterno, placa, tipo FROM vehicles WHERE id IN (${placeholders})`, idsUnicos);
+        if (veiculos.length === 0) return res.status(404).json({ error: 'Nenhum veículo encontrado.' });
+
+        if (subTipo) {
+            const [[sub]] = await db.query('SELECT id FROM vehicle_sub_types WHERE nome = ?', [subTipo]);
+            if (!sub) return res.status(422).json({ error: `O subgrupo "${subTipo}" não existe na taxonomia.` });
+
+            const [gruposOk] = await db.query(`
+                SELECT t.nome
+                  FROM vehicle_type_sub_types v
+                  JOIN vehicle_types t ON t.id = v.type_id
+                 WHERE v.sub_type_id = ?
+            `, [sub.id]);
+            const permitidos = new Set(gruposOk.map(g => g.nome));
+
+            const fora = veiculos.filter(v => !permitidos.has(v.tipo));
+            if (fora.length > 0) {
+                const gruposFora = [...new Set(fora.map(v => v.tipo))];
+                return res.status(422).json({
+                    error: `"${subTipo}" não está vinculado ${gruposFora.length > 1 ? 'aos grupos' : 'ao grupo'} `
+                        + `${gruposFora.join(', ')}. Vincule na tela de taxonomia antes, ou tire `
+                        + `${fora.length === 1 ? 'esse veículo' : `esses ${fora.length} veículos`} da seleção.`,
+                    veiculos: fora.map(v => v.registroInterno || v.placa),
+                });
+            }
+        }
+
+        // Só os que realmente existem — usar a lista original faria o UPDATE calar
+        // ids já excluídos por outra sessão e reportar sucesso por eles.
+        const idsExistentes = veiculos.map(v => String(v.id));
+        const ignorados = idsUnicos.filter(id => !idsExistentes.includes(id));
+
+        const [r] = await db.query(
+            `UPDATE vehicles SET sub_tipo = ? WHERE id IN (${idsExistentes.map(() => '?').join(',')})`,
+            [subTipo, ...idsExistentes]);
+
+        if (req.io) req.io.emit('server:sync', { resource: 'vehicles' });
+        const base = subTipo
+            ? `${r.affectedRows} veículo(s) agora no subgrupo "${subTipo}".`
+            : `Subgrupo removido de ${r.affectedRows} veículo(s).`;
+        res.json({
+            message: ignorados.length
+                ? `${base} ${ignorados.length} da seleção não existe(m) mais e foi(ram) ignorado(s).`
+                : base,
+            atualizados: r.affectedRows,
+            solicitados: idsUnicos.length,
+            ignorados: ignorados.length,
+        });
+    } catch (err) {
+        console.error('[vehicles] bulkSetSubTipo:', err);
+        res.status(500).json({ error: 'Erro ao definir subgrupo em lote.' });
+    }
+};
+
 module.exports = {
     getAllVehicles,
     getVehicleById,
@@ -1018,4 +1138,5 @@ module.exports = {
     unassignFromOperational,
     startMaintenance,
     endMaintenance,
+    bulkSetSubTipo,
 };

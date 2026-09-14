@@ -1,5 +1,8 @@
 const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
+// Item do plano de trabalho desempenhado pela máquina — ver
+// docs/item-de-contrato-e-substituicao-plano.md e utils/planoItem.js.
+const { itemVigenteDaAlocacao } = require('../utils/planoItem');
 
 // --- Listar logs por Obra (com filtros opcionais de data) ---
 const getDailyLogs = async (req, res) => {
@@ -191,15 +194,20 @@ const upsertDailyLog = async (req, res) => {
                 morningStart, morningEnd, afternoonStart, afternoonEnd, totalHours, observation, justificativaTipo
             } = data;
 
+            // Carimba o item do plano que a alocação vigente declarou. Carimbar (e não
+            // derivar na leitura) evita que editar a alocação depois reescreva o passado
+            // em silêncio. NULL = legado: a hora é classificada pelo subgrupo do veículo.
+            const planoItemKey = await itemVigenteDaAlocacao(db, obraId, vehicleId);
+
             const query = `
                 INSERT INTO daily_work_logs
-                (id, obraId, vehicleId, employeeId, date, morningStart, morningEnd, afternoonStart, afternoonEnd, totalHours, observation, justificativaTipo)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, obraId, vehicleId, employeeId, date, morningStart, morningEnd, afternoonStart, afternoonEnd, totalHours, observation, justificativaTipo, planoItemKey)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
             await db.execute(query, [
                 newId, obraId, vehicleId, employeeId || null, date,
                 morningStart || null, morningEnd || null, afternoonStart || null, afternoonEnd || null,
-                totalHours || 0, observation || null, justificativaTipo || null
+                totalHours || 0, observation || null, justificativaTipo || null, planoItemKey
             ]);
             
             await syncObraFromLogs(obraId, req.io);

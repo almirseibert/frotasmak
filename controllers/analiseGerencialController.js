@@ -1,4 +1,5 @@
 const db = require('../database');
+const { chaveNoNivelDoMapa } = require('../utils/planoItem');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
 const { todayBRT } = require('../utils/dateBRT');
 
@@ -458,15 +459,23 @@ const getProjecaoObra = async (req, res) => {
         const horasContratadas = Object.values(horasContratadasPorTipo)
             .reduce((a, b) => a + (parseFloat(b) || 0), 0);
 
-        // Logs diários: horas por (data, tipo de veículo)
+        // Logs diários: horas por (data, item do plano, grupo do veículo).
+        // O item declarado na alocação vem SEPARADO do grupo do veículo porque
+        // `valoresPorTipo` é um mapa de nível GRUPO e `planoItemKey` costuma ser
+        // SUBGRUPO: consultar o mapa de preços com chave de subgrupo devolve 0 em
+        // silêncio, e a obra apareceria faturando nada. `chaveNoNivelDoMapa` escolhe
+        // a chave certa — preserva a substituição quando o item existe no mapa, cai
+        // no grupo da máquina quando não existe.
+        // Ver docs/item-de-contrato-e-substituicao-plano.md.
         const [logRows] = await db.query(`
-            SELECT DATE_FORMAT(l.date, '%Y-%m-%d') AS data_log,
-                   v.tipo                          AS tipo_veiculo,
-                   SUM(l.totalHours)               AS horas
+            SELECT DATE_FORMAT(l.date, '%Y-%m-%d')  AS data_log,
+                   NULLIF(l.planoItemKey, '')       AS itemKey,
+                   v.tipo                           AS grupoVeiculo,
+                   SUM(l.totalHours)                AS horas
               FROM daily_work_logs l
               LEFT JOIN vehicles v ON v.id = l.vehicleId
              WHERE l.obraId = ?
-             GROUP BY data_log, tipo_veiculo
+             GROUP BY data_log, itemKey, grupoVeiculo
              ORDER BY data_log ASC
         `, [obraId]);
 
@@ -475,7 +484,10 @@ const getProjecaoObra = async (req, res) => {
         logRows.forEach(r => {
             const d = r.data_log;
             if (!porData[d]) porData[d] = [];
-            porData[d].push({ tipo: r.tipo_veiculo, horas: parseFloat(r.horas) || 0 });
+            porData[d].push({
+                tipo: chaveNoNivelDoMapa(r.itemKey, r.grupoVeiculo, valoresPorTipo),
+                horas: parseFloat(r.horas) || 0,
+            });
         });
 
         const todasDatas = Object.keys(porData).sort();
