@@ -5,7 +5,7 @@ const path = require('path');
 const { ensureComboioPartner, deactivateComboioPartner } = require('../utils/ensureComboioPartner');
 const { openPeriod: openComboioPeriod, closeActivePeriod: closeComboioPeriod } = require('../utils/comboioPeriodo');
 // Item do plano de trabalho desempenhado pela maquina (docs/item-de-contrato-e-substituicao-plano.md)
-const { validarItemKey } = require('../utils/planoItem');
+const { validarItemKey, consomeHorasDoPlano } = require('../utils/planoItem');
 // Transições de estado do veículo: a lógica vive no service para poder rodar
 // dentro da transação de outro fluxo (fechamento de relato de ocorrência).
 const {
@@ -341,7 +341,14 @@ const allocateToObra = async (req, res) => {
 
         // Item do plano que a máquina vai desempenhar. Chave inexistente é recusada:
         // deixar passar criaria vínculo órfão, que é justamente o que se quer evitar.
-        const validacaoItem = validarItemKey(obra, planoItemKey);
+        // Exceção: veículo medido por odômetro (leves / caminhões de trecho) não
+        // aponta hora nenhuma. Se vier item na requisição, é ruído — gravá-lo
+        // sujaria o realizado de um item que esta alocação nunca vai abater.
+        const consomeHoras = await consomeHorasDoPlano(vehicle, connection);
+
+        const validacaoItem = consomeHoras
+            ? validarItemKey(obra, planoItemKey)
+            : { ok: true, itemKey: null };
         if (!validacaoItem.ok) {
             const err = new Error(validacaoItem.erro);
             err.statusCode = 400;

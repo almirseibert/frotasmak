@@ -13,6 +13,27 @@
 // um mesmo contrato pode ter 100 h de 30T e 200 h de 23T, e só quem aloca sabe
 // qual serviço aquela máquina vai fazer.
 
+const { getCampoLeitura } = require('./consumo');
+
+/**
+ * Esta máquina consome horas do plano de trabalho?
+ *
+ * Veículos Leves e Caminhões de Trecho são alocados em obra como qualquer outra
+ * máquina, mas são medidos em KM: não apontam hora, logo não abatem item nenhum
+ * do plano. Exigir que quem aloca escolha um item para eles seria pedir uma
+ * decisão sem efeito — e pior, poluiria o realizado do item escolhido.
+ *
+ * O critério é a UNIDADE do grupo na taxonomia (odômetro x horímetro), não o nome
+ * do grupo: os grupos são editáveis na tela de admin, e a unidade é o que já
+ * define, em todo o resto do sistema, se aquilo roda por km ou por hora.
+ *
+ * @returns {Promise<boolean>}
+ */
+const consomeHorasDoPlano = async (veiculo, conn) => {
+    const campo = await getCampoLeitura((veiculo?.tipo || '').trim(), conn);
+    return campo !== 'odometro';
+};
+
 const parseJson = (v) => {
     if (v == null) return null;
     if (typeof v === 'object') return v;
@@ -95,6 +116,7 @@ const carregarTaxonomia = async (db) => {
  *  3. dois ou mais itens do grupo                              -> confirmar, SEM pré-seleção
  *  4. nenhum item do grupo                                     -> confirmar, lista completa
  *  5. obra sem plano cadastrado                                -> sem vínculo (legado)
+ *  0. máquina medida em KM (leves / trecho)                    -> não consome horas
  *
  * Não pré-selecionar no caso 3 é deliberado: é onde 23T e 30T se separam. Um default
  * ali transformaria o "confirmar" em reflexo justamente onde a escolha é real.
@@ -102,7 +124,16 @@ const carregarTaxonomia = async (db) => {
  * @returns {{ decisao: 'automatico'|'confirmar'|'sem_plano', itemKey: string|null,
  *             sugestao: string|null, candidatos: Array, motivo: string }}
  */
-const resolverItemDaAlocacao = ({ obra, veiculo, grupoDoSubtipo }) => {
+const resolverItemDaAlocacao = ({ obra, veiculo, grupoDoSubtipo, consomeHoras = true }) => {
+    // Antes de tudo: quem não aponta hora não abate item do plano. Ver consomeHorasDoPlano.
+    if (consomeHoras === false) {
+        return {
+            decisao: 'nao_consome_horas', itemKey: null, sugestao: null, candidatos: [],
+            motivo: `${veiculo?.tipo || 'Este veículo'} é medido por odômetro e não aponta horas: `
+                + 'a alocação não abate nenhum item do plano de trabalho.',
+        };
+    }
+
     const itens = itensDoPlano(obra);
     if (itens.length === 0) {
         return {
@@ -246,6 +277,7 @@ const verificarItensRemovidos = async (db, obraId, obraAtual, planoNovo) => {
 
 module.exports = {
     itensDoPlano,
+    consomeHorasDoPlano,
     chaveNoNivelDoMapa,
     carregarTaxonomia,
     resolverItemDaAlocacao,

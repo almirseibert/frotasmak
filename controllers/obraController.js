@@ -2,7 +2,7 @@ const db = require('../database');
 const { v4: uuidv4 } = require('uuid');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
 const { dispatchAsync } = require('../services/notificationDispatcher');
-const { itensDoPlano, carregarTaxonomia, resolverItemDaAlocacao, verificarItensRemovidos, chaveNoNivelDoMapa } = require('../utils/planoItem');
+const { itensDoPlano, carregarTaxonomia, resolverItemDaAlocacao, verificarItensRemovidos, chaveNoNivelDoMapa, consomeHorasDoPlano } = require('../utils/planoItem');
 
 // ===================================================================================
 // FUNÇÃO AUXILIAR DE PARSE SEGURO
@@ -659,7 +659,9 @@ const getPlanoItens = async (req, res) => {
         if (!veiculo) return res.status(404).json({ error: 'Veículo não encontrado.' });
 
         const grupoDoSubtipo = await carregarTaxonomia(db);
-        const resolucao = resolverItemDaAlocacao({ obra, veiculo, grupoDoSubtipo });
+        // Leves e caminhões de trecho são alocados, mas rodam em km: não abatem item.
+        const consomeHoras = await consomeHorasDoPlano(veiculo, db);
+        const resolucao = resolverItemDaAlocacao({ obra, veiculo, grupoDoSubtipo, consomeHoras });
 
         res.json({ obraId: obra.id, itens, resolucao });
     } catch (error) {
