@@ -29,7 +29,9 @@ try { pushService = require('../services/pushService'); } catch { /* opcional */
 // Os 4 momentos do dia. Rotinas e 'extra' NÃO entram aqui: é este array que
 // governa a contagem de aderência (4/4) e o corte do WhatsApp.
 const MOMENTOS_DIA = ['horimetro_inicio', 'foto_manha', 'foto_tarde', 'horimetro_fim'];
-const TIPOS_VALIDOS = [...MOMENTOS_DIA, 'extra', ...TIPOS_ROTINA];
+// 'planilha_trabalho' NÃO entra em MOMENTOS_DIA: como as rotinas, fica à parte da
+// contagem 4/4 e do corte do WhatsApp; é apenas exibida e cobrada 2x/semana.
+const TIPOS_VALIDOS = [...MOMENTOS_DIA, 'extra', 'planilha_trabalho', ...TIPOS_ROTINA];
 const TIPOS_COM_LEITURA = ['horimetro_inicio', 'horimetro_fim'];
 
 const MOMENTO_LABEL = {
@@ -38,6 +40,7 @@ const MOMENTO_LABEL = {
     foto_manha: 'Trabalho (manhã)',
     foto_tarde: 'Trabalho (tarde)',
     extra: 'Extra',
+    planilha_trabalho: 'Planilha de trabalho',
     rotina_filtro: ROTINA_LABEL.rotina_filtro,
     rotina_graxa: ROTINA_LABEL.rotina_graxa,
 };
@@ -525,7 +528,20 @@ async function meuEscopo(req, res) {
             }
         }
 
-        return res.json({ data, obras, equipamentos, hojeEnviado, hojeContagem, rotinas });
+        // Planilha de trabalho (2x/semana). Devida sexta sempre + terça/quarta
+        // conforme o fim de semana trabalhado (derivado). Fica à parte do 4/4 —
+        // é só exibida no app como um card próprio e cobrada pela fila.
+        const planilha = {};
+        for (const v of equipamentos) {
+            try {
+                if (await aderenciaSvc.planilhaDevidaVeiculo(v.id, data)) {
+                    const jaEnviou = (hojeEnviado[v.id] || []).includes('planilha_trabalho');
+                    planilha[v.id] = { pendente: !jaEnviou };
+                }
+            } catch { /* não pode derrubar a tela */ }
+        }
+
+        return res.json({ data, obras, equipamentos, hojeEnviado, hojeContagem, rotinas, planilha });
     } catch (err) {
         console.error('❌ [evidencias] meu-escopo:', err.code, '|', err.sqlMessage || err.message);
         return res.status(500).json({ error: 'Falha ao carregar escopo.' });
@@ -542,11 +558,21 @@ async function listar(req, res) {
         const limit = Math.min(100, Math.max(1, parseInt(req.query.limit || '50', 10)));
         const off = (page - 1) * limit;
 
+        // Filtro em cascata com multisseleção: obra_id/veiculo_id/tipo aceitam um
+        // valor único (retrocompatível) OU vários (array ou CSV) → cláusula IN.
+        const toList = (v) => Array.isArray(v)
+            ? v.filter(x => x != null && x !== '')
+            : (typeof v === 'string' && v.length)
+                ? v.split(',').map(s => s.trim()).filter(Boolean)
+                : [];
+        const inClause = (col, vals) => { where.push(`${col} IN (${vals.map(() => '?').join(',')})`); params.push(...vals); };
+
         const where = []; const params = [];
-        if (obra_id)     { where.push('r.obra_id = ?'); params.push(obra_id); }
-        if (veiculo_id)  { where.push('r.veiculo_id = ?'); params.push(veiculo_id); }
-        if (employee_id) { where.push('r.employee_id = ?'); params.push(employee_id); }
-        if (tipo)        { where.push('r.tipo = ?'); params.push(tipo); }
+        const lObra = toList(obra_id), lVeic = toList(veiculo_id), lTipo = toList(tipo);
+        if (lObra.length) inClause('r.obra_id', lObra);
+        if (lVeic.length) inClause('r.veiculo_id', lVeic);
+        if (employee_id)  { where.push('r.employee_id = ?'); params.push(employee_id); }
+        if (lTipo.length) inClause('r.tipo', lTipo);
         where.push('r.estado = ?'); params.push(estado || 'ativo');
 
         // Teto de 92 dias — nunca período ilimitado (§7).
@@ -1195,6 +1221,7 @@ const MOMENTO_CURTO = {
     horimetro_inicio: 'horímetro de início', horimetro_fim: 'horímetro final',
     foto_manha: 'foto da manhã', foto_tarde: 'foto da tarde',
     rotina_filtro: 'foto da limpeza de filtro', rotina_graxa: 'foto do engraxamento',
+    planilha_trabalho: 'foto da planilha de trabalho',
 };
 
 // Aprova e ENVIA um item (push direto ao operador). É o ÚNICO ponto de disparo.
@@ -1241,24 +1268,58 @@ async function cobrancaAprovar(req, res) {
     }
 }
 
+// ---- Espaçamento entre mensagens de cobrança (§ anti-flood do bot de WhatsApp) --
+// Hoje o canal é push (não tem esse risco), mas o intervalo já fica ATIVO e
+// configurável para quando o WhatsApp entrar — assim o comportamento não muda no
+// dia da virada. Faixa padrão 30s–1:18 (78s), com jitter para não sair "robótico".
+const _sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const _clampS = (v, lo, hi, def) => { const n = Number(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : def; };
+async function _intervaloCobranca() {
+    const min = _clampS(await getSetting('evid_cobranca_intervalo_min_s', 30), 5, 600, 30);
+    const max = Math.max(min, _clampS(await getSetting('evid_cobranca_intervalo_max_s', 78), 5, 600, 78));
+    return { minMs: min * 1000, maxMs: max * 1000, min, max };
+}
+const _jitterMs = (minMs, maxMs) => Math.round(minMs + Math.random() * (maxMs - minMs));
+
 async function cobrancasAprovarLote(req, res) {
     try {
         const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
         if (!ids.length) return res.status(400).json({ error: 'Nenhum item selecionado.' });
-        let enviadas = 0, semToken = 0;
-        for (const id of ids) {
-            const [[item]] = await db.query('SELECT * FROM evidencia_cobranca_fila WHERE id = ?', [id]);
-            if (item && item.status === 'PENDENTE') {
-                const r = await _enviarCobranca(item, req);
-                if (r.enviado) enviadas++; else semToken++;
+        const { minMs, maxMs, min, max } = await _intervaloCobranca();
+
+        // Responde já; o disparo espaçado roda em segundo plano para não segurar o
+        // request (poderiam ser dezenas de itens × dezenas de segundos). Os itens
+        // saem de PENDENTE conforme são enviados; o server:sync no fim atualiza a UI.
+        res.json({ ok: true, enfileiradas: ids.length, intervalo_s: [min, max] });
+
+        (async () => {
+            for (let i = 0; i < ids.length; i++) {
+                try {
+                    const [[item]] = await db.query('SELECT * FROM evidencia_cobranca_fila WHERE id = ?', [ids[i]]);
+                    if (item && item.status === 'PENDENTE') await _enviarCobranca(item, req);
+                } catch (e) { console.warn('⚠️ [evid cobranca lote]', e.message); }
+                if (i < ids.length - 1) await _sleep(_jitterMs(minMs, maxMs));
             }
-        }
-        syncEvidencias(req);
-        return res.json({ ok: true, enviadas, semToken });
+            syncEvidencias(req);
+        })().catch(e => console.warn('⚠️ [evid cobranca lote drain]', e.message));
     } catch (err) {
         console.error('❌ [evidencias] cobrancasAprovarLote:', err.message);
-        return res.status(500).json({ error: 'Falha ao enviar cobranças.' });
+        if (!res.headersSent) return res.status(500).json({ error: 'Falha ao enviar cobranças.' });
     }
+}
+
+// GET/PUT /api/evidencias/cobrancas/config — faixa de intervalo entre mensagens.
+async function cobrancaConfig(req, res) {
+    if (req.method === 'PUT') {
+        try {
+            const b = req.body || {};
+            if (b.min_s != null) await setSetting('evid_cobranca_intervalo_min_s', _clampS(b.min_s, 5, 600, 30));
+            if (b.max_s != null) await setSetting('evid_cobranca_intervalo_max_s', _clampS(b.max_s, 5, 600, 78));
+            return res.json({ ok: true });
+        } catch (err) { return res.status(500).json({ error: err.message }); }
+    }
+    const { min, max } = await _intervaloCobranca();
+    return res.json({ min_s: min, max_s: max });
 }
 
 async function cobrancaIgnorar(req, res) {
@@ -1336,6 +1397,31 @@ async function dossie(req, res) {
 async function offloadListar(req, res) {
     try { return res.json({ lotes: await offloadSvc.listarLotes(req.query.obra_id || null) }); }
     catch (err) { return res.status(500).json({ error: err.message }); }
+}
+
+// GET /api/evidencias/armazenamento — quantas evidências ATIVAS (e bytes) cada
+// obra ainda ocupa no servidor. Alimenta o selo "com dados no servidor" na lista
+// de obras / ficha da obra — inclusive para obras já concluídas que não foram
+// arquivadas. Só conta 'ativo' (arquivadas já não ocupam original).
+async function armazenamentoObras(req, res) {
+    try {
+        const [rows] = await db.query(
+            `SELECT obra_id, COUNT(*) AS ativos, COALESCE(SUM(arquivo_bytes),0) AS bytes,
+                    MIN(data_ref) AS de, MAX(data_ref) AS ate
+               FROM evidencia_registro WHERE estado = 'ativo' GROUP BY obra_id`);
+        const map = {};
+        for (const r of rows) {
+            map[r.obra_id] = {
+                ativos: Number(r.ativos), bytes: Number(r.bytes),
+                de: r.de ? String(r.de).slice(0, 10) : null,
+                ate: r.ate ? String(r.ate).slice(0, 10) : null,
+            };
+        }
+        return res.json({ obras: map });
+    } catch (err) {
+        console.error('❌ [evidencias] armazenamento:', err.message);
+        return res.status(500).json({ error: 'Falha ao calcular armazenamento.' });
+    }
 }
 
 async function offloadGerar(req, res) {
@@ -1651,8 +1737,8 @@ module.exports = {
     carimboEditar, carimboRemover, carimboRestaurar,
     getConfig, putConfig, aderencia, consolidar,
     rotinasConfig, rotinasPreview, carimboConfig, carimboPreview,
-    cobrancasListar, cobrancaAprovar, cobrancasAprovarLote, cobrancaIgnorar,
+    cobrancasListar, cobrancaAprovar, cobrancasAprovarLote, cobrancaIgnorar, cobrancaConfig,
     dossie,
-    offloadListar, offloadGerar, offloadDownload, offloadConfirmar, restaurar,
+    offloadListar, armazenamentoObras, offloadGerar, offloadDownload, offloadConfirmar, restaurar,
     corteConfig, corteStatus, resumoObra,
 };

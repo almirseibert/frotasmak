@@ -147,6 +147,34 @@ function nEsimoDiaSolicitado(de, k, diasSemana, feriadoSet = null) {
     return null;
 }
 
+// ---- Planilha de trabalho (2x/semana, fim de expediente) -----------------------
+// Regra do negócio: SEXTA sempre; TERÇA se a obra trabalhou o fim de semana;
+// QUARTA se NÃO trabalhou. "Trabalhou o fim de semana" é DERIVADO (existe
+// evidência no sáb/dom imediatamente anteriores) — a query fica no service; aqui
+// só a parte PURA: quais dias disparam e quais datas de fim de semana consultar.
+const PLANILHA_DOW = { TERCA: 2, QUARTA: 3, SEXTA: 5 };
+
+// [sábado, domingo] do fim de semana imediatamente anterior a `ymd`.
+const fimDeSemanaAnterior = (ymd) => {
+    const domingo = somarDias(ymd, -diaDaSemana(ymd)); // domingo desta semana (getDay=0)
+    return [somarDias(domingo, -1), domingo];
+};
+
+// Só terça/quarta dependem de saber se trabalhou o fim de semana.
+const planilhaDependeDeFds = (ymd) => {
+    const dow = diaDaSemana(ymd);
+    return dow === PLANILHA_DOW.TERCA || dow === PLANILHA_DOW.QUARTA;
+};
+
+// Planilha é devida em `ymd`? `trabalhouFds` só importa em terça/quarta.
+const planilhaDevida = (ymd, trabalhouFds) => {
+    const dow = diaDaSemana(ymd);
+    if (dow === PLANILHA_DOW.SEXTA) return true;          // sexta sempre
+    if (dow === PLANILHA_DOW.TERCA) return !!trabalhouFds; // terça se trabalhou
+    if (dow === PLANILHA_DOW.QUARTA) return !trabalhouFds; // quarta se não
+    return false;
+};
+
 // ---- Haversine (metros) --------------------------------------------------------
 const haversineM = (lat1, lng1, lat2, lng2) => {
     if ([lat1, lng1, lat2, lng2].some(v => v == null || isNaN(v))) return null;
@@ -203,5 +231,6 @@ module.exports = {
     RETROATIVO_MAX_DIAS_PADRAO, HISTORICO_DIAS_PADRAO,
     resolveRegraObra, haversineM,
     diaDaSemana, diaSolicitado, somarDias, contarDiasSolicitados, nEsimoDiaSolicitado,
+    PLANILHA_DOW, fimDeSemanaAnterior, planilhaDependeDeFds, planilhaDevida,
     VARIANTES, assinarVariante, assinarTodas, verificarAssinatura,
 };

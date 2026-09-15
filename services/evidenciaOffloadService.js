@@ -30,6 +30,7 @@ function buildDados(r) {
         horimetro_inicio: 'Início do expediente', horimetro_fim: 'Fim do expediente',
         foto_manha: 'Trabalho (manhã)', foto_tarde: 'Trabalho (tarde)', extra: 'Extra',
         rotina_filtro: 'Limpeza de filtro', rotina_graxa: 'Engraxamento',
+        planilha_trabalho: 'Planilha de trabalho',
     };
     let leitura = null;
     if (r.horimetro != null) leitura = `Horímetro ${Number(r.horimetro).toLocaleString('pt-BR')} h`;

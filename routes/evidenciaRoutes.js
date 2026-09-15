@@ -64,6 +64,9 @@ router.get('/aderencia', requireGestor, ctrl.aderencia);
 router.post('/consolidar', requireGestor, ctrl.consolidar);
 router.get('/cobrancas', requireGestor, ctrl.cobrancasListar);
 router.post('/cobrancas/aprovar-lote', requireGestor, ctrl.cobrancasAprovarLote);
+// Faixa de intervalo (anti-flood do WhatsApp): leitura p/ gestor, escrita restrita.
+router.get('/cobrancas/config', requireGestor, ctrl.cobrancaConfig);
+router.put('/cobrancas/config', requireEditorCarimbo, ctrl.cobrancaConfig);
 router.post('/cobrancas/:id/aprovar', requireGestor, ctrl.cobrancaAprovar);
 router.put('/cobrancas/:id/ignorar', requireGestor, ctrl.cobrancaIgnorar);
 router.get('/config/:obraId', requireGestor, ctrl.getConfig);
@@ -85,6 +88,9 @@ router.get('/corte/status', requireGestor, ctrl.corteStatus);
 router.post('/resumo-obra', requireGestor, ctrl.resumoObra);
 
 // ---- Offload / arquivamento (admin — apaga originais na confirmação) ----
+// Resumo de armazenamento por obra (selo "com dados no servidor"). Antes de
+// '/:id' e visível a qualquer gestor (leitura).
+router.get('/armazenamento', requireGestor, ctrl.armazenamentoObras);
 router.get('/offload', requireEditorCarimbo, ctrl.offloadListar);
 router.post('/offload', requireEditorCarimbo, ctrl.offloadGerar);
 router.get('/offload/:id/zip', requireEditorCarimbo, ctrl.offloadDownload);

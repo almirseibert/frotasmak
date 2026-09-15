@@ -8,10 +8,30 @@
 // -----------------------------------------------------------------------------
 const db = require('../database');
 const { randomUUID } = require('crypto');
-const { resolveRegraObra, exigeEvidencia, diaSolicitado } = require('../utils/evidenciaRegras');
+const {
+    resolveRegraObra, exigeEvidencia, diaSolicitado,
+    planilhaDependeDeFds, planilhaDevida, fimDeSemanaAnterior,
+} = require('../utils/evidenciaRegras');
 const { loadHolidaySet } = require('../utils/businessDays');
 const rotinaSvc = require('./evidenciaRotinaService');
 const { TIPOS_ROTINA } = require('../utils/evidenciaRotinas');
+
+// Planilha de trabalho é devida hoje para este veículo? Deriva "trabalhou o fim
+// de semana" da presença de qualquer evidência no sáb/dom anteriores (decisão do
+// negócio). Só faz o round-trip ao banco em terça/quarta, que é quando importa.
+async function planilhaDevidaVeiculo(veiculoId, dataRef) {
+    if (!planilhaDependeDeFds(dataRef)) return planilhaDevida(dataRef, false);
+    const [sab, dom] = fimDeSemanaAnterior(dataRef);
+    let trabalhou = false;
+    try {
+        const [[row]] = await db.query(
+            `SELECT 1 FROM evidencia_registro
+              WHERE veiculo_id = ? AND estado <> 'descartado' AND data_ref IN (?, ?) LIMIT 1`,
+            [veiculoId, sab, dom]);
+        trabalhou = !!row;
+    } catch { /* */ }
+    return planilhaDevida(dataRef, trabalhou);
+}
 
 const TODOS_MOMENTOS = ['horimetro_inicio', 'foto_manha', 'foto_tarde', 'horimetro_fim'];
 const MOMENTO_COL = {
@@ -168,6 +188,13 @@ async function projetarCobrancas(dataRef) {
                     if (TIPOS_ROTINA.includes(a.tipo) && !presentes.has(a.tipo)) faltantes.push(a.tipo);
                 }
             } catch { /* tabela ainda não criada */ }
+
+            // Planilha de trabalho (2x/semana). Cobrável, à parte do 4/4.
+            try {
+                if (await planilhaDevidaVeiculo(v.id, dataRef) && !presentes.has('planilha_trabalho')) {
+                    faltantes.push('planilha_trabalho');
+                }
+            } catch { /* */ }
         }
 
         if (!faltantes.length) continue;
@@ -211,4 +238,4 @@ async function projetarCobrancas(dataRef) {
     return { cobrancas: criadas };
 }
 
-module.exports = { consolidarDia, projetarCobrancas };
+module.exports = { consolidarDia, projetarCobrancas, planilhaDevidaVeiculo };

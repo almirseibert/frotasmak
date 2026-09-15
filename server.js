@@ -2211,11 +2211,11 @@ const migracaoEvidenciasFase2 = (async () => {
         await passo('enum tipo registro', () => db.query(`
             ALTER TABLE evidencia_registro MODIFY COLUMN tipo
             ENUM('horimetro_inicio','horimetro_fim','foto_manha','foto_tarde','extra',
-                 'rotina_filtro','rotina_graxa') NOT NULL`));
+                 'rotina_filtro','rotina_graxa','planilha_trabalho') NOT NULL`));
         await passo('enum tipo cobranca', () => db.query(`
             ALTER TABLE evidencia_cobranca_fila MODIFY COLUMN tipo
             ENUM('horimetro_inicio','horimetro_fim','foto_manha','foto_tarde',
-                 'rotina_filtro','rotina_graxa') NOT NULL`));
+                 'rotina_filtro','rotina_graxa','planilha_trabalho') NOT NULL`));
 
         // ---- Carimbo reduzido do anexo retroativo ----
         await passo('enum stamp_mode', () => db.query(`
