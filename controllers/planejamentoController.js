@@ -667,7 +667,7 @@ const getPanorama = async (req, res) => {
                     ...l,
                     // 'grupo' avisa a tela que aquela linha está agregada porque o
                     // cadastro de veiculos daquele grupo ainda nao tem sub_tipo.
-                    granularidade: grupoDoSubtipo.has(l.subgrupo) ? 'subgrupo' : 'grupo',
+                    granularidade: gruposDoSubtipo.has(l.subgrupo) ? 'subgrupo' : 'grupo',
                     // Plano pede horas de uma chave que nao existe em NENHUMA maquina
                     // (propria, oficina ou terceira). Ou a empresa nao tem esse
                     // equipamento, ou o plano foi escrito com um nome que a taxonomia
