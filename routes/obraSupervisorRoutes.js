@@ -7,6 +7,8 @@ router.use(authMiddleware);
 
 router.get('/dashboard', controller.getDashboardData);
 router.get('/contracts-overview', controller.getContractsOverview);
+// Valor TOTAL contratado com terceiros (toda a carteira, não só obras em execução)
+router.get('/terceiros-resumo', controller.getTerceirosResumo);
 router.get('/obra/:id', controller.getObraDetails);
 router.post('/crm', controller.addCrmLog);
 router.post('/contract', controller.upsertContract);

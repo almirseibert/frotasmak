@@ -29,6 +29,39 @@ const addBusinessDays = (startDate, daysToAdd) => {
     return currentDate;
 };
 
+
+// Contratos de terceiros que representam VALOR CONTRATADO vigente. `assinado` é
+// o contrato com PDF assinado (mais firme que `ativo`, que é o estado default
+// antes do upload): os dois comprometem dinheiro e precisam somar. Fora ficam
+// apenas 'concluido' e 'cancelado', que não são mais compromisso futuro.
+const STATUS_CONTRATADO = ['ativo', 'assinado'];
+
+// Comprometimento com terceiros por obra. Uma única query agregada — os .map dos
+// controladores já são N+1, não piorar. O valor NÃO depende do vínculo de
+// máquina (só a leitura de horas dependeria), então é confiável mesmo nos
+// contratos com `maquinas` ainda nulo.
+const carregarTerceirosPorObra = async () => {
+    const mapa = {};
+    try {
+        const [terc] = await db.query(
+            `SELECT obraId, SUM(valorTotal) AS valor, COUNT(*) AS qtd
+               FROM terceiro_contratos
+              WHERE status IN (?)
+              GROUP BY obraId`,
+            [STATUS_CONTRATADO]
+        );
+        (terc || []).forEach((t) => {
+            mapa[String(t.obraId)] = {
+                valor: parseFloat(t.valor) || 0,
+                qtd: parseInt(t.qtd, 10) || 0,
+            };
+        });
+    } catch (e) {
+        console.warn('⚠️ [supervisor] agregado de terceiros indisponível:', e.message);
+    }
+    return mapa;
+};
+
 // ==================================================================================
 // CONTROLADORES
 // ==================================================================================
@@ -44,28 +77,7 @@ exports.getDashboardData = async (req, res) => {
         try { const [r] = await db.query('SELECT * FROM obra_contracts'); contracts = r || []; } catch (e) {}
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
 
-        // Comprometimento com terceiros: quanto do valor de contrato da obra já
-        // está destinado a contratos de terceirizados ATIVOS. Uma única query
-        // agregada — o .map abaixo já é N+1, não piorar. O valor NÃO depende do
-        // vínculo de máquina (só a leitura de horas dependeria), então é confiável
-        // mesmo nos contratos com `maquinas` ainda nulo.
-        const terceirosMap = {};
-        try {
-            const [terc] = await db.query(`
-                SELECT obraId, SUM(valorTotal) AS valor, COUNT(*) AS qtd
-                FROM terceiro_contratos
-                WHERE status = 'ativo'
-                GROUP BY obraId
-            `);
-            (terc || []).forEach((t) => {
-                terceirosMap[String(t.obraId)] = {
-                    valor: parseFloat(t.valor) || 0,
-                    qtd: parseInt(t.qtd, 10) || 0,
-                };
-            });
-        } catch (e) {
-            console.warn('⚠️ [supervisor] agregado de terceiros indisponível:', e.message);
-        }
+        const terceirosMap = await carregarTerceirosPorObra();
 
         const dashboardData = await Promise.all(allObras.map(async (obra) => {
             const obraId = String(obra.id);
@@ -184,28 +196,7 @@ exports.getContractsOverview = async (req, res) => {
         try { const [r] = await db.query('SELECT * FROM obra_contracts'); contracts = r || []; } catch (e) {}
         const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
 
-        // Comprometimento com terceiros: quanto do valor de contrato da obra já
-        // está destinado a contratos de terceirizados ATIVOS. Uma única query
-        // agregada — o .map abaixo já é N+1, não piorar. O valor NÃO depende do
-        // vínculo de máquina (só a leitura de horas dependeria), então é confiável
-        // mesmo nos contratos com `maquinas` ainda nulo.
-        const terceirosMap = {};
-        try {
-            const [terc] = await db.query(`
-                SELECT obraId, SUM(valorTotal) AS valor, COUNT(*) AS qtd
-                FROM terceiro_contratos
-                WHERE status = 'ativo'
-                GROUP BY obraId
-            `);
-            (terc || []).forEach((t) => {
-                terceirosMap[String(t.obraId)] = {
-                    valor: parseFloat(t.valor) || 0,
-                    qtd: parseInt(t.qtd, 10) || 0,
-                };
-            });
-        } catch (e) {
-            console.warn('⚠️ [supervisor] agregado de terceiros indisponível:', e.message);
-        }
+        const terceirosMap = await carregarTerceirosPorObra();
 
         const obrasComValor = allObras
             .map(obra => {
@@ -245,6 +236,74 @@ exports.getContractsOverview = async (req, res) => {
         });
     } catch (error) {
         console.error('Erro Contracts Overview:', error);
+        res.status(500).json({ message: 'Erro interno.', debug: error.message });
+    }
+};
+
+// Resumo GLOBAL de terceiros. O card do dashboard sozinho só enxergava obras
+// com status 'ativa', e o contrato só contava se status='ativo' — isso escondia
+// compromisso já assinado em obra que ainda não entrou em execução. Aqui o
+// número é o VALOR TOTAL CONTRATADO com terceiros, em qualquer obra da carteira,
+// com o recorte "em execução" devolvido ao lado para quem precisar dele.
+exports.getTerceirosResumo = async (req, res) => {
+    try {
+        const [allObras] = await db.query(
+            "SELECT id, nome, status, valorTotalContrato FROM obras WHERE (tipo_registro IS NULL OR tipo_registro != 'centro_custo')"
+        );
+
+        let contracts = [];
+        try { const [r] = await db.query('SELECT * FROM obra_contracts'); contracts = r || []; } catch (e) {}
+        const contractMap = {}; contracts.forEach(c => contractMap[c.obra_id] = c);
+
+        const terceirosMap = await carregarTerceirosPorObra();
+
+        // Carteira = obras ainda não finalizadas. É o denominador honesto para o
+        // "% da carteira": comparar terceiros de obras futuras contra receita só
+        // das ativas inflaria o percentual.
+        const EM_CARTEIRA = ['ativa', 'mobilizacao', 'planejada', 'radar'];
+
+        const acc = {
+            total: 0, qtd: 0, obras: 0,
+            emExecucao: 0, qtdEmExecucao: 0,
+            carteiraValor: 0,
+            porStatusObra: {},
+        };
+
+        allObras.forEach((obra) => {
+            const contract = contractMap[obra.id] || {};
+            if (contract.is_hidden === 1) return;
+
+            const statusObra = obra.status || 'indefinida';
+            if (EM_CARTEIRA.includes(statusObra)) {
+                acc.carteiraValor += parseFloat(contract.total_value) || parseFloat(obra.valorTotalContrato) || 0;
+            }
+
+            const terc = terceirosMap[String(obra.id)];
+            if (!terc || terc.valor <= 0) return;
+
+            acc.total += terc.valor;
+            acc.qtd += terc.qtd;
+            acc.obras += 1;
+            if (statusObra === 'ativa') { acc.emExecucao += terc.valor; acc.qtdEmExecucao += terc.qtd; }
+
+            if (!acc.porStatusObra[statusObra]) acc.porStatusObra[statusObra] = { valor: 0, contratos: 0, obras: 0 };
+            acc.porStatusObra[statusObra].valor += terc.valor;
+            acc.porStatusObra[statusObra].contratos += terc.qtd;
+            acc.porStatusObra[statusObra].obras += 1;
+        });
+
+        res.json({
+            valorTotalContratado: acc.total,
+            qtdContratos: acc.qtd,
+            qtdObras: acc.obras,
+            valorEmExecucao: acc.emExecucao,
+            qtdContratosEmExecucao: acc.qtdEmExecucao,
+            carteiraValor: acc.carteiraValor,
+            percCarteira: acc.carteiraValor > 0 ? (acc.total / acc.carteiraValor) * 100 : 0,
+            porStatusObra: acc.porStatusObra,
+        });
+    } catch (error) {
+        console.error('Erro Terceiros Resumo:', error);
         res.status(500).json({ message: 'Erro interno.', debug: error.message });
     }
 };
@@ -826,7 +885,15 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
     const veiculoHorasMap = new Map(veiculoLogs.map(r => [String(r.vehicleId), parseFloat(r.horas) || 0]));
 
     // Mapa obra→nome (para enriquecer)
-    const obraIdsUnicos = Array.from(new Set(scopedVehicles.map(v => v.obraAtualId).filter(Boolean))).map(String);
+    // Inclui também as obras atuais das máquinas que já saíram desta obra — sem
+    // isso a coluna "obra atual" delas viria vazia.
+    const obraIdsUnicos = Array.from(new Set(
+        allVehicles
+            .filter(v => v.estado_calculado !== 'sucata'
+                && (String(v.obraAtualId) === String(obraId) || (veiculoHorasMap.get(String(v.id)) || 0) > 0))
+            .map(v => v.obraAtualId)
+            .filter(Boolean)
+    )).map(String);
     let obraNomeMap = new Map();
     if (obraIdsUnicos.length) {
         const ph = obraIdsUnicos.map(() => '?').join(',');
@@ -834,9 +901,27 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
         obraNomeMap = new Map(rows.map(r => [String(r.id), r.nome]));
     }
 
-    const porVeiculo = scopedVehicles.map(v => {
+    // A lista precisa cobrir TODA hora que entrou no numerador, senão a média da
+    // obra fica inexplicável na tela: `horasExecutadas` conta toda máquina que
+    // passou pela obra no período (o vínculo é o log), enquanto `scopedVehicles`
+    // é só quem está alocado HOJE. Uma obra com média de 90% e um único caminhão
+    // listado a 30% era exatamente isso — as horas das máquinas que já saíram
+    // somavam no topo e não apareciam embaixo.
+    //
+    // As desalocadas entram com `alocadaAtualmente: false` e capacidade 0: elas
+    // não estão na frota de hoje, logo não têm capacidade a cobrar no período —
+    // o aproveitamento individual delas fica indefinido de propósito (o front
+    // mostra "—"), mas as horas aparecem e a soma fecha.
+    const scopedIds = new Set(scopedVehicles.map(v => String(v.id)));
+    const passaramPelaObra = isGeral ? [] : allVehicles.filter(v =>
+        v.estado_calculado !== 'sucata'
+        && !scopedIds.has(String(v.id))
+        && (veiculoHorasMap.get(String(v.id)) || 0) > 0
+    );
+
+    const linhaVeiculo = (v, alocada) => {
         const emManutencao = v.estado_calculado === 'manutencao';
-        const capPeriodo = emManutencao ? 0 : HORAS_POR_DIA * diasUteis;
+        const capPeriodo = (!alocada || emManutencao) ? 0 : HORAS_POR_DIA * diasUteis;
         const horas = veiculoHorasMap.get(String(v.id)) || 0;
         return {
             id: v.id,
@@ -844,6 +929,7 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
             modelo: v.modelo,
             tipo: v.tipo,
             estado: v.estado_calculado,
+            alocadaAtualmente: alocada,
             obraId: v.obraAtualId ? String(v.obraAtualId) : null,
             obraNome: v.obraAtualId ? (obraNomeMap.get(String(v.obraAtualId)) || '—') : '—',
             capPeriodo,
@@ -851,7 +937,12 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
             aproveitamento: capPeriodo > 0 ? (horas / capPeriodo) * 100 : 0,
             horas_perdidas: Math.max(0, capPeriodo - horas),
         };
-    }).sort((a, b) => a.aproveitamento - b.aproveitamento);
+    };
+
+    const porVeiculo = [
+        ...scopedVehicles.map(v => linhaVeiculo(v, true)),
+        ...passaramPelaObra.map(v => linhaVeiculo(v, false)),
+    ].sort((a, b) => a.aproveitamento - b.aproveitamento);
 
     return {
         range: { startDate, endDate, diasTotais, diasUteis },

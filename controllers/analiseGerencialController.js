@@ -1,5 +1,5 @@
 const db = require('../database');
-const { chaveNoNivelDoMapa } = require('../utils/planoItem');
+const { chaveNoNivelDoMapa, itensDoPlano } = require('../utils/planoItem');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
 const { todayBRT } = require('../utils/dateBRT');
 
@@ -471,11 +471,12 @@ const getProjecaoObra = async (req, res) => {
             SELECT DATE_FORMAT(l.date, '%Y-%m-%d')  AS data_log,
                    NULLIF(l.planoItemKey, '')       AS itemKey,
                    v.tipo                           AS grupoVeiculo,
+                   NULLIF(v.sub_tipo, '')           AS subgrupoVeiculo,
                    SUM(l.totalHours)                AS horas
               FROM daily_work_logs l
               LEFT JOIN vehicles v ON v.id = l.vehicleId
              WHERE l.obraId = ?
-             GROUP BY data_log, itemKey, grupoVeiculo
+             GROUP BY data_log, itemKey, grupoVeiculo, subgrupoVeiculo
              ORDER BY data_log ASC
         `, [obraId]);
 
@@ -505,6 +506,51 @@ const getProjecaoObra = async (req, res) => {
                 totalFaturamentoRS += e.horas * preco;
             });
         });
+
+        // ── Realizado por ITEM do contrato ───────────────────────────────────
+        // O contrato é assinado item a item (subgrupo: "Escavadeira 13t" ≠ "26t"),
+        // então o progresso agregado esconde o que interessa: um item pode estar
+        // em 130% e outro em 20% e o total parecer saudável.
+        //
+        // A chave do realizado precisa sair no MESMO nível do plano — `itensDoPlano`
+        // devolve subgrupo quando a obra tem plano por subgrupo e grupo quando não
+        // tem. Hora cuja chave não existe no plano NÃO é descartada: vira item
+        // "fora do contrato", que é justamente o dado que faltava (hora apontada
+        // em máquina que o contrato não prevê).
+        const plano = itensDoPlano(obra);
+        const nivelPlano = plano[0]?.nivel || 'grupo';
+        const planoMap = {};
+        plano.forEach((i) => { planoMap[i.key] = i.horasContratadas; });
+
+        const chaveDoItem = (r) => (nivelPlano === 'subgrupo'
+            ? ((r.itemKey || '').trim() || r.subgrupoVeiculo || r.grupoVeiculo || null)
+            : chaveNoNivelDoMapa(r.itemKey, r.grupoVeiculo, planoMap));
+
+        const realizadoPorItem = {};
+        logRows.forEach((r) => {
+            const chave = chaveDoItem(r) || '(sem classificação)';
+            realizadoPorItem[chave] = (realizadoPorItem[chave] || 0) + (parseFloat(r.horas) || 0);
+        });
+
+        const porItem = [...new Set([...Object.keys(planoMap), ...Object.keys(realizadoPorItem)])]
+            .map((key) => {
+                const contratadas = parseFloat(planoMap[key]) || 0;
+                const executadas = realizadoPorItem[key] || 0;
+                return {
+                    key,
+                    nivel: nivelPlano,
+                    foraDoContrato: !Object.prototype.hasOwnProperty.call(planoMap, key),
+                    horasContratadas: Math.round(contratadas * 10) / 10,
+                    horasExecutadas: Math.round(executadas * 10) / 10,
+                    percentual: contratadas > 0 ? Math.round((executadas / contratadas) * 1000) / 10 : null,
+                };
+            })
+            // Fora do contrato primeiro (é exceção e precisa ser vista), depois do
+            // item mais estourado para o menos executado.
+            .sort((a, b) => {
+                if (a.foraDoContrato !== b.foraDoContrato) return a.foraDoContrato ? -1 : 1;
+                return (b.percentual ?? -1) - (a.percentual ?? -1);
+            });
 
         // Quinzenas: janelas fixas de 15 dias a partir da data de início operacional
         const quinzenas = [];
@@ -624,6 +670,7 @@ const getProjecaoObra = async (req, res) => {
                 diasParaFinalizar,
                 diasComLancamento,
                 quinzenas,
+                porItem,
             },
             combustivel: {
                 totalLitros:           Math.round(totalLitros        * 10)  / 10,
