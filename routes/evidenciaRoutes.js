@@ -95,6 +95,7 @@ router.get('/offload', requireEditorCarimbo, ctrl.offloadListar);
 router.post('/offload', requireEditorCarimbo, ctrl.offloadGerar);
 router.get('/offload/:id/zip', requireEditorCarimbo, ctrl.offloadDownload);
 router.post('/offload/:id/confirmar', requireEditorCarimbo, ctrl.offloadConfirmar);
+router.delete('/offload/:id', requireEditorCarimbo, ctrl.offloadDescartar);
 router.post('/restaurar/preflight', requireEditorCarimbo, uploadRestore.array('arquivos'), ctrl.restaurar);
 router.post('/restaurar', requireEditorCarimbo, uploadRestore.array('arquivos'), ctrl.restaurar);
 

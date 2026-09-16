@@ -1407,7 +1407,7 @@ async function armazenamentoObras(req, res) {
     try {
         const [rows] = await db.query(
             `SELECT obra_id, COUNT(*) AS ativos, COALESCE(SUM(arquivo_bytes),0) AS bytes,
-                    MIN(data_ref) AS de, MAX(data_ref) AS ate
+                    DATE_FORMAT(MIN(data_ref), '%Y-%m-%d') AS de, DATE_FORMAT(MAX(data_ref), '%Y-%m-%d') AS ate
                FROM evidencia_registro WHERE estado = 'ativo' GROUP BY obra_id`);
         const map = {};
         for (const r of rows) {
@@ -1461,6 +1461,17 @@ async function offloadConfirmar(req, res) {
     } catch (err) {
         console.error('❌ [evidencias] offloadConfirmar:', err.code, '|', err.message);
         return res.status(err.code ? 400 : 500).json({ error: err.message });
+    }
+}
+
+async function offloadDescartar(req, res) {
+    try {
+        const r = await offloadSvc.descartarLote(req.params.id);
+        syncEvidencias(req);
+        return res.json({ ok: true, ...r });
+    } catch (err) {
+        console.error('❌ [evidencias] offloadDescartar:', err.code, '|', err.message);
+        return res.status(err.code === 'NAO_ACHOU' ? 404 : err.code ? 400 : 500).json({ error: err.message });
     }
 }
 
@@ -1739,6 +1750,6 @@ module.exports = {
     rotinasConfig, rotinasPreview, carimboConfig, carimboPreview,
     cobrancasListar, cobrancaAprovar, cobrancasAprovarLote, cobrancaIgnorar, cobrancaConfig,
     dossie,
-    offloadListar, armazenamentoObras, offloadGerar, offloadDownload, offloadConfirmar, restaurar,
+    offloadListar, armazenamentoObras, offloadGerar, offloadDownload, offloadConfirmar, offloadDescartar, restaurar,
     corteConfig, corteStatus, resumoObra,
 };
