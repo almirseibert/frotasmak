@@ -83,7 +83,7 @@ const getAllEmployees = async (req, res) => {
             return obraDate > opDate ? obraDate : opDate;
         };
         
-        const cleanRows = rows.map(emp => {
+        const cleanRows = rows.map(({ vulgo, ...emp }) => {  // vulgo removido por decisão do RH — nunca expor
             let statusLimpo = emp.status;
             if (statusLimpo && typeof statusLimpo === 'string' && statusLimpo.includes('{')) {
                 try { statusLimpo = JSON.parse(statusLimpo).status || 'ativo'; } catch(e) { statusLimpo = 'ativo'; }
@@ -126,7 +126,7 @@ const getEmployeeById = async (req, res) => {
         const [rows] = await db.query('SELECT * FROM employees WHERE id = ?', [req.params.id]);
         if (rows.length === 0) return res.status(404).json({ error: 'Funcionário não encontrado' });
         
-        const emp = rows[0];
+        const { vulgo, ...emp } = rows[0];  // vulgo removido por decisão do RH — nunca expor
         res.json({
             ...emp,
             aso: parseJsonSafe(emp.aso),
@@ -187,7 +187,6 @@ const createEmployee = async (req, res) => {
         const values = [
             newId,
             valOrNull(data.nome),
-            valOrNull(data.vulgo),
             valOrNull(data.registroInterno),
             valOrNull(data.cpf),
             valOrNull(data.rg),
@@ -218,12 +217,12 @@ const createEmployee = async (req, res) => {
         // Query sem a coluna telefone, mas com as novas colunas
         await connection.execute(
             `INSERT INTO employees (
-                id, nome, vulgo, registroInterno, cpf, rg, dataNascimento, funcao, contato, email,
+                id, nome, registroInterno, cpf, rg, dataNascimento, funcao, contato, email,
                 endereco, cidade, dataAdmissao, dataContratacao, status,
                 cnhNumero, cnhCategoria, cnhVencimento, cnhEmissao, exameToxicologicoVencimento,
                 aso, epi, cnh, certificados, isPlaceholder,
                 cidade_ibge, equipamentos_aptos, is_lider_obra
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             values
         );
 
@@ -317,7 +316,6 @@ const updateEmployee = async (req, res) => {
 
         let params = [
             valOrNull(data.nome),
-            valOrNull(data.vulgo),
             valOrNull(data.registroInterno),
             valOrNull(data.cpf),
             valOrNull(data.rg),
@@ -353,7 +351,7 @@ const updateEmployee = async (req, res) => {
 
         await connection.execute(
             `UPDATE employees SET
-                nome=?, vulgo=?, registroInterno=?, cpf=?, rg=?, dataNascimento=?, funcao=?,
+                nome=?, registroInterno=?, cpf=?, rg=?, dataNascimento=?, funcao=?,
                 contato=?, email=?, endereco=?, cidade=?,
                 dataAdmissao=?,
                 cnhNumero=?, cnhCategoria=?, cnhVencimento=?, cnhEmissao=?, exameToxicologicoVencimento=?,
