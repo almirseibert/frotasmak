@@ -113,6 +113,63 @@ const maquinasEmConflito = async (maquinas, exceptId = null) => {
     return maquinas.filter((id) => usadas.has(id));
 };
 
+// ---------------------------------------------------------------------------
+// Saldo do plano de trabalho da obra
+// ---------------------------------------------------------------------------
+// O plano da obra (horasContratadasPorSubTipo) é o teto do que pode ser repassado
+// a terceiros. Cada contrato consome horas por SUBGRUPO; o saldo para um contrato
+// é: horas do plano − horas dos OUTROS contratos de terceiro da mesma obra.
+// A execução física (dailyWorkLogs) NÃO entra: ela é progresso, não compromisso.
+const parseJsonObj = (v) => {
+    if (!v) return {};
+    if (typeof v === 'string') { try { return JSON.parse(v) || {}; } catch { return {}; } }
+    return typeof v === 'object' ? v : {};
+};
+
+// Valida os itens do contrato contra o saldo do plano. Retorna [] ou a lista de
+// estouros [{ type, saldo, pedido }]. Obra sem plano por subgrupo não restringe nada.
+const validarContraPlanoDaObra = async (obraId, itens, exceptId = null) => {
+    const pedido = {};
+    itens.forEach((i) => { pedido[i.type] = (pedido[i.type] || 0) + num(i.hours); });
+    if (Object.keys(pedido).length === 0) return [];
+
+    const [obraRows] = await db.query(
+        'SELECT horasContratadasPorSubTipo FROM obras WHERE id = ?', [obraId]
+    );
+    const plano = parseJsonObj(obraRows[0]?.horasContratadasPorSubTipo);
+    if (Object.keys(plano).length === 0) return [];
+
+    const [outrosRows] = await db.query(
+        'SELECT * FROM terceiro_contratos WHERE obraId = ? AND status <> ?' +
+        (exceptId ? ' AND id <> ?' : ''),
+        exceptId ? [obraId, 'cancelado', exceptId] : [obraId, 'cancelado']
+    );
+    // Conta o VIGENTE (base + aditivos assinados) — é o compromisso real, e é o
+    // mesmo número que o frontend mostra como saldo.
+    const outros = await anexarVigente(db, outrosRows);
+    const comprometido = {};
+    outros.forEach((c) => {
+        normalizeItens(c.vigente?.itensContratados ?? c.itensContratados).forEach((i) => {
+            comprometido[i.type] = (comprometido[i.type] || 0) + i.hours;
+        });
+    });
+
+    const estouros = [];
+    Object.entries(pedido).forEach(([type, horas]) => {
+        // Subgrupo fora do plano da obra: não há saldo a controlar (contratos legados).
+        if (!(type in plano)) return;
+        const saldo = num(plano[type]) - (comprometido[type] || 0);
+        if (horas > saldo + 1e-6) estouros.push({ type, saldo, pedido: horas });
+    });
+    return estouros;
+};
+
+const erroDePlano = (estouros) => ({
+    error: 'Horas acima do saldo do plano de trabalho da obra: ' +
+        estouros.map((e) => `${e.type} (pedido ${e.pedido} h, saldo ${e.saldo} h)`).join(', ') + '.',
+    estouros,
+});
+
 // Gera número sequencial por ano: CT-AAAA-NNN (idempotente por UNIQUE no banco).
 const gerarNumero = async () => {
     const ano = new Date().getFullYear();
@@ -169,6 +226,8 @@ const createTerceiroContrato = async (req, res) => {
         if (conflito.length > 0) {
             return res.status(400).json({ error: 'Uma ou mais máquinas já estão vinculadas a outro contrato.' });
         }
+        const estouros = await validarContraPlanoDaObra(obraId, itensFinal);
+        if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
         const numero = await gerarNumero();
         await db.execute(
             `INSERT INTO terceiro_contratos
@@ -229,6 +288,8 @@ const updateTerceiroContrato = async (req, res) => {
         if (conflito.length > 0) {
             return res.status(400).json({ error: 'Uma ou mais máquinas já estão vinculadas a outro contrato.' });
         }
+        const estouros = await validarContraPlanoDaObra(obraId, itensFinal, id);
+        if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
         const [result] = await db.execute(
             `UPDATE terceiro_contratos
                 SET locadorId = ?, obraId = ?, tipoMaquina = ?, horasContratadas = ?, valorHora = ?,
