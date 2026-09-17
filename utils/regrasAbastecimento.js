@@ -189,10 +189,13 @@ const checkOrdemAbertaDuplicada = async (connection, vehicleId, ymdAbastecimento
     if (ehFimDeSemanaOuFeriado(ymdAbastecimento) || allowMultiple || isOutsourced) return null;
 
     const placeholders = STATUS_ORDEM_ENCERRADA.map(() => '?').join(',');
+    // Ordem de entrada de comboio enche o TANQUE de estoque do caminhão, não o
+    // motor dele: não pode travar a ordem normal do próprio comboio.
     const [openRows] = await connection.execute(
         `SELECT id, authNumber, status, is_hidden, hidden_by_user_id
            FROM refuelings
           WHERE vehicleId = ?
+            AND COALESCE(comboioEntrada, 0) = 0
             AND status NOT IN (${placeholders})
           LIMIT 1
           ${opts.travar ? 'FOR UPDATE' : ''}`,

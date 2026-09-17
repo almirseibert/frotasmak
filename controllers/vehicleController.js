@@ -111,27 +111,6 @@ const getVehicleById = async (req, res) => {
     }
 };
 
-// Garante que veículo comboio tem entrada correspondente em partners
-const syncComboioPartner = async (vehicleId, registroInterno, placa, ativo) => {
-    try {
-        const nome = `Comboio ${registroInterno || placa || vehicleId}`;
-        const status = ativo ? 'ativo' : 'inativo';
-        const { randomUUID } = require('crypto');
-        const [[existing]] = await db.execute('SELECT id FROM partners WHERE vehicle_id = ?', [vehicleId]);
-        if (existing) {
-            await db.execute('UPDATE partners SET razaoSocial = ?, status_operacional = ? WHERE vehicle_id = ?', [nome, status, vehicleId]);
-        } else {
-            const partnerId = randomUUID();
-            await db.execute(
-                `INSERT INTO partners (id, razaoSocial, tipo_parceiro, status_operacional, vehicle_id) VALUES (?, ?, 'comboio', ?, ?)`,
-                [partnerId, nome, status, vehicleId]
-            );
-        }
-    } catch (err) {
-        console.warn('[syncComboioPartner]', err.message);
-    }
-};
-
 const createVehicle = async (req, res) => {
     const data = req.body;
     

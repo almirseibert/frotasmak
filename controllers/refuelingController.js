@@ -14,6 +14,8 @@ const {
 } = require('../utils/regrasAbastecimento');
 const { ymdBRT } = require('../utils/dateBRT');
 const { notifyComboioEntrada } = require('../services/orderNotifier');
+const comboioEstoque = require('../services/comboioEstoqueService');
+const { toComboioTankKey, tankKeyToOrderKey } = require('../utils/fuelTypes');
 const fuelCredits = require('../utils/partnerFuelCredits');
 const { dispatchAsync, insertLog } = require('../services/notificationDispatcher');
 const { sendEmail } = require('../services/emailService');
@@ -33,7 +35,7 @@ const dispatchOrderToPartner = async (refuelingId, opts = {}) => {
                     r.fuelType, r.litrosLiberados, r.isFillUp, r.pricePerLiter, r.invoiceNumber,
                     r.needsArla, r.isFillUpArla, r.litrosLiberadosArla,
                     r.outros, r.outrosValor,
-                    r.odometro, r.horimetro, r.createdBy,
+                    r.odometro, r.horimetro, r.createdBy, r.vehicleId, r.comboioEntrada,
                     v.registroInterno, v.placa, v.marca, v.modelo, v.tipo,
                     e.nome AS employeeName,
                     o.nome AS obraName
@@ -55,11 +57,15 @@ const dispatchOrderToPartner = async (refuelingId, opts = {}) => {
             issuer = cb?.userEmail || cb?.name || cb?.email || issuer;
         } catch (_) {}
 
+        // Ordem de ENTRADA de comboio: além do posto, os contatos do comboio
+        // (aba Admin → Veículos → Comboios) também recebem a ordem.
+        const isEntradaComboio = Number(r.comboioEntrada) === 1;
+
         notifyComboioEntrada({
             partnerId: r.partnerId,
-            comboioVehicleId: null,
+            comboioVehicleId: isEntradaComboio ? r.vehicleId : null,
             order: {
-                tipo: 'abastecimento',
+                tipo: isEntradaComboio ? 'entrada_comboio' : 'abastecimento',
                 authNumber: r.authNumber,
                 date: r.data,
                 fuelType: r.fuelType,
@@ -72,7 +78,7 @@ const dispatchOrderToPartner = async (refuelingId, opts = {}) => {
                 vehicleLabel: `${r.registroInterno || ''} - ${r.placa || ''}`.trim(),
                 vehicleModelo: `${r.marca || ''} ${r.modelo || ''}`.trim(),
                 employeeName: r.employeeName || '',
-                obraName: r.obraName || '',
+                obraName: isEntradaComboio ? 'Estoque Comboio' : (r.obraName || ''),
                 readingLabel,
                 readingValue,
                 needsArla: !!r.needsArla,
@@ -346,7 +352,8 @@ const getAllRefuelings = async (req, res) => {
         // `scope` serve a tela de Abastecimento, que exibe três listas distintas
         // e não precisa da tabela inteira para montá-las.
         if (scope === 'pendentes') {
-            where += " AND is_hidden = 0 AND status IN ('Aberta', 'BloqueadoLeitura', 'BloqueadoOrcamento')";
+            // Ordens de entrada de comboio têm lista própria na tela de Comboio.
+            where += " AND is_hidden = 0 AND COALESCE(comboioEntrada, 0) = 0 AND status IN ('Aberta', 'BloqueadoLeitura', 'BloqueadoOrcamento')";
         } else if (scope === 'ocultas') {
             where += ' AND is_hidden = 1';
         } else if (scope === 'historico') {
@@ -715,8 +722,11 @@ const getOpenRefuelingByVehicle = async (req, res) => {
         if (!vehicleId) return res.status(400).json({ error: 'vehicleId é obrigatório.' });
 
         const params = [vehicleId, ...CLOSED_STATUSES];
+        // Ordem de entrada de comboio (abastece o TANQUE de estoque) não impede
+        // ordem para o motor do próprio caminhão-comboio.
         let sql = `SELECT * FROM refuelings
                     WHERE vehicleId = ?
+                      AND COALESCE(comboioEntrada, 0) = 0
                       AND status NOT IN (${CLOSED_STATUSES.map(() => '?').join(',')})`;
         if (excludeId) {
             sql += ' AND id != ?';
@@ -831,11 +841,45 @@ const getRefuelingById = async (req, res) => {
 
 const respostaErro = (status, body) => ({ ok: false, status, body });
 
-const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
+// comboioEntrada=true: ordem para ENCHER O TANQUE de estoque de um comboio no
+// posto. Não passa pelas travas de frota (ordem duplicada, operador fictício,
+// leitura, orçamento), não tem obra nem leitura, e só mexe no estoque na baixa
+// (services/comboioEstoqueService.syncEntrada).
+const criarOrdem = async (data, { actor = {}, io = null, comboioEntrada = false } = {}) => {
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
+        if (comboioEntrada) {
+            const [[comboio]] = await connection.execute(
+                'SELECT isComboioVehicle FROM vehicles WHERE id = ?', [data.vehicleId || null]
+            );
+            if (!comboio || Number(comboio.isComboioVehicle) !== 1) {
+                await connection.rollback();
+                return respostaErro(400, { error: 'O veículo da ordem de entrada precisa ser um comboio.' });
+            }
+            const tankKey = toComboioTankKey(data.fuelType);
+            if (!tankKey) {
+                await connection.rollback();
+                return respostaErro(400, { error: 'Combustível inválido para o tanque do comboio (Diesel S10 ou S500).' });
+            }
+            if (!data.partnerId) {
+                await connection.rollback();
+                return respostaErro(400, { error: 'Selecione o posto da ordem de entrada.' });
+            }
+            data = {
+                ...data,
+                fuelType: tankKeyToOrderKey(tankKey),
+                obraId: null,
+                odometro: null,
+                horimetro: null,
+                needsArla: false,
+                isHidden: false,
+                solicitacaoId: null,
+                status: null,
+            };
+        }
+
         // ─── Ordem reservada: valida a permissão no servidor ───
         // Nunca confiar no frontend. E falhar em vez de criar visível: quem pediu
         // ordem reservada acredita que ela ficará oculta — criar visível em silêncio
@@ -890,7 +934,7 @@ const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
         // travar=true usa FOR UPDATE, serializando contra criações concorrentes.
         let isOutsourcedVehicle = false;
         let allowMultiple = false;
-        if (data.vehicleId) {
+        if (data.vehicleId && !comboioEntrada) {
             const [vehicleRows] = await connection.execute(
                 'SELECT permiteMultiplosAbastecimentos, isOutsourced FROM vehicles WHERE id = ?',
                 [data.vehicleId]
@@ -961,13 +1005,14 @@ const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
         // Veículos fictícios (permiteMultiplosAbastecimentos=1: ajuda de custo, gerador,
         // lava-jato etc.) também pulam o bloqueio de leitura — eles aceitam qualquer
         // valor de km/Hr e a ordem nunca deve cair na fila de liberação da Administração.
-        const skipLeituraCheck = isOutsourcedVehicle || allowMultiple;
+        const skipLeituraCheck = isOutsourcedVehicle || allowMultiple || comboioEntrada;
         const motivoLeitura = skipLeituraCheck ? null : await checkLeituraBloqueada(
             connection, data.vehicleId,
             data.odometro != null ? parseFloat(data.odometro) : null,
             data.horimetro != null ? parseFloat(data.horimetro) : null
         );
-        const bloqueadoOrcamento = !isOutsourcedVehicle && !motivoLeitura && await checkOrcamentoBloqueado(connection, data.obraId);
+        const bloqueadoOrcamento = !comboioEntrada && !isOutsourcedVehicle && !motivoLeitura
+            && await checkOrcamentoBloqueado(connection, data.obraId);
 
         let initialStatus = data.status || 'Aberta';
         if (motivoLeitura) initialStatus = 'BloqueadoLeitura';
@@ -1009,6 +1054,9 @@ const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
         if (data.solicitacaoId) {
             refuelingData.createdFromSolicitacaoId = String(data.solicitacaoId);
         }
+        if (comboioEntrada) {
+            refuelingData.comboioEntrada = 1;
+        }
 
         // Só acrescenta as colunas de reserva quando a ordem é reservada — assim o
         // INSERT do caminho normal permanece exatamente como era.
@@ -1041,7 +1089,7 @@ const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
 
         // Busca tipo do veículo para aplicar regra odômetro/horímetro
         const [[vehicleRow]] = await connection.execute('SELECT tipo FROM vehicles WHERE id = ?', [data.vehicleId]);
-        if (vehicleRow) {
+        if (vehicleRow && !comboioEntrada) {
             const readingVal = safeNum(data.odometro) || safeNum(data.horimetro);
             if (readingVal) {
                 await updateVehicleReading(connection, data.vehicleId, vehicleRow.tipo, readingVal, 'auto');
@@ -1073,7 +1121,9 @@ const criarOrdem = async (data, { actor = {}, io = null } = {}) => {
         }
 
         await connection.commit();
-        global.emitSync(['refuelings', 'vehicles', 'expenses', 'solicitacoes', 'partner_fuel_credits']);
+        global.emitSync(comboioEntrada
+            ? ['refuelings', 'comboio', 'partner_fuel_credits']
+            : ['refuelings', 'vehicles', 'expenses', 'solicitacoes', 'partner_fuel_credits']);
 
         // Ordem salva bloqueada (leitura ou orçamento) → alerta admins (pop-up + som).
         // Ordem reservada não dispara o alerta: o texto carrega o número da ordem e
@@ -1134,16 +1184,47 @@ const createRefuelingOrder = async (req, res) => {
     return res.status(resultado.status).json(resultado.body);
 };
 
+// POST /comboioTransactions/entrada/ordem — ordem ao posto para encher o comboio.
+// O emissor vem do token (createdBy do corpo é descartado).
+const createComboioEntradaOrder = async (req, res) => {
+    const createdBy = { id: req.user?.id ?? null, userEmail: req.user?.email || null };
+    if (req.body?.createdBy?.userEmail === createdBy.userEmail) {
+        createdBy.name = req.body.createdBy.name || req.body.createdBy.nome || null;
+    }
+    const resultado = await criarOrdem(
+        { ...req.body, createdBy },
+        { actor: req.user, io: req.io, comboioEntrada: true }
+    );
+    return res.status(resultado.status).json(resultado.body);
+};
+
 const updateRefuelingOrder = async (req, res) => {
     const { id } = req.params;
-    const data = req.body;
+    let data = req.body;
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        const [oldData] = await connection.execute('SELECT * FROM refuelings WHERE id = ?', [id]);
+        const [oldData] = await connection.execute('SELECT * FROM refuelings WHERE id = ? FOR UPDATE', [id]);
         if (oldData.length === 0) throw new Error('Ordem não encontrada');
         const oldRefueling = oldData[0];
+
+        // Ordem de entrada de comboio: sem obra, sem leitura, veículo fixo e
+        // combustível restrito aos tanques do comboio.
+        const isEntradaComboio = Number(oldRefueling.comboioEntrada) === 1;
+        if (isEntradaComboio) {
+            let fuelType;
+            if (data.fuelType !== undefined) {
+                const tankKey = toComboioTankKey(data.fuelType);
+                if (!tankKey) throw new Error('Combustível inválido para o tanque do comboio.');
+                fuelType = tankKeyToOrderKey(tankKey);
+            }
+            data = {
+                ...data,
+                vehicleId: undefined, obraId: undefined, odometro: undefined, horimetro: undefined,
+                needsArla: undefined, fuelType,
+            };
+        }
 
         const updateData = {};
         if (data.date) {
@@ -1263,8 +1344,15 @@ const updateRefuelingOrder = async (req, res) => {
             console.warn('[partnerFuelCredits] re-empenho na edição falhou:', e.message);
         }
 
+        // Entrada de comboio já baixada: a edição reflete no tanque e na despesa.
+        if (isEntradaComboio) {
+            await comboioEstoque.syncEntrada(connection, id, { actor: req.user, previous: oldRefueling });
+        }
+
         await connection.commit();
-        global.emitSync(['refuelings', 'expenses', 'vehicles', 'partner_fuel_credits']);
+        global.emitSync(isEntradaComboio
+            ? ['refuelings', 'comboio', 'expenses', 'vehicles', 'partner_fuel_credits']
+            : ['refuelings', 'expenses', 'vehicles', 'partner_fuel_credits']);
 
         // Reenvia a ordem ao posto (WhatsApp/e-mail conforme configurado) com um
         // alerta de "ORDEM ALTERADA — desconsiderar a anterior". Só reenvia se a
@@ -1410,8 +1498,12 @@ const confirmRefuelingOrder = async (req, res) => {
 
         const [[vehicle]] = await connection.execute('SELECT tipo FROM vehicles WHERE id = ?', [order.vehicleId]);
 
+        // Baixa de ordem de entrada de comboio: o diesel vai para o TANQUE de
+        // estoque, não para o motor — sem leitura e sem média de consumo.
+        const isEntradaComboio = Number(order.comboioEntrada) === 1;
+
         const vehicleUpdate = {};
-        const readingVal = safeNum(confirmedReading);
+        const readingVal = isEntradaComboio ? null : safeNum(confirmedReading);
 
         if (readingVal && vehicle) {
             const updatedField = await updateVehicleReading(connection, order.vehicleId, vehicle.tipo, readingVal, 'auto');
@@ -1477,6 +1569,23 @@ const confirmRefuelingOrder = async (req, res) => {
                 createdBy: req.user?.id || null,
                 reason: 'Baixa',
             });
+            // Baixa refeita (correção de litros/preço/NF de ordem já concluída):
+            // settleOrder não é idempotente — sem estornar a baixa anterior, o
+            // posto pré-pago seria debitado duas vezes pela mesma ordem.
+            if (order.status === 'Concluída' || order.status === 'Concluida') {
+                const baixaAnterior = fuelCredits.computeSettlementAmount(order);
+                if (baixaAnterior > 0 && order.partnerId) {
+                    await fuelCredits.insertEntry(connection, {
+                        partnerId: order.partnerId,
+                        entryType: 'adjustment',
+                        amount: baixaAnterior, // positivo: devolve ao disponível
+                        orderId: order.id,
+                        obraId: order.obraId,
+                        description: `Estorno da baixa anterior (correção) ordem #${order.authNumber || ''}`.trim(),
+                        createdBy: req.user?.id || null,
+                    });
+                }
+            }
             await fuelCredits.settleOrder(connection, {
                 id: order.id,
                 authNumber: order.authNumber,
@@ -1493,15 +1602,21 @@ const confirmRefuelingOrder = async (req, res) => {
             console.warn('[partnerFuelCredits] settle/release na baixa falhou:', e.message);
         }
 
-        // Recalcula médias de consumo após confirmar abastecimento
-        try {
-            await recalcFuelAverage(connection, order.vehicleId);
-        } catch (e) {
-            console.warn('[recalcFuelAverage] Falha ao recalcular média:', e.message);
+        if (isEntradaComboio) {
+            await comboioEstoque.syncEntrada(connection, id, { actor: req.user, previous: order });
+        } else {
+            // Recalcula médias de consumo após confirmar abastecimento
+            try {
+                await recalcFuelAverage(connection, order.vehicleId);
+            } catch (e) {
+                console.warn('[recalcFuelAverage] Falha ao recalcular média:', e.message);
+            }
         }
 
         await connection.commit();
-        global.emitSync(['refuelings', 'vehicles', 'expenses', 'partners', 'solicitacoes', 'partner_fuel_credits']);
+        global.emitSync(isEntradaComboio
+            ? ['refuelings', 'comboio', 'vehicles', 'expenses', 'partners', 'partner_fuel_credits']
+            : ['refuelings', 'vehicles', 'expenses', 'partners', 'solicitacoes', 'partner_fuel_credits']);
         res.json({ message: 'Abastecimento confirmado com sucesso.' });
 
         // Verifica percentual de combustível da obra após confirmar (fire-and-forget)
@@ -1532,6 +1647,19 @@ const deleteRefuelingOrder = async (req, res) => {
              return res.status(404).json({ error: 'Ordem não encontrada' });
         }
         const ref = rows[0];
+
+        // Entrada de comboio já baixada: estorna o tanque antes. Recusa se o
+        // diesel já foi distribuído (tanque ficaria negativo), salvo admin com ?force=1.
+        const isEntradaComboio = Number(ref.comboioEntrada) === 1;
+        if (isEntradaComboio) {
+            const force = req.query?.force === '1'
+                && String(req.user?.role || req.user?.user_type || '').toLowerCase() === 'admin';
+            const estorno = await comboioEstoque.removeEntrada(connection, ref, { force });
+            if (!estorno.ok) {
+                await connection.rollback();
+                return res.status(estorno.status).json(estorno.body);
+            }
+        }
 
         // Saldo pré-pago: estorna empenho ou baixa antes de excluir a ordem.
         try {
@@ -1579,9 +1707,14 @@ const deleteRefuelingOrder = async (req, res) => {
         if (ref.obraId && ref.partnerId && ref.fuelType) {
             await updateMonthlyExpense(connection, ref.obraId, ref.partnerId, ref.fuelType, ref.data);
         }
+        if (isEntradaComboio) {
+            await comboioEstoque.updateEstoqueExpense(connection, null, ref.partnerId, ref.fuelType, ref.data);
+        }
 
         await connection.commit();
-        global.emitSync(['refuelings', 'expenses', 'solicitacoes', 'partner_fuel_credits']);
+        global.emitSync(isEntradaComboio
+            ? ['refuelings', 'comboio', 'vehicles', 'expenses', 'partner_fuel_credits']
+            : ['refuelings', 'expenses', 'solicitacoes', 'partner_fuel_credits']);
         res.status(204).end();
     } catch (error) {
         await connection.rollback();
@@ -1742,6 +1875,7 @@ module.exports = {
     getUltimoRefuelingByVehicle,
     getRefuelingById,
     createRefuelingOrder,
+    createComboioEntradaOrder,
     updateRefuelingOrder,
     confirmRefuelingOrder,
     deleteRefuelingOrder,

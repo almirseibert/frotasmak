@@ -106,6 +106,7 @@ async function recalcFuelAverage(connection, vehicleId) {
            FROM refuelings
           WHERE vehicleId = ?
             AND status = 'Concluída'
+            AND COALESCE(comboioEntrada, 0) = 0
             AND litrosAbastecidos > 0
             AND ${campoLeitura} > 0
           ORDER BY data DESC

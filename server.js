@@ -80,6 +80,21 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
         // 'comboio' (devolve ao tanque do comboio), 'transfusao' (abastece outro
         // equipamento) ou 'eliminado' (combustível contaminado, descartado).
         { table: 'comboio_transactions',   column: 'destino',                          def: "VARCHAR(20) DEFAULT NULL" },
+        // ── Revisão do comboio (2026-09): paridade com o Abastecimento ──
+        // status: saída com leitura/orçamento fora da regra é salva bloqueada
+        //         (BloqueadoLeitura/BloqueadoOrcamento) e liberada pelo admin.
+        // refuelingId: vínculo com a cópia em `refuelings`. Sem ele, excluir uma
+        //         saída/entrada deixava a cópia órfã (histórico e média fantasmas).
+        // pricePerLiter/valorTotal gravados: o estorno usa o mesmo valor lançado.
+        { table: 'comboio_transactions',   column: 'status',                           def: "VARCHAR(30) NOT NULL DEFAULT 'Concluída'" },
+        { table: 'comboio_transactions',   column: 'refuelingId',                      def: 'VARCHAR(36) DEFAULT NULL' },
+        { table: 'comboio_transactions',   column: 'motivoBloqueio',                   def: 'VARCHAR(500) DEFAULT NULL' },
+        { table: 'comboio_transactions',   column: 'pricePerLiter',                    def: 'DECIMAL(10,4) DEFAULT NULL' },
+        { table: 'comboio_transactions',   column: 'createdByUserId',                  def: 'VARCHAR(255) DEFAULT NULL' },
+        { table: 'comboio_transactions',   column: 'liberadoPor',                      def: 'JSON DEFAULT NULL' },
+        { table: 'comboio_transactions',   column: 'liberadoEm',                       def: 'DATETIME DEFAULT NULL' },
+        // Ordem ao posto para ENCHER o comboio (entrada = ordem + baixa).
+        { table: 'refuelings',             column: 'comboioEntrada',                   def: 'TINYINT(1) NOT NULL DEFAULT 0' },
         { table: 'partners',               column: 'vehicle_id',                       def: 'VARCHAR(36) DEFAULT NULL' },
         // Campo KM/Hr atual no modal de OS/OC
         { table: 'orders',                 column: 'kmHrAtual',                        def: 'DECIMAL(12,1) DEFAULT NULL' },
@@ -226,6 +241,90 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
     } catch (e) {
         console.warn('[migration] backfill comboio_transactions.destino:', e.message);
     }
+
+    // ── Comboio: índices das listas por escopo e vínculo com refuelings ──
+    await addIndexIfMissing(db, 'comboio_transactions', 'idx_ct_comboio_date', '`comboioVehicleId`, `date`');
+    await addIndexIfMissing(db, 'comboio_transactions', 'idx_ct_status_date', '`status`, `date`');
+    await addIndexIfMissing(db, 'comboio_transactions', 'idx_ct_refueling', '`refuelingId`');
+    await addIndexIfMissing(db, 'refuelings', 'idx_refuelings_auth', '`authNumber`');
+    await addIndexIfMissing(db, 'refuelings', 'idx_refuelings_comboio', '`comboioEntrada`, `status`');
+
+    // Backfill idempotente do vínculo comboio_transactions → refuelings.
+    // Entrada e saída gravavam as duas linhas com o MESMO authNumber; o veículo
+    // da cópia é o comboio (entrada) ou quem recebeu (saída). Só vincula quando
+    // o par é único — na dúvida, deixa sem vínculo.
+    // Cada passo tem o próprio try: uma falha num deles não pode impedir os
+    // seguintes (a marcação comboioEntrada é o que liga os ganchos de estoque).
+    const passoBackfill = async (rotulo, sql) => {
+        try {
+            const [r] = await db.query(sql);
+            if (r.affectedRows) console.log(`✅ comboio backfill (${rotulo}): ${r.affectedRows} linha(s).`);
+        } catch (e) {
+            console.warn(`⚠️ [migration] comboio backfill (${rotulo}):`, e.message);
+        }
+    };
+
+    await passoBackfill('vínculo por authNumber', `
+        UPDATE comboio_transactions ct
+        JOIN (
+            SELECT authNumber, vehicleId, MIN(id) AS id
+              FROM refuelings
+             WHERE drenagemTransactionId IS NULL AND authNumber IS NOT NULL
+             GROUP BY authNumber, vehicleId
+            HAVING COUNT(*) = 1
+        ) r ON r.authNumber = ct.authNumber
+           AND r.vehicleId = IF(ct.type = 'entrada', ct.comboioVehicleId, ct.receivingVehicleId)
+           SET ct.refuelingId = r.id
+         WHERE ct.refuelingId IS NULL
+           AND ct.authNumber IS NOT NULL
+           AND ct.type IN ('entrada', 'saida')
+    `);
+
+    // 2ª passada — registros anteriores à coluna authNumber (a maioria): casa
+    // por veículo + data + litros, exigindo par único nos DOIS lados.
+    // O DISTINCT em `ja` é proposital: força a materialização da derivada. Sem
+    // ele o MySQL 8 funde a subconsulta no UPDATE da própria tabela e recusa
+    // com ER_UPDATE_TABLE_USED (1093).
+    await passoBackfill('vínculo por veículo/data/litros', `
+        UPDATE comboio_transactions ct
+        JOIN (
+            SELECT IF(type = 'entrada', comboioVehicleId, receivingVehicleId) AS vehicleId, date, liters
+              FROM comboio_transactions
+             WHERE type IN ('entrada', 'saida') AND authNumber IS NULL AND refuelingId IS NULL
+             GROUP BY vehicleId, date, liters
+            HAVING COUNT(*) = 1
+        ) unico ON unico.vehicleId = IF(ct.type = 'entrada', ct.comboioVehicleId, ct.receivingVehicleId)
+               AND unico.date = ct.date AND unico.liters = ct.liters
+        JOIN (
+            SELECT vehicleId, data, litrosAbastecidos, MIN(id) AS id
+              FROM refuelings
+             WHERE drenagemTransactionId IS NULL
+             GROUP BY vehicleId, data, litrosAbastecidos
+            HAVING COUNT(*) = 1
+        ) r ON r.vehicleId = unico.vehicleId AND r.data = ct.date
+           AND ABS(r.litrosAbastecidos - ct.liters) < 0.001
+        LEFT JOIN (
+            SELECT DISTINCT refuelingId FROM comboio_transactions WHERE refuelingId IS NOT NULL
+        ) ja ON ja.refuelingId = r.id
+           SET ct.refuelingId = r.id
+         WHERE ct.refuelingId IS NULL
+           AND ct.authNumber IS NULL
+           AND ct.type IN ('entrada', 'saida')
+           AND ja.refuelingId IS NULL
+    `);
+
+    await passoBackfill('marca ordens de entrada', `
+        UPDATE refuelings r
+        JOIN comboio_transactions ct ON ct.refuelingId = r.id AND ct.type = 'entrada'
+           SET r.comboioEntrada = 1
+         WHERE r.comboioEntrada = 0
+    `);
+
+    await passoBackfill('preço das entradas', `
+        UPDATE comboio_transactions
+           SET pricePerLiter = ROUND(valorTotal / liters, 4)
+         WHERE type = 'entrada' AND pricePerLiter IS NULL AND liters > 0 AND valorTotal > 0
+    `);
 
     // ───── Expandir ENUM partners.tipo_parceiro para suportar 'comboio' e 'locador' ─────
     // Causa do erro: "Data truncated for column 'tipo_parceiro' at row 1"
@@ -575,6 +674,10 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
                 INDEX idx_ativo   (ativo)
             )
         `);
+        // Havia uma segunda criação desta tabela (sem created_at/idx_ativo) que
+        // corria em paralelo; se ela venceu a corrida, completa o que faltou.
+        await addColumnIfMissing(db, 'comboio_periodos_obra', 'created_at', 'TIMESTAMP DEFAULT CURRENT_TIMESTAMP');
+        await addIndexIfMissing(db, 'comboio_periodos_obra', 'idx_ativo', '`ativo`');
 
         // Backfill: para cada veículo-comboio com obraAtualId mas sem período ativo,
         // abre um período. Idempotente — só faz nada se já existir.
@@ -1007,29 +1110,6 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
         console.log('✅ Migração aceite automático (IA) concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] aceite automático (IA):', e.message);
-    }
-})();
-
-// ====================================================================
-// MIGRAÇÃO — Tabela de Períodos de Obra do Comboio (Fase 2.6)
-// ====================================================================
-(async () => {
-    try {
-        await db.query(`
-            CREATE TABLE IF NOT EXISTS comboio_periodos_obra (
-                id          VARCHAR(36)  PRIMARY KEY,
-                comboio_id  VARCHAR(36)  NOT NULL,
-                obra_id     VARCHAR(36)  NOT NULL,
-                data_inicio DATETIME     NOT NULL,
-                data_fim    DATETIME     DEFAULT NULL,
-                ativo       TINYINT(1)   DEFAULT 1,
-                INDEX idx_comboio (comboio_id),
-                INDEX idx_obra    (obra_id)
-            )
-        `);
-        console.log('✅ Migração comboio_periodos_obra concluída.');
-    } catch (e) {
-        console.warn('⚠️ [migration] comboio_periodos_obra:', e.message);
     }
 })();
 
