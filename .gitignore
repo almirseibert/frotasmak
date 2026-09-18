@@ -53,11 +53,15 @@ tmp/
 credentials.json
 secrets.json
 
-# Sessão WhatsApp Business (tokens de sessão ativa)
+# Microsserviço WhatsApp (whatsapp/): versionado para o deploy do Easypanel
+# (server.js, Dockerfile, package*.json). Nunca subir sessão, segredos nem
+# dependências — a sessão fica no volume do Easypanel.
 whatsapp/.wwebjs_auth/
 whatsapp/.wwebjs_cache/
-# Biblioteca vendorizada whatsapp-web.js (não é código próprio)
-whatsapp/
+whatsapp/.env
+whatsapp/.env.local
+whatsapp/node_modules/
+whatsapp/*.log
 
 # Saída da ferramenta graphify (pode conter dados sensíveis do corpus)
 graphify-out/
