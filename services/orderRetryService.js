@@ -66,14 +66,17 @@ const reenviarRegistro = async (id) => {
 
     // Regenera o PDF (os arquivos antigos são apagados pelo cron de 30 dias).
     let pdf = null;
+    let pdfErro = null;
     try {
         pdf = await buildOrderPdfArtifact(order);
     } catch (e) {
-        console.warn('[orderRetry] PDF não pôde ser regerado:', e.message);
+        pdfErro = e.message || 'erro desconhecido';
+        console.warn('[orderRetry] PDF não pôde ser regerado:', pdfErro);
     }
 
     const resultado = await sendToPartner(partner, order, {
         pdf,
+        pdfErro,
         canais: [canal],
         destinatarioTipo: reg.destinatario_tipo,
         forceWhatsapp: canal === 'whatsapp',

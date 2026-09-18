@@ -4,6 +4,40 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
+
+// ─── PATCH whatsapp-web.js: envio de mídia quebrado pelo WA Web 2.3000.1047xxx ──
+// Nessa build do WhatsApp Web o MediaData ganhou um campo privado `__x_id`.
+// O sendMessage injetado espalha o media model no objeto da mensagem, esse campo
+// sobrescreve o MsgKey e TODO envio de mídia falha com:
+//   "Data passed to getter must include an id property (it's how we memoize)"
+// O texto da ordem chega, o PDF não (status PARCIAL). Correção upstream ainda
+// não publicada: https://github.com/wwebjs/whatsapp-web.js/pull/201923
+// O código injetado é lido deste arquivo quando a lib é carregada, então o patch
+// precisa rodar ANTES do require abaixo. Idempotente; quando a lib trouxer a
+// correção, ele detecta e não faz nada.
+(function patchEnvioDeMidia() {
+    try {
+        const raiz = path.dirname(require.resolve('whatsapp-web.js'));
+        const utilsPath = path.join(raiz, 'src', 'util', 'Injected', 'Utils.js');
+        const src = fs.readFileSync(utilsPath, 'utf8');
+        if (src.includes('delete message.__x_id')) {
+            console.log('🩹 [WWEBJS] Correção de envio de mídia já presente.');
+            return;
+        }
+        // Fecha o `const message = { ... ...mediaOptions ... };` do sendMessage.
+        const re = /(const message = \{[\s\S]*?\.\.\.mediaOptions[\s\S]*?\n([ \t]*)\};)/;
+        if (!re.test(src)) {
+            console.warn('⚠️ [WWEBJS] Trecho do sendMessage não encontrado — patch de mídia NÃO aplicado. PDFs podem não chegar.');
+            return;
+        }
+        const patched = src.replace(re, (bloco, _m, indent) => `${bloco}\n\n${indent}delete message.__x_id;`);
+        fs.writeFileSync(utilsPath, patched);
+        console.log('🩹 [WWEBJS] Correção de envio de mídia aplicada (delete message.__x_id).');
+    } catch (e) {
+        console.warn('⚠️ [WWEBJS] Falha ao aplicar patch de envio de mídia:', e.message);
+    }
+})();
+
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const sharp = require('sharp');
 

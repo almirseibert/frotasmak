@@ -161,6 +161,9 @@ const sendToPartner = async (partner, order, opts = {}) => {
     const wantWa = usaWa && (opts.forceWhatsapp || partner.envia_por_whatsapp == 1);
     const wantEm = usaEm && (opts.forceEmail    || partner.envia_por_email    == 1);
     const pdf = opts.pdf || null;
+    // Motivo de o PDF não existir (a geração falhou). Sem isso, WhatsApp e
+    // e-mail saíam "ENVIADO" sem anexo e ninguém percebia que o PDF faltou.
+    const pdfErro = !pdf && opts.pdfErro ? opts.pdfErro : null;
 
     // Contexto de rastreio — toda tentativa (ou ausência dela) vira linha em
     // order_notifications para que a tela de ordens saiba o que aconteceu.
@@ -211,8 +214,8 @@ const sendToPartner = async (partner, order, opts = {}) => {
             // Texto entregue mas PDF não é PARCIAL — o posto recebeu a ordem, mas
             // sem o documento; quem emitiu precisa saber.
             const pediuAnexo = !!(pdfB64 || pdf?.url);
-            const pdfStatus = resp?.pdfStatus || null;
-            const parcial = pediuAnexo && pdfStatus && pdfStatus !== 'enviado';
+            const pdfStatus = pdfErro ? `não gerado (${pdfErro})` : (resp?.pdfStatus || null);
+            const parcial = !!pdfErro || (pediuAnexo && pdfStatus && pdfStatus !== 'enviado');
             await rastreio('whatsapp', parcial ? S.PARCIAL : S.ENVIADO, {
                 destino: partner.whatsapp,
                 erro: parcial ? `Texto entregue, PDF não: ${pdfStatus}` : null,
@@ -259,12 +262,17 @@ const sendToPartner = async (partner, order, opts = {}) => {
                 html: buildOrderHtml(order),
                 attachments,
             });
-            await rastreio('email', r.skipped ? S.FALHA : S.ENVIADO, {
+            const semPdf = !r.skipped && !!pdfErro;
+            await rastreio('email', r.skipped ? S.FALHA : (semPdf ? S.PARCIAL : S.ENVIADO), {
                 destino: partner.email,
-                erro: r.skipped ? `Envio pulado: ${r.reason}` : null,
+                erro: r.skipped
+                    ? `Envio pulado: ${r.reason}`
+                    : (semPdf ? `E-mail entregue, PDF não: não gerado (${pdfErro})` : null),
                 incrementaTentativa: true,
             });
-            out.email = r.skipped ? `pulado: ${r.reason}` : (pdf?.buffer ? 'enviado (com PDF)' : 'enviado');
+            out.email = r.skipped
+                ? `pulado: ${r.reason}`
+                : (semPdf ? `parcial (PDF não gerado: ${pdfErro})` : (pdf?.buffer ? 'enviado (com PDF)' : 'enviado'));
         } catch (e) {
             console.warn(`[orderNotifier] E-mail falhou para ${partner.razaoSocial}:`, e.message);
             await rastreio('email', S.FALHA, {
@@ -287,7 +295,7 @@ const notificarSeFalhou = async (order, out, destinatarioTipo, partner) => {
     try {
         const okWa = out.whatsapp === 'enviado' || String(out.whatsapp || '').startsWith('enviado');
         const okEm = out.email === 'enviado' || String(out.email || '').startsWith('enviado');
-        const parcial = String(out.whatsapp || '').startsWith('parcial');
+        const parcial = String(out.whatsapp || '').startsWith('parcial') || String(out.email || '').startsWith('parcial');
         if (okWa || okEm || parcial) return;
         if (!global.io) return;
         global.io.emit('ordem:falha_envio', {
@@ -310,11 +318,13 @@ const notifyComboioEntrada = async ({ partnerId, comboioVehicleId, order }) => {
 
     // Gera o PDF UMA vez e reusa em todos os canais/destinatários
     let pdf = null;
+    let pdfErro = null;
     try {
         pdf = await buildOrderPdfArtifact(order);
         result.pdf = { url: pdf.url, filename: pdf.filename };
     } catch (e) {
-        console.warn('[orderNotifier] geração de PDF falhou:', e.message);
+        pdfErro = e.message || 'erro desconhecido';
+        console.warn(`⚠️ [orderNotifier] geração de PDF falhou (ordem #${order.authNumber}):`, pdfErro);
     }
 
     // 1) Posto fornecedor
@@ -328,7 +338,7 @@ const notifyComboioEntrada = async ({ partnerId, comboioVehicleId, order }) => {
                 result.posto = await sendToPartner(
                     rows[0],
                     { ...order, partnerName: rows[0].razaoSocial },
-                    { pdf, destinatarioTipo: 'posto' }
+                    { pdf, pdfErro, destinatarioTipo: 'posto' }
                 );
             } else {
                 // Ordem aponta para um partnerId que não existe mais — silêncio
@@ -374,7 +384,7 @@ const notifyComboioEntrada = async ({ partnerId, comboioVehicleId, order }) => {
                 result.comboio = await sendToPartner(
                     { ...c, envia_por_whatsapp: c.whatsapp ? 1 : 0, envia_por_email: c.email ? 1 : 0 },
                     order,
-                    { forceWhatsapp: !!c.whatsapp, forceEmail: !!c.email, pdf, destinatarioTipo: 'comboio' }
+                    { forceWhatsapp: !!c.whatsapp, forceEmail: !!c.email, pdf, pdfErro, destinatarioTipo: 'comboio' }
                 );
             }
         } catch (e) {

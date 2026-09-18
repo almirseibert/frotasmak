@@ -15,7 +15,7 @@ const db = require('../database');
 // ─── Status possíveis ────────────────────────────────────────────────────────
 // PENDENTE     — registrada, ainda não tentou (ou tentando agora)
 // ENVIADO      — confirmado pelo canal
-// PARCIAL      — texto foi, mas o PDF falhou (só WhatsApp)
+// PARCIAL      — mensagem foi, mas o PDF não (falhou no WhatsApp ou não foi gerado)
 // FALHA        — tentativa deu erro; elegível para retentativa
 // SEM_CONTATO  — canal habilitado mas sem número/e-mail cadastrado
 // DESATIVADO   — canal desligado no cadastro do parceiro (não é erro)
