@@ -70,6 +70,14 @@ let qrRaw        = null;
 let client       = null;
 let reconnectTimer = null;
 
+// Cada initClient ganha uma geração. Eventos e erros de uma instância que já
+// foi substituída NÃO podem agendar reconexão: a instância velha, morta pelo
+// destroy no meio do initialize, agendava um reconnect que matava a nova no
+// meio do initialize, que agendava outro... e o serviço nunca terminava de subir
+// ("Target closed" / "Execution context was destroyed" em loop).
+let geracaoCliente = 0;
+let inicializando  = false;
+
 // Falhas de autenticação seguidas. Zerado ao autenticar com sucesso.
 let falhasAuthConsecutivas = 0;
 const MAX_FALHAS_AUTH = 3;
@@ -195,6 +203,12 @@ app.use((req, res, next) => {
 
 // ─── INICIALIZAÇÃO E CONTROLE DO CLIENTE WHATSAPP ─────────────────────────────
 async function initClient() {
+    const geracao = ++geracaoCliente;
+    const atual = () => geracao === geracaoCliente;
+    // Um reconnect já agendado mataria esta instância no meio do initialize.
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    inicializando = true;
+
     if (client) {
         console.log('🔄 [SISTEMA] Destruindo instância anterior do Chromium...');
         // O listener de 'framenavigated' da lib reinjeta o WWebJS a cada
@@ -207,11 +221,13 @@ async function initClient() {
             console.log('⚠️ [SISTEMA] Aviso ao destruir Chromium:', e.message);
         }
     }
+    // Outro initClient começou enquanto este esperava o destroy — ele assume.
+    if (!atual()) return;
 
     clientStatus = 'DESCONECTADO';
     qrRaw = null;
 
-    console.log('⏳ [WHATSAPP] Inicializando nova instância...');
+    console.log(`⏳ [WHATSAPP] Inicializando nova instância (#${geracao})...`);
 
     const puppeteerConfig = {
         args: PUPPETEER_ARGS,
@@ -228,23 +244,27 @@ async function initClient() {
     });
 
     client.on('qr', (qr) => {
+        if (!atual()) return; // instância já substituída
         console.log('💡 [WHATSAPP] Novo QR Code gerado. Aguardando escaneamento...');
         qrRaw = qr;
         clientStatus = 'QR_PRONTO';
     });
 
     client.on('loading_screen', (percent, message) => {
+        if (!atual()) return; // instância já substituída
         console.log(`⏳ [WHATSAPP] Carregando: ${percent}% - ${message}`);
         clientStatus = 'AUTENTICANDO';
     });
 
     client.on('ready', () => {
+        if (!atual()) return; // instância já substituída
         console.log('✅ [WHATSAPP] Cliente pronto e conectado!');
         clientStatus = 'PRONTO';
         qrRaw = null;
     });
 
     client.on('authenticated', () => {
+        if (!atual()) return; // instância já substituída
         console.log('🔐 [WHATSAPP] Autenticado com sucesso! Baixando contatos e mensagens...');
         clientStatus = 'AUTENTICANDO';
         qrRaw = null;
@@ -253,6 +273,7 @@ async function initClient() {
     });
 
     client.on('auth_failure', (msg) => {
+        if (!atual()) return; // instância já substituída
         console.error('❌ [WHATSAPP] Falha na autenticação:', msg);
         clientStatus = 'DESCONECTADO';
         qrRaw = null;
@@ -272,6 +293,7 @@ async function initClient() {
     });
 
     client.on('disconnected', (reason) => {
+        if (!atual()) return; // instância já substituída
         console.log('❌ [WHATSAPP] WhatsApp desconectado!', reason);
         clientStatus = 'DESCONECTADO';
         qrRaw = null;
@@ -380,9 +402,17 @@ async function initClient() {
     try {
         await client.initialize();
     } catch (err) {
+        // Esta instância foi destruída por um initClient mais novo: o erro é
+        // consequência do destroy, não falha real — quem assumiu segue sozinho.
+        if (!atual()) {
+            console.log(`ℹ️ [SISTEMA] Inicialização #${geracao} interrompida pela instância #${geracaoCliente} — ignorando.`);
+            return;
+        }
         console.error('🚨 [CRÍTICO] Erro fatal ao iniciar o Puppeteer:', err);
         clientStatus = 'DESCONECTADO';
         agendarReconexao(10000);
+    } finally {
+        if (atual()) inicializando = false;
     }
 }
 
@@ -566,13 +596,41 @@ app.post('/restart', async (req, res) => {
 // detached Frame" / "Target closed". No Node 18 rejeição não tratada MATA o
 // processo — o container caía. Aqui o erro vira reconexão preservando a sessão.
 const ERRO_CHROMIUM = /detached Frame|Target closed|Session closed|Protocol error|Execution context was destroyed|Navigating frame was detached/i;
+
+// A página segue com o WWebJS injetado? Depois de um reload do WA Web a lib
+// reinjeta sozinha na navegação seguinte — reconectar aí só derrubaria uma
+// sessão que já se recuperou.
+async function clienteSaudavel() {
+    try {
+        const page = client?.pupPage;
+        if (!page || page.isClosed()) return false;
+        return await page.evaluate('typeof window.WWebJS !== "undefined"');
+    } catch (_) {
+        return false;
+    }
+}
+
 function tratarErroNaoCapturado(tipo, err) {
     const msg = err?.message || String(err);
     if (ERRO_CHROMIUM.test(msg)) {
-        console.warn(`⚠️ [SISTEMA] ${tipo} do Chromium/WA Web (${msg}). Reconectando sem apagar a sessão.`);
+        // Durante a inicialização quem trata a falha é o catch do initialize.
+        // Agendar reconexão aqui matava a instância no meio do boot (loop).
+        if (inicializando) {
+            console.warn(`⚠️ [SISTEMA] ${tipo} do Chromium durante a inicialização (${msg}) — ignorado.`);
+            return;
+        }
+        console.warn(`⚠️ [SISTEMA] ${tipo} do Chromium/WA Web (${msg}). Conferindo a página antes de reconectar.`);
         registrarEventoSessao(`CHROMIUM_ERRO ${msg.slice(0, 120)}`);
-        clientStatus = 'DESCONECTADO';
-        agendarReconexao(5000);
+        const geracao = geracaoCliente;
+        setTimeout(async () => {
+            if (inicializando || geracao !== geracaoCliente) return;
+            if (await clienteSaudavel()) {
+                console.log('✅ [SISTEMA] Página do WhatsApp segue saudável — sem reconexão.');
+                return;
+            }
+            clientStatus = 'DESCONECTADO';
+            agendarReconexao(1000);
+        }, 5000);
         return;
     }
     console.error(`🚨 [SISTEMA] ${tipo}:`, err);
