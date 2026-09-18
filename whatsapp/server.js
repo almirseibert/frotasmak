@@ -13,27 +13,43 @@ const fetch = require('node-fetch');
 // O texto da ordem chega, o PDF não (status PARCIAL). Correção upstream ainda
 // não publicada: https://github.com/wwebjs/whatsapp-web.js/pull/201923
 // O código injetado é lido deste arquivo quando a lib é carregada, então o patch
-// precisa rodar ANTES do require abaixo. Idempotente; quando a lib trouxer a
-// correção, ele detecta e não faz nada.
+// precisa rodar ANTES do require abaixo. Idempotente pela marca MARCA_PATCH_MIDIA
+// (o arquivo patchado sobrevive a restart do container, só some no rebuild).
+// Além de apagar o __x_id, devolve o MsgKey ao `id` — se o toJSON() do
+// MediaData espalhado também trouxer `id`, o efeito é o mesmo erro.
+// O resultado vai para GET /status (patchMidia) e aparece no painel do WhatsApp.
+const MARCA_PATCH_MIDIA = 'frotasmak:patch-midia-v2';
+let PATCH_MIDIA = 'não executado';
 (function patchEnvioDeMidia() {
     try {
         const raiz = path.dirname(require.resolve('whatsapp-web.js'));
         const utilsPath = path.join(raiz, 'src', 'util', 'Injected', 'Utils.js');
         const src = fs.readFileSync(utilsPath, 'utf8');
-        if (src.includes('delete message.__x_id')) {
+        if (src.includes(MARCA_PATCH_MIDIA)) {
+            PATCH_MIDIA = 'aplicado';
             console.log('🩹 [WWEBJS] Correção de envio de mídia já presente.');
             return;
         }
         // Fecha o `const message = { ... ...mediaOptions ... };` do sendMessage.
         const re = /(const message = \{[\s\S]*?\.\.\.mediaOptions[\s\S]*?\n([ \t]*)\};)/;
         if (!re.test(src)) {
+            PATCH_MIDIA = 'trecho do sendMessage não encontrado';
             console.warn('⚠️ [WWEBJS] Trecho do sendMessage não encontrado — patch de mídia NÃO aplicado. PDFs podem não chegar.');
             return;
         }
-        const patched = src.replace(re, (bloco, _m, indent) => `${bloco}\n\n${indent}delete message.__x_id;`);
+        const patched = src.replace(re, (bloco, _m, indent) => {
+            const linhas = [
+                `// ${MARCA_PATCH_MIDIA}: o MediaData espalhado acima sobrescreve o MsgKey`,
+                'delete message.__x_id;',
+            ];
+            if (/\bid:\s*newMsgKey\b/.test(bloco)) linhas.push('message.id = newMsgKey;');
+            return `${bloco}\n\n${linhas.map(l => indent + l).join('\n')}`;
+        });
         fs.writeFileSync(utilsPath, patched);
-        console.log('🩹 [WWEBJS] Correção de envio de mídia aplicada (delete message.__x_id).');
+        PATCH_MIDIA = 'aplicado';
+        console.log('🩹 [WWEBJS] Correção de envio de mídia aplicada (__x_id removido, id restaurado).');
     } catch (e) {
+        PATCH_MIDIA = `falhou: ${e.message}`;
         console.warn('⚠️ [WWEBJS] Falha ao aplicar patch de envio de mídia:', e.message);
     }
 })();
@@ -386,6 +402,7 @@ app.get('/status', (req, res) => {
         sessionPath: SESSION_PATH,
         sessaoPersistida,
         iniciadoEm: BOOT_TIME,
+        patchMidia: PATCH_MIDIA,
     });
 });
 
@@ -477,6 +494,17 @@ app.post('/send', async (req, res) => {
             } catch (pdfErr) {
                 console.warn(`⚠️ Falha ao enviar PDF para ${number}:`, pdfErr.message || pdfErr);
                 pdfStatus = `falha: ${pdfErr.message || pdfErr}`;
+                // Sem anexo o posto fica sem o documento. Se há URL pública, manda
+                // o link como texto — a entrega segue PARCIAL (o anexo não foi),
+                // mas quem recebe consegue abrir o PDF.
+                if (documentUrl) {
+                    try {
+                        await client.sendMessage(chatId, `📎 PDF da ordem: ${documentUrl}`);
+                        pdfStatus += ' — link do PDF enviado no lugar';
+                    } catch (linkErr) {
+                        console.warn(`⚠️ Falha ao enviar link do PDF para ${number}:`, linkErr.message || linkErr);
+                    }
+                }
             }
         }
 

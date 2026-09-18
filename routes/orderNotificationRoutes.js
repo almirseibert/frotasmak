@@ -95,7 +95,11 @@ router.post('/ordem/:authNumber/reenviar', async (req, res) => {
         }
         const algumOk = resultados.some(r => r.ok);
         req.io?.emit('server:sync', { resource: 'refuelings' });
-        res.status(algumOk ? 200 : 422).json({ ok: algumOk, resultados });
+        // `error` é o que a tela exibe; sem ele o aviso saía só "Erro 422:".
+        const error = algumOk ? undefined : resultados
+            .map(r => `${r.canal === 'email' ? 'E-mail' : 'WhatsApp'}: ${r.motivo || 'falha desconhecida'}`)
+            .join(' | ');
+        res.status(algumOk ? 200 : 422).json({ ok: algumOk, error, resultados });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
