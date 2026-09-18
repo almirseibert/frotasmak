@@ -197,6 +197,10 @@ app.use((req, res, next) => {
 async function initClient() {
     if (client) {
         console.log('🔄 [SISTEMA] Destruindo instância anterior do Chromium...');
+        // O listener de 'framenavigated' da lib reinjeta o WWebJS a cada
+        // navegação. Se o destroy fecha o Chromium com uma injeção em curso,
+        // o evaluate cai em frame "detached" e derruba o processo.
+        try { client.pupPage?.removeAllListeners('framenavigated'); } catch (_) {}
         try {
             await client.destroy();
         } catch (e) {
@@ -554,6 +558,27 @@ app.post('/restart', async (req, res) => {
             : 'Reiniciando sem apagar a sessão. Se não reconectar, use o reinício completo.',
     });
 });
+
+// ─── ERROS NÃO TRATADOS ───────────────────────────────────────────────────────
+// O whatsapp-web.js registra `framenavigated` como listener async sem catch:
+// quando o WA Web recarrega a página (troca de build, NAVIGATION) ou o Chromium
+// é fechado no meio da reinjeção, o page.evaluate rejeita com "Attempted to use
+// detached Frame" / "Target closed". No Node 18 rejeição não tratada MATA o
+// processo — o container caía. Aqui o erro vira reconexão preservando a sessão.
+const ERRO_CHROMIUM = /detached Frame|Target closed|Session closed|Protocol error|Execution context was destroyed|Navigating frame was detached/i;
+function tratarErroNaoCapturado(tipo, err) {
+    const msg = err?.message || String(err);
+    if (ERRO_CHROMIUM.test(msg)) {
+        console.warn(`⚠️ [SISTEMA] ${tipo} do Chromium/WA Web (${msg}). Reconectando sem apagar a sessão.`);
+        registrarEventoSessao(`CHROMIUM_ERRO ${msg.slice(0, 120)}`);
+        clientStatus = 'DESCONECTADO';
+        agendarReconexao(5000);
+        return;
+    }
+    console.error(`🚨 [SISTEMA] ${tipo}:`, err);
+}
+process.on('unhandledRejection', (err) => tratarErroNaoCapturado('Rejeição não tratada', err));
+process.on('uncaughtException', (err) => tratarErroNaoCapturado('Exceção não capturada', err));
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 diagnosticarSessao();
