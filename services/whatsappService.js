@@ -56,8 +56,18 @@ const whatsappService = {
     // só reinicia o Chromium — resolve a maioria das travas sem repareamento.
     async reiniciar(hard = false) {
         if (!WA_URL || !WA_KEY) throw new Error('Serviço WhatsApp não configurado.');
-        const { data } = await axios.post(`${WA_URL}/restart`, { hard: !!hard }, { headers: waHeaders() });
-        return data;
+        try {
+            const { data } = await axios.post(`${WA_URL}/restart`, { hard: !!hard }, { headers: waHeaders() });
+            return data;
+        } catch (e) {
+            // 429 = trava anti-banimento do microsserviço (reinício em sequência
+            // ou teto de conexões/hora). Repassa a mensagem dele, não o genérico do axios.
+            const msg = e.response?.data?.error;
+            if (!msg) throw e;
+            const err = new Error(msg);
+            err.status = e.response.status;
+            throw err;
+        }
     },
 
     async enviarMensagem(numeroDestino, nomeDestinatario, motivo, mensagem, anexoUrl = null, anexoFilename = null, anexoBase64 = null, anexoMimetype = null) {

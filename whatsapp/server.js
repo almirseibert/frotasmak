@@ -121,6 +121,10 @@ if (!process.env.WA_SESSION_PATH) {
 // Fica DENTRO da pasta da sessão — é o único diretório que sabemos estar no
 // volume persistente. limparPastaSessao() o preserva ao apagar o resto.
 const EVENTS_LOG = path.join(SESSION_PATH, 'wa-session-events.log');
+// Horários das últimas conexões ao WhatsApp — base do teto por hora da
+// política anti-banimento. No volume para valer também entre restarts.
+const CONEXOES_LOG = path.join(SESSION_PATH, 'wa-conexoes.json');
+const ARQUIVOS_DE_CONTROLE = [path.basename(EVENTS_LOG), path.basename(CONEXOES_LOG)];
 
 function registrarEventoSessao(evento) {
     try {
@@ -139,30 +143,34 @@ function limparPastaSessao(motivo = 'não informado') {
     registrarEventoSessao(`SESSAO_APAGADA motivo=${motivo}`);
     if (fs.existsSync(authPath)) {
         console.warn(`🧹 [SISTEMA] APAGANDO a pasta de sessão. Motivo: ${motivo}. Será necessário ler o QR Code novamente.`);
-        // Preserva o histórico — é justamente o apagamento que precisamos poder auditar depois.
-        let historico = null;
-        try { historico = fs.readFileSync(EVENTS_LOG, 'utf8'); } catch (_) {}
+        // Preserva o histórico — é justamente o apagamento que precisamos poder
+        // auditar depois — e as conexões recentes (o teto por hora não pode
+        // zerar só porque a sessão foi apagada).
+        const preservados = {};
+        for (const arq of [EVENTS_LOG, CONEXOES_LOG]) {
+            try { preservados[arq] = fs.readFileSync(arq, 'utf8'); } catch (_) {}
+        }
         try {
             fs.rmSync(authPath, { recursive: true, force: true });
             console.warn('⚠️ [SISTEMA] Sessão removida — o serviço voltará pedindo QR Code.');
         } catch (err) {
             console.error('❌ [SISTEMA] Erro ao deletar pasta de auth:', err);
         }
-        if (historico) {
+        for (const [arq, conteudo] of Object.entries(preservados)) {
             try {
                 fs.mkdirSync(authPath, { recursive: true });
-                fs.writeFileSync(EVENTS_LOG, historico);
+                fs.writeFileSync(arq, conteudo);
             } catch (_) {}
         }
     }
 }
 
-// Quantos itens de sessão existem, ignorando o log de eventos.
+// Quantos itens de sessão existem, ignorando os arquivos de controle.
 function temSessao() {
     try {
         if (!fs.existsSync(SESSION_PATH)) return 0;
         return fs.readdirSync(SESSION_PATH)
-            .filter(f => f !== path.basename(EVENTS_LOG)).length;
+            .filter(f => !ARQUIVOS_DE_CONTROLE.includes(f)).length;
     } catch (_) { return 0; }
 }
 
@@ -183,6 +191,135 @@ function diagnosticarSessao() {
     } catch (e) {
         console.warn('🔎 [SESSÃO] Falha ao diagnosticar a sessão:', e.message);
     }
+}
+
+// ─── POLÍTICA DE CONEXÃO (ANTI-BANIMENTO) ─────────────────────────────────────
+// Cada inicialização abre o WhatsApp Web e restaura a sessão nos servidores do
+// WhatsApp. Ciclos rápidos de conecta/desconecta são lidos pelo antiabuso como
+// automação suspeita e levam à restrição do número (relatos de 48–72 h, que
+// recomeçam a cada nova tentativa). Detalhes em docs/whatsapp-anti-banimento.md.
+//  1. Espera crescente entre tentativas automáticas, com variação aleatória.
+//  2. Teto de conexões por hora gravado no volume: vale também quando o
+//     container reinicia em loop (crash não zera a contagem).
+//  3. Disjuntor: após N falhas seguidas, no máximo uma tentativa a cada 30 min.
+//  4. Bloqueio do número (TOS_BLOCK) e sessão aberta em outro lugar (CONFLICT)
+//     NUNCA reconectam sozinhos — insistir aí é o que agrava a restrição.
+//  5. Reinício manual passa por cima da espera, mas não do teto absoluto.
+const ESPERAS_RECONEXAO_MS = [15e3, 30e3, 60e3, 2 * 60e3, 5 * 60e3, 10 * 60e3, 15 * 60e3];
+const LIMITE_CONEXOES_HORA = 8;          // automáticas (inclui o boot)
+const LIMITE_ABSOLUTO_HORA = 15;         // nem o reinício manual passa disso
+const FALHAS_PARA_ABRIR_DISJUNTOR = 5;
+const ESPERA_DISJUNTOR_MS = 30 * 60e3;
+const INTERVALO_MIN_REINICIO_MANUAL_MS = 60e3;
+const UMA_HORA_MS = 60 * 60e3;
+// Conexão que cai logo depois de ficar pronta conta como falha: só zera a
+// sequência quem ficou de pé esse tempo (senão cai-volta a cada 2 min nunca
+// aumentaria a espera).
+const CONEXAO_ESTAVEL_MS = 10 * 60e3;
+const MOTIVOS_SEM_RECONEXAO = {
+    TOS_BLOCK: 'o WhatsApp bloqueou este número (TOS_BLOCK)',
+    SMB_TOS_BLOCK: 'o WhatsApp bloqueou este número Business (SMB_TOS_BLOCK)',
+    CONFLICT: 'a mesma sessão foi aberta em outro lugar (CONFLICT) — confira se não há dois serviços usando este número',
+};
+
+let falhasSeguidas = 0;
+let prontoDesde = null;
+let pausa = null;               // { motivo, ate } — ate = null: só reinício manual
+let proximaTentativaEm = null;
+let ultimoReinicioManual = 0;
+
+function lerConexoes() {
+    try {
+        const lista = JSON.parse(fs.readFileSync(CONEXOES_LOG, 'utf8'));
+        const limite = Date.now() - UMA_HORA_MS;
+        return Array.isArray(lista) ? lista.filter(t => Number.isFinite(t) && t > limite) : [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function registrarConexao() {
+    const lista = [...lerConexoes(), Date.now()];
+    try {
+        fs.mkdirSync(SESSION_PATH, { recursive: true });
+        fs.writeFileSync(CONEXOES_LOG, JSON.stringify(lista));
+    } catch (_) { /* controle nunca pode derrubar o serviço */ }
+    return lista.length;
+}
+
+// Quanto falta para liberar uma vaga no teto da última hora (0 = liberado).
+function esperaPeloTeto(limite) {
+    const lista = lerConexoes();
+    if (lista.length < limite) return 0;
+    const maisAntiga = Math.min(...lista.slice(-limite));
+    return Math.max(0, maisAntiga + UMA_HORA_MS - Date.now()) + 30e3;
+}
+
+const comVariacao = (ms) => Math.round(ms * (0.8 + Math.random() * 0.4));
+const horaBR = (ms) => new Date(ms).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+
+function agendarInicializacao(espera) {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    proximaTentativaEm = Date.now() + espera;
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        proximaTentativaEm = null;
+        console.log('🔄 [SISTEMA] Tentando reconectar automaticamente...');
+        initClient();
+    }, espera);
+}
+
+// Para de reconectar sozinho. `ate` = horário da próxima tentativa, ou null
+// quando só um humano pode decidir (bloqueio, conflito).
+function pausarReconexao(motivo, ate = null) {
+    pausa = { motivo, ate };
+    clientStatus = 'PAUSADO';
+    qrRaw = null;
+    registrarEventoSessao(`RECONEXAO_PAUSADA motivo=${motivo} ate=${ate ? new Date(ate).toISOString() : 'manual'}`);
+    console.warn(`⛔ [CONEXÃO] Reconexão automática pausada: ${motivo}. ` +
+        (ate ? `Próxima tentativa às ${horaBR(ate)}.` : 'Só volta com reinício manual pelo painel.'));
+    if (ate) agendarInicializacao(ate - Date.now());
+    else if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; proximaTentativaEm = null; }
+}
+
+// Única porta de entrada para reconexão automática: decide QUANDO (e se)
+// tentar de novo segundo a política acima.
+function agendarReconexao(motivo = 'falha') {
+    if (pausa && pausa.ate === null) return; // aguardando decisão humana
+    if (prontoDesde && Date.now() - prontoDesde >= CONEXAO_ESTAVEL_MS) falhasSeguidas = 0;
+    prontoDesde = null;
+    falhasSeguidas++;
+    let espera = comVariacao(ESPERAS_RECONEXAO_MS[Math.min(falhasSeguidas - 1, ESPERAS_RECONEXAO_MS.length - 1)]);
+    let motivoPausa = null;
+
+    if (falhasSeguidas >= FALHAS_PARA_ABRIR_DISJUNTOR) {
+        espera = Math.max(espera, comVariacao(ESPERA_DISJUNTOR_MS));
+        motivoPausa = `${falhasSeguidas} falhas seguidas (última: ${motivo})`;
+    }
+    const peloTeto = esperaPeloTeto(LIMITE_CONEXOES_HORA);
+    if (peloTeto > espera) {
+        espera = peloTeto;
+        motivoPausa = `limite de ${LIMITE_CONEXOES_HORA} conexões por hora atingido (última falha: ${motivo})`;
+    }
+
+    if (motivoPausa) {
+        pausarReconexao(motivoPausa, Date.now() + espera);
+        return;
+    }
+    clientStatus = 'DESCONECTADO';
+    console.log(`⏱️ [CONEXÃO] ${motivo} — nova tentativa em ${Math.round(espera / 1000)} s (falha ${falhasSeguidas} seguida).`);
+    agendarInicializacao(espera);
+}
+
+// Boot também é conexão: se o container está reiniciando em loop, o teto
+// gravado no volume segura a próxima tentativa em vez de conectar de novo.
+function iniciarNoBoot() {
+    const espera = esperaPeloTeto(LIMITE_CONEXOES_HORA);
+    if (espera > 0) {
+        pausarReconexao(`o serviço já conectou ${lerConexoes().length} vezes na última hora (reinícios do container?)`, Date.now() + espera);
+        return;
+    }
+    initClient();
 }
 
 // ─── ROTA PÚBLICA ─────────────────────────────────────────────────────────────
@@ -226,8 +363,11 @@ async function initClient() {
 
     clientStatus = 'DESCONECTADO';
     qrRaw = null;
+    pausa = null;
+    proximaTentativaEm = null;
 
-    console.log(`⏳ [WHATSAPP] Inicializando nova instância (#${geracao})...`);
+    const conexoesNaHora = registrarConexao();
+    console.log(`⏳ [WHATSAPP] Inicializando nova instância (#${geracao}) — conexão ${conexoesNaHora} de ${LIMITE_CONEXOES_HORA} permitidas na última hora...`);
 
     const puppeteerConfig = {
         args: PUPPETEER_ARGS,
@@ -261,6 +401,7 @@ async function initClient() {
         console.log('✅ [WHATSAPP] Cliente pronto e conectado!');
         clientStatus = 'PRONTO';
         qrRaw = null;
+        prontoDesde = Date.now();
     });
 
     client.on('authenticated', () => {
@@ -289,7 +430,7 @@ async function initClient() {
         } else {
             console.warn(`⚠️ [WHATSAPP] Sessão PRESERVADA (falha ${falhasAuthConsecutivas}/${MAX_FALHAS_AUTH}). Tentando reconectar com a sessão existente.`);
         }
-        agendarReconexao(5000);
+        agendarReconexao('falha de autenticação');
     });
 
     client.on('disconnected', (reason) => {
@@ -298,6 +439,15 @@ async function initClient() {
         clientStatus = 'DESCONECTADO';
         qrRaw = null;
         registrarEventoSessao(`DISCONNECTED reason=${reason}`);
+
+        // Bloqueio do número ou sessão aberta em outro lugar: reconectar sozinho
+        // agrava a restrição (e no conflito vira cabo de guerra entre as duas
+        // instâncias). Fica parado até alguém resolver e reiniciar pelo painel.
+        const semReconexao = MOTIVOS_SEM_RECONEXAO[String(reason).toUpperCase()];
+        if (semReconexao) {
+            pausarReconexao(semReconexao);
+            return;
+        }
 
         // Só apagamos quando a sessão está de fato morta do lado do WhatsApp.
         // NAVIGATION é transitório — ocorre em reload/crash do Chromium e no
@@ -310,7 +460,7 @@ async function initClient() {
         } else {
             console.warn(`⚠️ [WHATSAPP] Sessão PRESERVADA (motivo "${reason}" é transitório). Reconectando sem QR.`);
         }
-        agendarReconexao(5000);
+        agendarReconexao(`desconectado (${reason})`);
     });
 
     // ─── HANDLER DE MENSAGENS RECEBIDAS ─────────────────────────────────────────
@@ -409,19 +559,10 @@ async function initClient() {
             return;
         }
         console.error('🚨 [CRÍTICO] Erro fatal ao iniciar o Puppeteer:', err);
-        clientStatus = 'DESCONECTADO';
-        agendarReconexao(10000);
+        agendarReconexao('falha ao iniciar o WhatsApp Web');
     } finally {
         if (atual()) inicializando = false;
     }
-}
-
-function agendarReconexao(tempo = 10000) {
-    if (reconnectTimer) clearTimeout(reconnectTimer);
-    reconnectTimer = setTimeout(() => {
-        console.log('🔄 [SISTEMA] Tentando reconectar automaticamente...');
-        initClient();
-    }, tempo);
 }
 
 // ─── ROTAS DA API PROTEGIDAS ──────────────────────────────────────────────────
@@ -437,6 +578,16 @@ app.get('/status', (req, res) => {
         sessaoPersistida,
         iniciadoEm: BOOT_TIME,
         patchMidia: PATCH_MIDIA,
+        // Política anti-banimento — o painel mostra por que está parado e até quando.
+        conexao: {
+            pausado: !!pausa,
+            motivo: pausa?.motivo || null,
+            somenteManual: !!pausa && pausa.ate === null,
+            proximaTentativaEm: proximaTentativaEm ? new Date(proximaTentativaEm).toISOString() : null,
+            conexoesUltimaHora: lerConexoes().length,
+            limiteHora: LIMITE_CONEXOES_HORA,
+            falhasSeguidas,
+        },
     });
 });
 
@@ -452,6 +603,44 @@ app.get('/session-events', (req, res) => {
     }
 });
 
+// ─── RITMO DE ENVIO (ANTI-BANIMENTO) ──────────────────────────────────────────
+// Uma mensagem por vez, com intervalo mínimo e variação aleatória: várias ordens
+// ou avisos do cron disparados juntos viram envios espaçados — rajada com
+// intervalo fixo é um dos sinais que o antiabuso do WhatsApp usa. Os chamadores
+// do backend enviam em sequência (await), então a fila fica curta e não estoura
+// o timeout de 120 s do backend.
+const INTERVALO_ENVIO_MS = 2500;
+const VARIACAO_ENVIO_MS = 2000;
+let filaEnvio = Promise.resolve();
+let ultimoEnvio = 0;
+
+function reservarVezDeEnvio() {
+    let liberar;
+    const minhaVez = new Promise(r => { liberar = r; });
+    const anterior = filaEnvio;
+    filaEnvio = anterior.then(() => minhaVez);
+    return anterior.then(async () => {
+        const espera = ultimoEnvio + INTERVALO_ENVIO_MS + Math.random() * VARIACAO_ENVIO_MS - Date.now();
+        if (espera > 0) await new Promise(r => setTimeout(r, espera));
+        return () => { ultimoEnvio = Date.now(); liberar(); };
+    });
+}
+
+// Número → ID do WhatsApp. Cada getNumberId pergunta aos servidores do WhatsApp
+// se o número tem conta; consultar números repetidamente é padrão de robô de
+// disparo. Os destinatários (postos, RH, operadores) são quase sempre os mesmos.
+const CACHE_NUMERO_MS = 24 * 60 * 60e3;
+const CACHE_NUMERO_SEM_CONTA_MS = 60 * 60e3;
+const cacheNumeros = new Map(); // número → { id: string|null, em }
+
+function numeroEmCache(numero) {
+    const c = cacheNumeros.get(numero);
+    if (!c) return undefined;
+    const validade = c.id ? CACHE_NUMERO_MS : CACHE_NUMERO_SEM_CONTA_MS;
+    if (Date.now() - c.em > validade) { cacheNumeros.delete(numero); return undefined; }
+    return c.id;
+}
+
 app.post('/send', async (req, res) => {
     if (clientStatus !== 'PRONTO') {
         return res.status(503).json({ error: `WhatsApp não está pronto. Status atual: ${clientStatus}` });
@@ -459,6 +648,7 @@ app.post('/send', async (req, res) => {
 
     const { number, message, documentUrl, documentFilename, documentBase64, documentMimetype } = req.body;
 
+    const liberarVez = await reservarVezDeEnvio();
     try {
         // Suporta @c.us — usa o sufixo original se já vier com @
         let chatId = number.includes('@') ? number : `${number}@c.us`;
@@ -483,9 +673,14 @@ app.post('/send', async (req, res) => {
         } else {
             try {
                 const plainNumber = number.replace(/\D/g, '');
-                const resolved = await client.getNumberId(plainNumber);
-                if (resolved) {
-                    chatId = resolved._serialized;
+                let resolvedId = numeroEmCache(plainNumber);
+                if (resolvedId === undefined) {
+                    const resolved = await client.getNumberId(plainNumber);
+                    resolvedId = resolved?._serialized || null;
+                    cacheNumeros.set(plainNumber, { id: resolvedId, em: Date.now() });
+                }
+                if (resolvedId) {
+                    chatId = resolvedId;
                     console.log(`[SEND] ID resolvido: ${plainNumber} → ${chatId}`);
                 } else {
                     console.warn(`⚠️ Número ${plainNumber} não encontrado no WhatsApp.`);
@@ -565,16 +760,39 @@ app.post('/send', async (req, res) => {
         }
 
         res.status(500).json({ error: errMsg || 'Erro desconhecido ao enviar mensagem.' });
+    } finally {
+        liberarVez();
     }
 });
 
 // Reinício. Por padrão PRESERVA a sessão — só reinicializa o Chromium, o que
 // costuma resolver travas do WA Web sem exigir novo QR Code.
 // Envie { "hard": true } para apagar a sessão e forçar novo pareamento.
+// O reinício manual passa por cima da espera e do disjuntor (é decisão humana),
+// mas não da espera mínima entre cliques nem do teto absoluto por hora:
+// reiniciar em sequência é justamente o padrão que leva ao bloqueio.
 app.post('/restart', async (req, res) => {
     const hard = req.body?.hard === true;
+    const agora = Date.now();
+    const desdeUltimo = agora - ultimoReinicioManual;
+    if (desdeUltimo < INTERVALO_MIN_REINICIO_MANUAL_MS) {
+        const s = Math.ceil((INTERVALO_MIN_REINICIO_MANUAL_MS - desdeUltimo) / 1000);
+        return res.status(429).json({ error: `Aguarde ${s} s para reiniciar de novo — reinícios em sequência podem levar ao bloqueio do número.` });
+    }
+    const peloTeto = esperaPeloTeto(LIMITE_ABSOLUTO_HORA);
+    if (peloTeto > 0) {
+        return res.status(429).json({
+            error: `Limite de segurança: ${lerConexoes().length} conexões na última hora. Novo reinício liberado às ${horaBR(agora + peloTeto)}.`,
+        });
+    }
+    ultimoReinicioManual = agora;
+
     console.log(`🔄 Reinício manual solicitado (${hard ? 'HARD — apaga sessão' : 'soft — preserva sessão'}).`);
-    if (reconnectTimer) clearTimeout(reconnectTimer);
+    registrarEventoSessao(`REINICIO_MANUAL hard=${hard}${pausa ? ` (estava pausado: ${pausa.motivo})` : ''}`);
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    falhasSeguidas = 0;
+    pausa = null;
+    proximaTentativaEm = null;
 
     if (hard) limparPastaSessao('reinício manual (hard) solicitado pelo admin');
 
@@ -628,8 +846,7 @@ function tratarErroNaoCapturado(tipo, err) {
                 console.log('✅ [SISTEMA] Página do WhatsApp segue saudável — sem reconexão.');
                 return;
             }
-            clientStatus = 'DESCONECTADO';
-            agendarReconexao(1000);
+            agendarReconexao('página do WhatsApp perdeu o WWebJS');
         }, 5000);
         return;
     }
@@ -640,7 +857,7 @@ process.on('uncaughtException', (err) => tratarErroNaoCapturado('Exceção não 
 
 // ─── STARTUP ──────────────────────────────────────────────────────────────────
 diagnosticarSessao();
-initClient();
+iniciarNoBoot();
 
 app.listen(PORT, '0.0.0.0', () => {
     console.log('');

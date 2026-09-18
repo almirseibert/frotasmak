@@ -65,3 +65,6 @@ whatsapp/*.log
 
 # Saída da ferramenta graphify (pode conter dados sensíveis do corpus)
 graphify-out/
+
+# Saída gerada ao rodar o spike de evidências (imagens de conferência/amostras)
+_spike_evidencias/out/

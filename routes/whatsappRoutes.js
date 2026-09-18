@@ -19,7 +19,7 @@ router.post('/reiniciar', async (req, res) => {
         const data = await whatsappService.reiniciar(req.body?.hard === true);
         res.json({ ok: true, ...data });
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(error.status || 500).json({ error: error.message });
     }
 });
 
