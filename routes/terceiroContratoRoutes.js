@@ -62,8 +62,6 @@ router.get('/:id/docs', controller.getContratoDocs);
 router.post('/:id/assinado', uploadAssinado.single('file'), controller.enviarContratoAssinado);
 router.delete('/:id/assinado', controller.removerContratoAssinado);
 
-// Máquinas do contrato: vínculo operacional, editável mesmo com contrato assinado.
-router.put('/:id/maquinas', controller.updateMaquinasContrato);
 
 // ── Termos aditivos ───────────────────────────────────────────────────────────
 // Só sobre contrato assinado. O delta entra nos números vigentes apenas quando o

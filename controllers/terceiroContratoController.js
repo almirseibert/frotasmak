@@ -8,6 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { generateContratoPdf } = require('../services/contratoPdfGenerator');
 const { anexarVigente } = require('../utils/contratoAditivos');
+const { STATUS_ENCERRADOS } = require('../utils/terceirosCusto');
 
 const CONTRATOS_PDF_DIR = path.join(__dirname, '..', 'public', 'uploads', 'contratos');
 
@@ -99,19 +100,67 @@ const derivarAgregados = ({ contractType, itens, horasContratadas, valorHora, va
     return { horas, vHora, vTotal, itens: [] };
 };
 
-// Impede que uma máquina fique vinculada a mais de um contrato (1 máquina : 1 contrato).
-// `exceptId` ignora o próprio contrato na edição. Retorna array de vehicleIds em conflito.
-const maquinasEmConflito = async (maquinas, exceptId = null) => {
-    if (!maquinas.length) return [];
-    const [rows] = await db.query(
-        'SELECT id, maquinas FROM terceiro_contratos WHERE maquinas IS NOT NULL' +
-        (exceptId ? ' AND id <> ?' : ''),
-        exceptId ? [exceptId] : []
-    );
-    const usadas = new Set();
-    rows.forEach((r) => normalizeMaquinas(r.maquinas).forEach((id) => usadas.add(id)));
-    return maquinas.filter((id) => usadas.has(id));
+// ---------------------------------------------------------------------------
+// Unicidade terceiro × obra × subgrupo
+// ---------------------------------------------------------------------------
+// Substitui a antiga regra "1 máquina : 1 contrato" (`maquinasEmConflito`), que
+// era digitada e proibia o caso real: a mesma máquina transita entre obras e pode
+// estar sob dois contratos vigentes ao mesmo tempo, um por obra.
+//
+// Como a máquina agora é DERIVADA de (terceiro × obra × subgrupo × data), o que
+// precisa ser único é a própria chave. Dois contratos vigentes do mesmo terceiro,
+// na mesma obra, para o mesmo subgrupo, com vigências que se cruzam, deixariam o
+// lançamento sem destino definido. Subgrupos diferentes (escavadeira e caminhão)
+// convivem sem ambiguidade — é o subgrupo que desempata.
+const seCruzam = (ini1, fim1, ini2, fim2) => {
+    const a = ymdStr(ini1), b = ymdStr(fim1), c = ymdStr(ini2), d = ymdStr(fim2);
+    if (b && c && b < c) return false;      // o primeiro termina antes do segundo começar
+    if (d && a && d < a) return false;
+    return true;                            // sem data = janela aberta, assume sobreposição
 };
+
+const ymdStr = (v) => {
+    if (!v) return null;
+    if (v instanceof Date) {
+        return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
+    }
+    return String(v).slice(0, 10);
+};
+
+// Retorna [] ou a lista de subgrupos já comprometidos [{ type, contratoId, numero }].
+const subgruposEmConflito = async ({ locadorId, obraId, itens, vigenciaInicio, vigenciaFim, exceptId = null }) => {
+    const meus = [...new Set(itens.map((i) => String(i.type || '').trim()).filter(Boolean))];
+    if (!locadorId || !obraId) return [];
+    const [rows] = await db.query(
+        `SELECT id, numero, itensContratados, vigenciaInicio, vigenciaFim
+           FROM terceiro_contratos
+          WHERE locadorId = ? AND obraId = ?
+            AND status NOT IN (${STATUS_ENCERRADOS.map(() => '?').join(',')})` +
+        (exceptId ? ' AND id <> ?' : ''),
+        exceptId ? [locadorId, obraId, ...STATUS_ENCERRADOS, exceptId] : [locadorId, obraId, ...STATUS_ENCERRADOS]
+    );
+
+    const out = [];
+    rows.forEach((r) => {
+        if (!seCruzam(vigenciaInicio, vigenciaFim, r.vigenciaInicio, r.vigenciaFim)) return;
+        const outros = normalizeItens(r.itensContratados).map((i) => String(i.type || '').trim());
+        // Contrato sem subgrupo declarado (valor fechado sem plano) captura tudo do
+        // terceiro naquela obra: não pode conviver com nenhum outro na mesma janela.
+        const colide = (meus.length === 0 || outros.length === 0)
+            ? [meus.length === 0 ? (outros[0] || '(todos)') : '(todos)']
+            : meus.filter((t) => outros.includes(t));
+        colide.forEach((type) => out.push({ type, contratoId: r.id, numero: r.numero }));
+    });
+    return out;
+};
+
+const erroDeSubgrupo = (conflitos) => ({
+    error: 'Já existe contrato vigente deste terceiro nesta obra para o mesmo equipamento.',
+    detalhe: 'Horas e diesel são atribuídos por terceiro + obra + subgrupo + data. Dois contratos '
+        + 'vigentes com a mesma chave deixariam o lançamento sem destino. Encerre o contrato anterior '
+        + 'ou registre a alteração como termo aditivo.',
+    conflitos,
+});
 
 // ---------------------------------------------------------------------------
 // Saldo do plano de trabalho da obra
@@ -222,10 +271,10 @@ const createTerceiroContrato = async (req, res) => {
     const criadoPor = createdBy?.userEmail || req.user?.email || null;
 
     try {
-        const conflito = await maquinasEmConflito(maqs);
-        if (conflito.length > 0) {
-            return res.status(400).json({ error: 'Uma ou mais máquinas já estão vinculadas a outro contrato.' });
-        }
+        const conflitoSub = await subgruposEmConflito({
+            locadorId, obraId, itens: itensFinal, vigenciaInicio, vigenciaFim,
+        });
+        if (conflitoSub.length > 0) return res.status(400).json(erroDeSubgrupo(conflitoSub));
         const estouros = await validarContraPlanoDaObra(obraId, itensFinal);
         if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
         const numero = await gerarNumero();
@@ -241,7 +290,7 @@ const createTerceiroContrato = async (req, res) => {
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [id, numero, locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
-             JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal), criadoPor,
+             maqs === null ? null : JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal), criadoPor,
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
              clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
@@ -272,7 +321,10 @@ const updateTerceiroContrato = async (req, res) => {
     const { horas, vHora, vTotal, itens: itensFinal } = derivarAgregados({
         contractType: tipoContrato, itens, horasContratadas, valorHora, valorTotal,
     });
-    const maqs = normalizeMaquinas(maquinas);
+    // `maquinas` é LEGADO: a UI não envia mais (a máquina é derivada de terceiro ×
+    // obra × subgrupo × data). Body sem o campo PRESERVA o que está gravado, para
+    // não apagar o vínculo histórico de um contrato antigo numa edição qualquer.
+    const maqs = maquinas === undefined ? null : normalizeMaquinas(maquinas);
     const clausulas = clausulasJuridicas(req.body);
     const rep = representanteContratada(req.body);
 
@@ -284,16 +336,16 @@ const updateTerceiroContrato = async (req, res) => {
         if (cur[0].contratoAssinadoUrl) {
             return res.status(409).json({ error: 'Contrato com versão assinada não pode ser editado. Remova o contrato assinado para editar.' });
         }
-        const conflito = await maquinasEmConflito(maqs, id);
-        if (conflito.length > 0) {
-            return res.status(400).json({ error: 'Uma ou mais máquinas já estão vinculadas a outro contrato.' });
-        }
+        const conflitoSub = await subgruposEmConflito({
+            locadorId, obraId, itens: itensFinal, vigenciaInicio, vigenciaFim, exceptId: id,
+        });
+        if (conflitoSub.length > 0) return res.status(400).json(erroDeSubgrupo(conflitoSub));
         const estouros = await validarContraPlanoDaObra(obraId, itensFinal, id);
         if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
         const [result] = await db.execute(
             `UPDATE terceiro_contratos
                 SET locadorId = ?, obraId = ?, tipoMaquina = ?, horasContratadas = ?, valorHora = ?,
-                    valorTotal = ?, vigenciaInicio = ?, vigenciaFim = ?, status = ?, observacoes = ?, maquinas = ?,
+                    valorTotal = ?, vigenciaInicio = ?, vigenciaFim = ?, status = ?, observacoes = ?, maquinas = COALESCE(?, maquinas),
                     contractType = ?, itensContratados = ?,
                     prazoPagamentoDias = ?, percentualJurosMora = ?, percentualMultaMora = ?,
                     prazoSubstituicaoHoras = ?, prazoInicioServicoHoras = ?, percentualMultaInadimplemento = ?,
@@ -302,7 +354,7 @@ const updateTerceiroContrato = async (req, res) => {
               WHERE id = ?`,
             [locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
-             JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal),
+             maqs === null ? null : JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal),
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
              clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
@@ -470,30 +522,6 @@ const removerContratoAssinado = async (req, res) => {
     }
 };
 
-// Remapeia as MÁQUINAS do contrato. Vínculo máquina↔contrato é operacional, não
-// cláusula (o que se contrata é subgrupo × horas), então continua editável mesmo
-// com contrato assinado — trocar a escavadeira em campo não exige aditivo.
-const updateMaquinasContrato = async (req, res) => {
-    const { id } = req.params;
-    const maqs = normalizeMaquinas(req.body?.maquinas);
-    try {
-        const [cur] = await db.query('SELECT id FROM terceiro_contratos WHERE id = ?', [id]);
-        if (cur.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
-
-        const conflito = await maquinasEmConflito(maqs, id);
-        if (conflito.length > 0) {
-            return res.status(400).json({ error: 'Uma ou mais máquinas já estão vinculadas a outro contrato.' });
-        }
-        await db.execute('UPDATE terceiro_contratos SET maquinas = ? WHERE id = ?', [JSON.stringify(maqs), id]);
-
-        const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
-        if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
-        res.json(await anexarVigente(db, rows[0]));
-    } catch (error) {
-        console.error('❌ Erro ao atualizar máquinas do contrato:', error.code, '|', error.sqlMessage || error.message);
-        res.status(500).json({ error: 'Erro ao atualizar máquinas do contrato.' });
-    }
-};
 
 // Histórico de documentos assinados de um contrato (vigente + arquivados).
 const getContratoDocs = async (req, res) => {
@@ -519,6 +547,5 @@ module.exports = {
     enviarContratoAssinado,
     removerContratoAssinado,
     getContratoDocs,
-    updateMaquinasContrato,
     slugArquivo,
 };

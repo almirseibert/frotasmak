@@ -111,6 +111,16 @@ const getVehicleById = async (req, res) => {
     }
 };
 
+// Veículo terceirizado PRECISA de locador: é a chave que liga horas e diesel ao
+// contrato do terceiro — (locador × obra × subgrupo × data). Sem ela a máquina não
+// entra em contrato nenhum, o diesel deixa de abater do saldo a pagar e ainda vira
+// despesa da obra: o mesmo litro contado duas vezes, sem nada na tela denunciando.
+// A regra vive aqui e não só no VehicleModal porque importação e integrações não
+// passam pela tela.
+const ERRO_SEM_LOCADOR = 'Veículo terceirizado exige a Empresa Locadora (locadorId): é ela que liga as horas e o diesel ao contrato do terceiro.';
+
+const marcadoTerceirizado = (v) => v === 1 || v === '1' || v === true || v === 'true';
+
 const createVehicle = async (req, res) => {
     const data = req.body;
     
@@ -118,6 +128,10 @@ const createVehicle = async (req, res) => {
     if (data.alocadoEm) data.alocadoEm = JSON.stringify(data.alocadoEm);
     delete data.history; 
     delete data.checklistCount; // Remove campo virtual se vier no body
+
+    if (marcadoTerceirizado(data.isOutsourced) && !data.locadorId) {
+        return res.status(400).json({ error: ERRO_SEM_LOCADOR });
+    }
 
     data.id = randomUUID();
     
@@ -184,6 +198,24 @@ const updateVehicle = async (req, res) => {
     const query = `UPDATE vehicles SET ${setClause} WHERE id = ?`;
 
     if (fields.length === 0) return res.status(400).json({ error: 'Nenhum dado para atualizar.' });
+
+    // Na edição o corpo é parcial: só barra quando a requisição de fato deixa o
+    // veículo terceirizado sem locador — seja marcando a flag agora, seja apagando
+    // o locador de um que já era terceirizado.
+    if ('isOutsourced' in data || 'locadorId' in data) {
+        try {
+            const [cur] = await db.query('SELECT isOutsourced, locadorId FROM vehicles WHERE id = ?', [id]);
+            const atual = cur[0] || {};
+            const terceirizado = 'isOutsourced' in data
+                ? marcadoTerceirizado(data.isOutsourced) : marcadoTerceirizado(atual.isOutsourced);
+            const locador = 'locadorId' in data ? data.locadorId : atual.locadorId;
+            if (terceirizado && !locador) {
+                return res.status(400).json({ error: ERRO_SEM_LOCADOR });
+            }
+        } catch (e) {
+            console.warn('[updateVehicle] checagem de locador falhou —', e.code || e.message);
+        }
+    }
 
     try {
         await db.execute(query, [...values, id]);
