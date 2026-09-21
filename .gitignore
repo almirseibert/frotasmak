@@ -68,3 +68,7 @@ graphify-out/
 
 # Saída gerada ao rodar o spike de evidências (imagens de conferência/amostras)
 _spike_evidencias/out/
+
+# Backups de env (nunca versionar credenciais)
+*.bak
+.env.local.*

@@ -57,6 +57,19 @@ const escapar = (v) => {
         .replace(/\x1a/g, '\\Z') + "'";
 };
 
+// Escapa um campo sabendo se a COLUNA é do tipo JSON.
+//
+// O mysql2 faz JSON.parse no que vem de coluna JSON. Objeto e array voltam como
+// objeto e o escapar() genérico os re-serializa certo, mas JSON escalar — uma
+// string, um número, um booleano — volta como primitivo JS e perde a marcação de
+// JSON: a string viraria texto solto no INSERT e o MySQL recusaria com
+// ERROR 3140 (Invalid JSON text), abortando a restauração no meio.
+// Re-serializar sempre que a coluna for JSON cobre os dois casos.
+const escaparCampo = (v, ehJson) => {
+    if (v === null || v === undefined) return 'NULL';
+    return ehJson ? escapar(JSON.stringify(v)) : escapar(v);
+};
+
 (async () => {
     const conexao = await obterConexao();
     anunciar(conexao);
@@ -105,7 +118,15 @@ const escapar = (v) => {
         const n = Number(cont.n);
         if (n === 0) { console.log(`  ${tabela}: vazia`); continue; }
 
-        const [colunas] = await db.query(`SHOW COLUMNS FROM \`${tabela}\``);
+        const [colunasRaw] = await db.query(`SHOW COLUMNS FROM \`${tabela}\``);
+
+        // Colunas GENERATED (STORED/VIRTUAL) não entram no INSERT: o MySQL as
+        // calcula sozinho e recusa valor explícito com ERROR 3105, abortando a
+        // restauração inteira. Atenção ao filtro: `Extra` também traz
+        // DEFAULT_GENERATED para colunas com DEFAULT CURRENT_TIMESTAMP, e
+        // essas são colunas normais — excluí-las perderia os horários
+        // originais, substituindo-os pelo instante da restauração.
+        const colunas = colunasRaw.filter((c) => !/(VIRTUAL|STORED) GENERATED/.test(c.Extra || ''));
         const nomes = colunas.map((c) => '`' + c.Field + '`').join(', ');
 
         // PAGINAÇÃO POR CHAVE, não por OFFSET.
@@ -126,7 +147,7 @@ const escapar = (v) => {
 
         const emitir = async (linhas) => {
             const valores = linhas
-                .map((l) => '(' + colunas.map((c) => escapar(l[c.Field])).join(', ') + ')')
+                .map((l) => '(' + colunas.map((c) => escaparCampo(l[c.Field], c.Type === 'json')).join(', ') + ')')
                 .join(',\n');
             await escrever(`INSERT INTO \`${tabela}\` (${nomes}) VALUES\n${valores};\n`);
         };
@@ -160,13 +181,81 @@ const escapar = (v) => {
         console.log(`  ${tabela}: ${n} linha(s)${pk ? '' : ' (offset)'}`);
     }
 
+    // ─── VIEWS E TRIGGERS ───
+    //
+    // SHOW FULL TABLES filtra por BASE TABLE, então views nunca entram no laço
+    // acima; e SHOW CREATE TABLE não traz triggers. Ambos ficam para o fim: as
+    // views porque dependem das tabelas já existirem, os triggers idem.
+    //
+    // O DEFINER é removido do DDL. Ele grava o usuário@host de quem criou o
+    // objeto; restaurar num servidor onde esse usuário não existe faz o MySQL
+    // recusar o CREATE. Sem DEFINER, o objeto passa a pertencer a quem restaura.
+    const semDefiner = (ddl) => ddl.replace(/DEFINER=`[^`]*`@`[^`]*`\s*/g, '');
+
+    const [viewsRaw] = await db.query(
+        'SELECT table_name AS nome FROM information_schema.views WHERE table_schema = DATABASE()'
+    );
+    // Uma view cuja tabela-base ficou de fora (caso de --tabelas) quebraria a
+    // restauração com ERROR 1146, então só entram as views cujas dependências
+    // estão todas no backup.
+    const [depsRaw] = await db.query(
+        'SELECT view_name AS view, table_name AS tabela FROM information_schema.view_table_usage '
+        + 'WHERE view_schema = DATABASE()'
+    );
+    const dependencias = new Map();
+    for (const d of depsRaw) {
+        const v = d.view || d.VIEW_NAME;
+        const t = d.tabela || d.TABLE_NAME;
+        if (!dependencias.has(v)) dependencias.set(v, []);
+        dependencias.get(v).push(t);
+    }
+
+    const views = viewsRaw
+        .map((v) => v.nome || v.TABLE_NAME)
+        .filter((v) => (dependencias.get(v) || []).every((t) => tabelas.includes(t)));
+
+    if (views.length) {
+        await escrever('\n-- ═══ VIEWS ═══\n');
+        for (const view of views) {
+            const [[criacao]] = await db.query(`SHOW CREATE VIEW \`${view}\``);
+            await escrever(`\nDROP VIEW IF EXISTS \`${view}\`;\n`);
+            await escrever(semDefiner(criacao['Create View']) + ';\n');
+            console.log(`  view ${view}`);
+        }
+    }
+
+    // Só exporta trigger cuja tabela entrou no backup — com --tabelas, um trigger
+    // órfão apontando para tabela ausente faria a restauração falhar.
+    const [triggersRaw] = await db.query(
+        'SELECT trigger_name AS nome, event_object_table AS tabela '
+        + 'FROM information_schema.triggers WHERE trigger_schema = DATABASE()'
+    );
+    const triggers = triggersRaw
+        .map((t) => ({ nome: t.nome || t.TRIGGER_NAME, tabela: t.tabela || t.EVENT_OBJECT_TABLE }))
+        .filter((t) => tabelas.includes(t.tabela));
+
+    if (triggers.length) {
+        await escrever('\n-- ═══ TRIGGERS ═══\n');
+        // O corpo de um trigger tem ';' interno, então o cliente precisa de um
+        // delimitador diferente para não cortar o CREATE no meio.
+        await escrever('\nDELIMITER $$\n');
+        for (const trigger of triggers) {
+            const [[criacao]] = await db.query(`SHOW CREATE TRIGGER \`${trigger.nome}\``);
+            await escrever(`\nDROP TRIGGER IF EXISTS \`${trigger.nome}\`$$\n`);
+            await escrever(semDefiner(criacao['SQL Original Statement']) + '$$\n');
+            console.log(`  trigger ${trigger.nome} (${trigger.tabela})`);
+        }
+        await escrever('\nDELIMITER ;\n');
+    }
+
     await escrever('\nSET FOREIGN_KEY_CHECKS=1;\n');
     await new Promise((resolve) => saida.end(resolve));
 
     const tamanho = fs.statSync(SAIDA).size;
     console.log('');
     console.log(`Arquivo: ${SAIDA}`);
-    console.log(`${tabelas.length} tabela(s), ${totalLinhas} linha(s), `
+    console.log(`${tabelas.length} tabela(s), ${views.length} view(s), `
+        + `${triggers.length} trigger(s), ${totalLinhas} linha(s), `
         + `${(tamanho / 1024 / 1024).toFixed(1)} MB`);
     process.exit(0);
 })().catch((e) => {
