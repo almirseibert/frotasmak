@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
+const { fmtBRL } = require('../utils/currency');
 const LOGO_URL = 'https://i.postimg.cc/pVnwyfRq/MAK-Servi-os-Logotipo.png';
 const LOGO_CACHE_PATH = path.join(__dirname, '..', 'public', 'mak-logo-cache.png');
 
@@ -22,8 +23,6 @@ const ensureLogo = () => new Promise((resolve) => {
     }).on('error', () => { file.close(); fs.unlink(LOGO_CACHE_PATH, () => {}); resolve(null); });
 });
 
-const fmtBRL = (n) =>
-    (Number(n) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 const fmtNum = (n) =>
     (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 // Horas: sem casa decimal quando inteiro (514, não 514,0); 1 casa quando fracionário (7,5).

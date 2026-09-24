@@ -37,6 +37,7 @@ const {
 } = require('../utils/regrasAbastecimento');
 const { ymdBRT } = require('../utils/dateBRT');
 
+const { fmtBRL } = require('../utils/currency');
 const DECISAO = {
     AUTO_LIBERADO: 'AUTO_LIBERADO',
     AUTO_LIBERADO_SIMULADO: 'AUTO_LIBERADO_SIMULADO',
@@ -521,8 +522,8 @@ const avaliarG5 = async (conn, sol, config, litrosEstimados) => {
 
     return valor > limite
         ? FALHA('G5_teto',
-            `Valor estimado R$ ${valor.toFixed(2)} acima do teto automático de R$ ${limite.toFixed(2)}.`, extra)
-        : OK('G5_teto', `Valor estimado R$ ${valor.toFixed(2)} dentro do teto.`, extra);
+            `Valor estimado ${fmtBRL(valor)} acima do teto automático de ${fmtBRL(limite)}.`, extra)
+        : OK('G5_teto', `Valor estimado ${fmtBRL(valor)} dentro do teto.`, extra);
 };
 
 // ─── Persistência da análise ─────────────────────────────────────────────────

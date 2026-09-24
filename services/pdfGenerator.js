@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 
+const { fmtBRL, fmtBRLLitro } = require('../utils/currency');
 const LOGO_URL = 'https://i.postimg.cc/pVnwyfRq/MAK-Servi-os-Logotipo.png';
 const LOGO_CACHE_PATH = path.join(__dirname, '..', 'public', 'mak-logo-cache.png');
 
@@ -74,8 +75,8 @@ const generateOrderPdf = async (order = {}) => {
             ['Combustível Autorizado',  fmtFuel(order.fuelType)],
             ['Litros Liberados',        order.isFillUp ? 'Tanque Cheio' : `${parseFloat(order.liters || 0).toFixed(2)} L`],
         ];
-        if (order.pricePerLiter) rows.push(['Valor por Litro', `R$ ${parseFloat(order.pricePerLiter).toFixed(3)}`]);
-        if (order.valorTotal)    rows.push(['Valor Total',     `R$ ${parseFloat(order.valorTotal).toFixed(2)}`]);
+        if (order.pricePerLiter) rows.push(['Valor por Litro', `${fmtBRLLitro(parseFloat(order.pricePerLiter))}`]);
+        if (order.valorTotal)    rows.push(['Valor Total',     `${fmtBRL(parseFloat(order.valorTotal))}`]);
         if (order.invoiceNumber) rows.push(['Nota Fiscal (NF)', String(order.invoiceNumber)]);
         if (order.obraName)      rows.push(['Obra/Centro de Custo', order.obraName]);
         if (order.needsArla) {
@@ -83,7 +84,7 @@ const generateOrderPdf = async (order = {}) => {
                 order.isFillUpArla ? 'Completar Tanque' : `${parseFloat(order.litrosLiberadosArla || 0).toFixed(2)} L`]);
         }
         if (order.outros) {
-            const valor = order.outrosValor ? ` (R$ ${parseFloat(order.outrosValor).toFixed(2)})` : '';
+            const valor = order.outrosValor ? ` (${fmtBRL(parseFloat(order.outrosValor))})` : '';
             rows.push(['Outros Itens/Observação', `${order.outros}${valor}`]);
         }
         if (order.observacao)    rows.push(['Observação', order.observacao]);

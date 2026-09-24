@@ -16,6 +16,7 @@ const { sendEmail } = require('./emailService');
 const { renderBody } = require('./notificationEvents');
 const pushService = require('./pushService');
 
+const { fmtBRL } = require('../utils/currency');
 const insertLog = (entry) => {
     db.query(
         `INSERT INTO notification_log (id, event_type, channel, contact, obra_id, status, error_msg, payload_json)
@@ -93,7 +94,7 @@ const TEMPLATES = {
     combustivel_obra_20pct: (p) => ({
         subject: `Combustível da obra ${p.obra || '—'} a ${p.pct || '—'}% do limite`,
         body: `⚠️ A obra *${p.obra || '—'}* atingiu *${p.pct || '—'}%* do orçamento de combustível.` +
-              (p.gastoAtual && p.orcamento ? `\n\nGasto atual: R$ ${Number(p.gastoAtual).toFixed(2)} / R$ ${Number(p.orcamento).toFixed(2)}` : ''),
+              (p.gastoAtual && p.orcamento ? `\n\nGasto atual: ${fmtBRL(Number(p.gastoAtual))} / ${fmtBRL(Number(p.orcamento))}` : ''),
     }),
     obra_progresso: (p) => ({
         subject: `Obra ${p.obra || '—'} atingiu ${p.pct || '—'}%`,
@@ -123,7 +124,7 @@ const TEMPLATES = {
         subject: `Multa registrada: ${p.funcionario || '—'}`,
         body: `🚨 Multa registrada para *${p.funcionario || '—'}*.\n\n` +
               `• Motivo: ${p.motivo || '—'}\n` +
-              `• Valor: R$ ${p.valor ? Number(p.valor).toFixed(2) : '—'}\n` +
+              `• Valor: ${p.valor ? fmtBRL(p.valor) : '—'}\n` +
               `• Veículo: ${p.placa || '—'}`,
         anexoUrl: p.pdfUrl || null,
     }),

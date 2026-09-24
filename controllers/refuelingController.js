@@ -24,6 +24,7 @@ const path = require('path');
 const multer = require('multer');
 const nodemailer = require('nodemailer');
 
+const { fmtBRL } = require('../utils/currency');
 // ─── Auto-envio da ordem ao posto (WhatsApp/E-mail) ─────────────────────────
 // Reusa o orderNotifier (mesmo pipeline da entrada de comboio): gera o PDF
 // uma vez, anexa por e-mail e manda link pelo WhatsApp — respeitando os
@@ -1434,7 +1435,7 @@ const checkObraFuelPercent = async (obraId) => {
         // Envio direto ao responsável da obra (se tiver email configurado)
         if (obra.responsavel_email) {
             const subject = `Combustível da obra ${obra.nome} a ${limiar}% do orçamento`;
-            const body = `⚠️ A obra *${obra.nome}* atingiu ${limiar}% do orçamento de combustível.\n\nGasto atual: R$ ${totalGasto.toFixed(2)} / R$ ${contrato.toFixed(2)}`;
+            const body = `⚠️ A obra *${obra.nome}* atingiu ${limiar}% do orçamento de combustível.\n\nGasto atual: ${fmtBRL(totalGasto)} / ${fmtBRL(contrato)}`;
             try {
                 await sendEmail({
                     to: obra.responsavel_email,

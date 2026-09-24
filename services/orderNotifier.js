@@ -14,6 +14,7 @@ const { generateOrderPdf } = require('./pdfGenerator');
 const { buildComboioPartnerId } = require('../utils/ensureComboioPartner');
 const orderDelivery = require('./orderDelivery');
 
+const { fmtBRL } = require('../utils/currency');
 // Diretório onde os PDFs ficam hospedados — servido via /uploads/ordens
 const ORDERS_PDF_DIR = path.join(__dirname, '..', 'public', 'uploads', 'ordens');
 try { if (!fs.existsSync(ORDERS_PDF_DIR)) fs.mkdirSync(ORDERS_PDF_DIR, { recursive: true }); } catch (_) {}
@@ -53,11 +54,7 @@ const buildOrderPdfArtifact = async (order) => {
 };
 
 // ─── Formatação ─────────────────────────────────────────────────────────────
-const fmtMoney = (v) => {
-    const n = parseFloat(v);
-    if (!isFinite(n)) return 'R$ 0,00';
-    return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-};
+const fmtMoney = (v) => fmtBRL(v);
 
 const fmtFuel = (f) => {
     if (!f) return '—';

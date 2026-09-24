@@ -7,6 +7,7 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
+const { fmtBRL } = require('../utils/currency');
 const uploadDir = path.join(__dirname, '../public/uploads');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir, { recursive: true });
@@ -349,7 +350,7 @@ Informamos que recebemos uma notificação de infração de trânsito vinculada 
 📅 *Data:* ${new Date(fine.dataInfração).toLocaleDateString('pt-BR', { timeZone: 'UTC' })}
 📍 *Local:* ${fine.localInfracao || 'Não informado'}
 📝 *Motivo:* ${fine.descricao}
-💰 *Valor:* R$ ${parseFloat(fine.valor || 0).toFixed(2).replace('.', ',')}
+💰 *Valor:* ${fmtBRL(parseFloat(fine.valor || 0))}
 
 *Atenção:*
 Esta multa será processada pelo RH conforme as políticas da empresa.

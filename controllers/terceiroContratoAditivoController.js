@@ -18,6 +18,7 @@ const {
 const { generateAditivoPdf } = require('../services/aditivoPdfGenerator');
 const { slugArquivo } = require('./terceiroContratoController');
 
+const { fmtBRL } = require('../utils/currency');
 const CONTRATOS_PDF_DIR = path.join(__dirname, '..', 'public', 'uploads', 'contratos');
 
 // Acréscimo acumulado acima deste percentual do valor ORIGINAL exige confirmação
@@ -121,7 +122,7 @@ const validarDelta = ({ tipo, itens, contrato, vigente, novaVigenciaFim, valorDe
         }
         // Preço divergente em subgrupo existente seria um reajuste disfarçado.
         if (item.price != null && item.price > 0 && item.price !== base.price) {
-            return { erro: `O preço de "${item.type}" difere do contratado (R$ ${base.price}). Alteração de preço exige aditivo de reajuste.` };
+            return { erro: `O preço de "${item.type}" difere do contratado (${fmtBRL(base.price)}). Alteração de preço exige aditivo de reajuste.` };
         }
         finais.push({ type: item.type, hours: item.hours, price: base.price });
     }

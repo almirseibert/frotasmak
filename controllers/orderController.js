@@ -17,6 +17,7 @@ const { dispatchAsync } = require('../services/notificationDispatcher');
 // item e o relato (e liberam o equipamento quando tudo conclui).
 const { syncRelatoFromOrderAsync } = require('../services/relatoStatusService');
 
+const { fmtBRL } = require('../utils/currency');
 // Resolve a URL de upload (ex.: https://host/uploads/arquivo.pdf) para o caminho
 // local em public/uploads e devolve { buffer, filename } — ou null se falhar.
 const resolvePdfArtifact = (pdfUrl) => {
@@ -114,7 +115,7 @@ const _notifyOrderCS = async ({ orderNumber, supplierId, status, totalValue, ane
             msg += `Olá *${partner.razaoSocial}*,\n`;
             msg += `A Ordem Nº *${numStr}* sofreu alterações.\n\n`;
             msg += `*Novo Status:* ${status === 'Ativa' ? 'Aprovada / Liberada' : status}\n`;
-            msg += `*Valor Atualizado:* R$ ${Number(totalValue || 0).toFixed(2)}\n\n`;
+            msg += `*Valor Atualizado:* ${fmtBRL(Number(totalValue || 0))}\n\n`;
             msg += `Por favor, considere estas informações atualizadas para execução ou faturamento.`;
         } else {
             motivo = `Nova Ordem C/S #${numStr}`;
@@ -123,7 +124,7 @@ const _notifyOrderCS = async ({ orderNumber, supplierId, status, totalValue, ane
             msg += `Uma nova ordem (Nº *${numStr}*) foi gerada e atribuída a você.\n\n`;
             msg += `*Status Atual:* ${status === 'Ativa' ? 'Aprovada / Liberada' : (status || 'Aberta')}\n`;
             if (status !== 'Pendente de Valor') {
-                msg += `*Valor Total Autorizado:* R$ ${Number(totalValue || 0).toFixed(2)}\n`;
+                msg += `*Valor Total Autorizado:* ${fmtBRL(Number(totalValue || 0))}\n`;
             } else {
                 msg += `*Atenção:* Esta ordem está PENDENTE DE VALOR (A cotar).\n`;
             }
