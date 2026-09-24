@@ -472,11 +472,16 @@ const getProjecaoObra = async (req, res) => {
                    NULLIF(l.planoItemKey, '')       AS itemKey,
                    v.tipo                           AS grupoVeiculo,
                    NULLIF(v.sub_tipo, '')           AS subgrupoVeiculo,
-                   SUM(l.totalHours)                AS horas
+                   v.id                             AS veiculoId,
+                   v.registroInterno                AS registroInterno,
+                   v.modelo                         AS modelo,
+                   SUM(l.totalHours)                AS horas,
+                   COUNT(*)                         AS lancamentos
               FROM daily_work_logs l
               LEFT JOIN vehicles v ON v.id = l.vehicleId
              WHERE l.obraId = ?
-             GROUP BY data_log, itemKey, grupoVeiculo, subgrupoVeiculo
+             GROUP BY data_log, itemKey, grupoVeiculo, subgrupoVeiculo,
+                      veiculoId, registroInterno, modelo
              ORDER BY data_log ASC
         `, [obraId]);
 
@@ -527,15 +532,63 @@ const getProjecaoObra = async (req, res) => {
             : chaveNoNivelDoMapa(r.itemKey, r.grupoVeiculo, planoMap));
 
         const realizadoPorItem = {};
+        // Série diária e frota POR ITEM — o detalhe de um item precisa do dia a
+        // dia, não só do total. Mantém a mesma chave do realizado para que item
+        // fora do contrato também tenha o próprio histórico.
+        const diasPorItem = {};
+        const veiculosPorItem = {};
         logRows.forEach((r) => {
             const chave = chaveDoItem(r) || '(sem classificação)';
-            realizadoPorItem[chave] = (realizadoPorItem[chave] || 0) + (parseFloat(r.horas) || 0);
+            const horas = parseFloat(r.horas) || 0;
+            realizadoPorItem[chave] = (realizadoPorItem[chave] || 0) + horas;
+
+            if (!diasPorItem[chave]) diasPorItem[chave] = {};
+            diasPorItem[chave][r.data_log] = (diasPorItem[chave][r.data_log] || 0) + horas;
+
+            if (!veiculosPorItem[chave]) veiculosPorItem[chave] = {};
+            const vk = r.veiculoId || r.registroInterno || '(sem veículo)';
+            if (!veiculosPorItem[chave][vk]) {
+                veiculosPorItem[chave][vk] = {
+                    registroInterno: r.registroInterno || null,
+                    modelo: r.modelo || null,
+                    grupo: r.grupoVeiculo || null,
+                    subgrupo: r.subgrupoVeiculo || null,
+                    horas: 0,
+                    lancamentos: 0,
+                    primeiroDia: r.data_log,
+                    ultimoDia: r.data_log,
+                };
+            }
+            const alvo = veiculosPorItem[chave][vk];
+            alvo.horas += horas;
+            alvo.lancamentos += Number(r.lancamentos) || 0;
+            if (r.data_log < alvo.primeiroDia) alvo.primeiroDia = r.data_log;
+            if (r.data_log > alvo.ultimoDia) alvo.ultimoDia = r.data_log;
         });
 
         const porItem = [...new Set([...Object.keys(planoMap), ...Object.keys(realizadoPorItem)])]
             .map((key) => {
                 const contratadas = parseFloat(planoMap[key]) || 0;
                 const executadas = realizadoPorItem[key] || 0;
+                let acum = 0;
+                const serieDiaria = Object.entries(diasPorItem[key] || {})
+                    .sort(([a], [b]) => (a < b ? -1 : 1))
+                    .map(([data, horas]) => {
+                        acum += horas;
+                        return {
+                            data,
+                            horas: Math.round(horas * 10) / 10,
+                            horasAcumuladas: Math.round(acum * 10) / 10,
+                            percentualAcumulado: contratadas > 0
+                                ? Math.round((acum / contratadas) * 1000) / 10
+                                : null,
+                        };
+                    });
+
+                const veiculos = Object.values(veiculosPorItem[key] || {})
+                    .map((v) => ({ ...v, horas: Math.round(v.horas * 10) / 10 }))
+                    .sort((a, b) => b.horas - a.horas);
+
                 return {
                     key,
                     nivel: nivelPlano,
@@ -543,6 +596,9 @@ const getProjecaoObra = async (req, res) => {
                     horasContratadas: Math.round(contratadas * 10) / 10,
                     horasExecutadas: Math.round(executadas * 10) / 10,
                     percentual: contratadas > 0 ? Math.round((executadas / contratadas) * 1000) / 10 : null,
+                    diasComLancamento: serieDiaria.length,
+                    serieDiaria,
+                    veiculos,
                 };
             })
             // Fora do contrato primeiro (é exceção e precisa ser vista), depois do
@@ -642,15 +698,76 @@ const getProjecaoObra = async (req, res) => {
         `, [obraId]);
         const totalLitros = parseFloat(litrosRow.total) || 0;
 
+        // Lista dos abastecimentos da obra. O custo exibido continua vindo de
+        // `expenses` (fonte única); esta lista é a memória do consumo físico.
+        const [abastecimentosRows] = await db.query(`
+            SELECT r.id,
+                   DATE_FORMAT(r.data, '%Y-%m-%d %H:%i') AS data,
+                   COALESCE(NULLIF(r.vehicleInternalId,''), v.registroInterno) AS veiculo,
+                   v.modelo                              AS modelo,
+                   r.partnerName                         AS posto,
+                   r.employeeName                        AS operador,
+                   r.fuelType                            AS combustivel,
+                   r.litrosLiberados                     AS litros,
+                   r.litrosAbastecidos                   AS litrosAbastecidos,
+                   r.pricePerLiter                       AS precoLitro,
+                   r.is_full_tank                        AS tanqueCheio,
+                   r.status                              AS status
+              FROM refuelings r
+              LEFT JOIN vehicles v ON v.id = r.vehicleId
+             WHERE r.obraId = ?
+             ORDER BY r.data DESC
+             LIMIT 500
+        `, [obraId]);
+
+        const abastecimentos = abastecimentosRows.map((r) => {
+            const liberados = parseFloat(r.litros) || 0;
+            const abastecidos = parseFloat(r.litrosAbastecidos) || 0;
+            // O volume que vale para leitura é o efetivamente abastecido; o
+            // liberado é a autorização. Metade dos registros só tem um dos dois,
+            // então exibir um campo só deixaria linhas zeradas sem motivo.
+            const litros = abastecidos || liberados;
+            const preco = parseFloat(r.precoLitro) || 0;
+            return {
+                id: r.id,
+                data: r.data,
+                veiculo: r.veiculo || null,
+                modelo: r.modelo || null,
+                posto: r.posto || null,
+                operador: r.operador || null,
+                combustivel: r.combustivel || null,
+                litros: Math.round(litros * 10) / 10,
+                litrosLiberados: Math.round(liberados * 10) / 10,
+                litrosAbastecidos: abastecidos ? Math.round(abastecidos * 10) / 10 : null,
+                precoLitro: preco || null,
+                valorRS: preco > 0 ? Math.round(litros * preco * 100) / 100 : null,
+                tanqueCheio: !!r.tanqueCheio,
+                status: r.status || null,
+            };
+        });
+
         // % combustível sobre faturamento já realizado
         const percentCombust = totalFaturamentoRS > 0
             ? (totalCustoCombust / totalFaturamentoRS) * 100
             : 0;
 
-        // Projeção linear: se hoje X% está concluído e gastamos Y% em combustível,
-        // a 100% de conclusão a tendência é gastar Y/X * 100 em combustível.
-        const projecaoFinalPercent = percentConcluido > 1
-            ? (percentCombust / percentConcluido) * 100
+        // Projeção linear: o custo de combustível cresce com o progresso físico,
+        // então a 100% ele vale custo / (X/100). O percentual final é esse custo
+        // sobre o faturamento a 100% (horas contratadas × valor hora) — a MESMA
+        // base do percentual atual, para os dois serem comparáveis.
+        // NÃO dividir percentCombust por X: ele já está sobre o faturamento
+        // realizado, que também cresce com X — dividir de novo conta o progresso
+        // duas vezes (41% a 61% virava 67,5%).
+        // NÃO usar valorTotalContrato: ele inclui km de prancha, que não tem hora,
+        // e mudaria a base (a projeção sairia artificialmente abaixo do atual).
+        // Sem preços ou com progresso < 1%, fica a proporção atual.
+        const faturamentoContratado = Object.entries(horasContratadasPorTipo)
+            .reduce((acc, [k, h]) => acc + (parseFloat(h) || 0) * (parseFloat(valoresPorTipo[k]) || 0), 0);
+        const custoCombustProjetado = percentConcluido > 1
+            ? totalCustoCombust / (percentConcluido / 100)
+            : null;
+        const projecaoFinalPercent = custoCombustProjetado != null && faturamentoContratado > 0
+            ? (custoCombustProjetado / faturamentoContratado) * 100
             : percentCombust;
 
         res.json({
@@ -677,8 +794,9 @@ const getProjecaoObra = async (req, res) => {
                 totalCustoRS:          Math.round(totalCustoCombust  * 100) / 100,
                 percentualAtual:       Math.round(percentCombust     * 10)  / 10,
                 projecaoFinalPercent:  Math.round(projecaoFinalPercent * 10) / 10,
-                alertaCritico:         projecaoFinalPercent > 20,
+                custoProjetadoRS:      custoCombustProjetado != null ? Math.round(custoCombustProjetado * 100) / 100 : null,                alertaCritico:         projecaoFinalPercent > 20,
                 semDados:              totalCustoCombust === 0 && totalLitros === 0,
+                abastecimentos,
             },
         });
     } catch (e) {
