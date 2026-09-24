@@ -3,5 +3,6 @@ const router = express.Router();
 const controller = require('../controllers/dashboardController');
 
 router.get('/home-summary', controller.getHomeSummary);
+router.get('/obras-foco', controller.getObrasFoco);
 
 module.exports = router;

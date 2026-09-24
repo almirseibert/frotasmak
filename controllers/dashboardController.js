@@ -52,6 +52,7 @@ const computeProjecoesLeves = async (obraIds) => {
                v.tipo                     AS grupoVeiculo,
                SUM(l.totalHours) AS horas,
                MIN(DATE_FORMAT(l.date, '%Y-%m-%d')) AS primeira_data,
+               MAX(DATE_FORMAT(l.date, '%Y-%m-%d')) AS ultima_data,
                COUNT(DISTINCT DATE(l.date)) AS dias_lancamento
           FROM daily_work_logs l
           LEFT JOIN vehicles v ON v.id = l.vehicleId
@@ -73,13 +74,16 @@ const computeProjecoesLeves = async (obraIds) => {
     const logsPorObra = new Map();
     for (const r of logs) {
         const key = String(r.obraId);
-        if (!logsPorObra.has(key)) logsPorObra.set(key, { totalHoras: 0, faturamento: 0, diasLancamento: 0, primeiraData: null, porTipo: [] });
+        if (!logsPorObra.has(key)) logsPorObra.set(key, { totalHoras: 0, faturamento: 0, diasLancamento: 0, primeiraData: null, ultimaData: null, porTipo: [] });
         const entry = logsPorObra.get(key);
         entry.porTipo.push(r);
         entry.totalHoras += parseFloat(r.horas) || 0;
         entry.diasLancamento = Math.max(entry.diasLancamento, parseInt(r.dias_lancamento, 10) || 0);
         if (!entry.primeiraData || (r.primeira_data && r.primeira_data < entry.primeiraData)) {
             entry.primeiraData = r.primeira_data;
+        }
+        if (!entry.ultimaData || (r.ultima_data && r.ultima_data > entry.ultimaData)) {
+            entry.ultimaData = r.ultima_data;
         }
     }
 
@@ -95,10 +99,19 @@ const computeProjecoesLeves = async (obraIds) => {
         const entry = logsPorObra.get(key) || { totalHoras: 0, diasLancamento: 0, porTipo: [] };
 
         let faturamento = 0;
+        // Horas que caem fora do contrato: a chave resolvida nao existe em
+        // valoresPorTipo (preco 0). Quase sempre e cadastro -- veiculo sem
+        // sub_tipo, ou item de contrato nao mapeado -- e some em silencio do
+        // faturamento. Ver docs/item-de-contrato-e-substituicao-plano.md.
+        let horasSemPreco = 0;
         for (const t of entry.porTipo) {
             const chave = chaveNoNivelDoMapa(t.itemKey, t.grupoVeiculo, valoresPorTipo) || '';
             const preco = parseFloat(valoresPorTipo[chave] || valoresPorTipo[chave.trim()] || 0);
-            faturamento += (parseFloat(t.horas) || 0) * preco;
+            const horas = parseFloat(t.horas) || 0;
+            faturamento += horas * preco;
+            if (preco <= 0 && horas > 0) {
+                horasSemPreco += horas;
+            }
         }
 
         const percentConcluido = horasContratadas > 0 ? (entry.totalHoras / horasContratadas) * 100 : 0;
@@ -108,8 +121,16 @@ const computeProjecoesLeves = async (obraIds) => {
 
         const custoCombust = custoCombustivelPorObra.get(key) || 0;
         const percentCombust = faturamento > 0 ? (custoCombust / faturamento) * 100 : 0;
-        const projecaoFinalPercent = percentConcluido > 1
-            ? (percentCombust / percentConcluido) * 100
+        // Mesma regra de getProjecaoObra (analiseGerencialController): custo
+        // projetado a 100% sobre o faturamento do contrato inteiro (horas
+        // contratadas × valor hora), mesma base do percentCombust.
+        const faturamentoContratado = Object.entries(horasContratadasPorTipo)
+            .reduce((acc, [k, h]) => acc + (parseFloat(h) || 0) * (parseFloat(valoresPorTipo[k]) || 0), 0);
+        const custoCombustProjetado = percentConcluido > 1
+            ? custoCombust / (percentConcluido / 100)
+            : null;
+        const projecaoFinalPercent = custoCombustProjetado != null && faturamentoContratado > 0
+            ? (custoCombustProjetado / faturamentoContratado) * 100
             : percentCombust;
 
         out.set(key, {
@@ -122,6 +143,9 @@ const computeProjecoesLeves = async (obraIds) => {
             custoCombust,
             percentCombust: Math.round(percentCombust * 10) / 10,
             projecaoFinalPercent: Math.round(projecaoFinalPercent * 10) / 10,
+            horasSemPreco: Math.round(horasSemPreco * 10) / 10,
+            ultimoLancamento: entry.ultimaData || null,
+            totalHoras: Math.round(entry.totalHoras * 10) / 10,
         });
     }
     return out;
@@ -341,6 +365,180 @@ exports.getHomeSummary = async (req, res) => {
         });
     } catch (error) {
         console.error('❌ Erro em /dashboard/home-summary:', error);
+        res.status(500).json({ error: error.message });
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Obras em foco — painel operacional de gestão.
+//
+// Três indicadores, nada de prosa. É tela de trabalho do gestor e também o que
+// se projeta para o diretor: lê o número, sabe qual obra, segue a conversa.
+//
+// O que NÃO entra aqui, de propósito:
+//  - Aproveitamento: desaba quando o apontamento atrasa, não quando a obra
+//    para. Problema fantasma numa janela que já fecha com buffer de 7 dias.
+//    Esse controle vive na página de Desempenho.
+//  - Qualquer estimativa de "receita não faturada": a nota fiscal NÃO é
+//    emitida por este sistema. Item sem preço em valoresPorTipo é lacuna de
+//    cadastro, não dinheiro perdido — concluir o contrário é inventar número.
+// ---------------------------------------------------------------------------
+
+// Uma obra está "em produção" se apontou hora nos últimos 45 dias. Mais simples
+// e mais honesto que a janela consolidada: aqui não se mede desempenho, se
+// mede o que está rodando agora.
+const DIAS_OBRA_ATIVA = 45;
+
+// Limites calibrados na distribuição real da operação (set/2026):
+// h/dia por veículo -> mediana 4,7 | p25 3,6   → abaixo de 3,5 é meio turno.
+// dias em produção  -> mediana 70  | p90 134   → acima de 120 é cauda longa.
+const RITMO_BAIXO_H_DIA_VEICULO = 3.5;
+const RITMO_CRITICO_H_DIA_VEICULO = 2.5;
+const DIAS_PRODUCAO_LONGA = 120;
+const DIAS_PRODUCAO_CRITICA = 160;
+
+const fmtNum1 = (v) => (v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+
+exports.getObrasFoco = async (req, res) => {
+    try {
+        const today = new Date();
+        today.setHours(12, 0, 0, 0);
+
+        // Uma query resolve ritmo e duração: horas, dias de apontamento,
+        // veículos distintos e data do primeiro lançamento por obra.
+        const producao = await safeQuery(`
+            SELECT l.obraId,
+                   o.nome                                  AS obraNome,
+                   SUM(l.totalHours)                       AS horas,
+                   COUNT(DISTINCT DATE(l.date))            AS diasLancamento,
+                   COUNT(DISTINCT l.vehicleId)             AS veiculos,
+                   DATEDIFF(CURDATE(), MIN(l.date))        AS diasProducao,
+                   DATE_FORMAT(MIN(l.date), '%Y-%m-%d')    AS inicio,
+                   DATE_FORMAT(MAX(l.date), '%Y-%m-%d')    AS ultimo
+              FROM daily_work_logs l
+              JOIN obras o ON o.id = l.obraId
+             WHERE l.totalHours > 0
+             GROUP BY l.obraId, o.nome
+            HAVING MAX(l.date) >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+        `, [DIAS_OBRA_ATIVA]);
+
+        const obraIds = producao.map(p => p.obraId).filter(Boolean);
+        const projecoes = await computeProjecoesLeves(obraIds);
+
+        const obras = producao.map(p => {
+            const horas = parseFloat(p.horas) || 0;
+            const diasLanc = parseInt(p.diasLancamento, 10) || 0;
+            const veiculos = parseInt(p.veiculos, 10) || 0;
+            // Ritmo por VEÍCULO: h/dia da obra inteira só diz que ela é grande.
+            const hDiaVeiculo = (diasLanc > 0 && veiculos > 0) ? horas / diasLanc / veiculos : 0;
+            const proj = projecoes.get(String(p.obraId)) || {};
+            return {
+                obraId: p.obraId,
+                obraNome: p.obraNome,
+                horas: Math.round(horas),
+                veiculos,
+                hDiaVeiculo: Math.round(hDiaVeiculo * 10) / 10,
+                diasProducao: parseInt(p.diasProducao, 10) || 0,
+                inicio: p.inicio,
+                ultimoLancamento: p.ultimo,
+                dieselProjetado: proj.projecaoFinalPercent ?? null,
+                dieselAtual: proj.percentCombust ?? null,
+                percentConcluido: proj.percentConcluido ?? null,
+                // O % de diesel é medido CONTRA a receita. Se boa parte das
+                // horas da obra caiu em item sem preço, o denominador é
+                // ficção e o percentual explode (já vimos 22.604%). Nesse
+                // caso a obra simplesmente não entra no indicador: melhor
+                // ausente do que com número inventado no telão.
+                receitaConfiavel: proj.faturamento > 0
+                    && (proj.totalHoras > 0 ? (proj.horasSemPreco || 0) / proj.totalHoras : 1) <= 0.2,
+            };
+        });
+
+        // --- Indicador 1: diesel acima do teto do contrato -------------------
+        // A projeção extrapola o gasto atual para o contrato inteiro
+        // (percentCombust / percentConcluido). Com a obra no começo o
+        // denominador é minúsculo e o resultado vira absurdo — Constantina
+        // apareceu com 1.993% estando 3% concluída. Abaixo de 10% de obra
+        // executada mostramos o gasto MEDIDO, que é fato, e não a extrapolação.
+        const PROGRESSO_MINIMO_PARA_PROJETAR = 10;
+        const diesel = obras
+            .filter(o => o.receitaConfiavel && o.dieselAtual != null)
+            .map(o => {
+                const projetavel = (o.percentConcluido ?? 0) >= PROGRESSO_MINIMO_PARA_PROJETAR;
+                const valor = projetavel ? o.dieselProjetado : o.dieselAtual;
+                return {
+                    obraId: o.obraId,
+                    obraNome: o.obraNome,
+                    valor,
+                    rotulo: `${Math.round(valor)}%`,
+                    apoio: projetavel
+                        ? `hoje ${Math.round(o.dieselAtual)}% · obra ${Math.round(o.percentConcluido)}%`
+                        : `medido · obra ${Math.round(o.percentConcluido ?? 0)}%`,
+                    projetado: projetavel,
+                    critico: valor > FUEL_LIMIT_PCT * 1.5,
+                };
+            })
+            .filter(o => o.valor > FUEL_LIMIT_PCT)
+            .sort((a, b) => b.valor - a.valor);
+
+        // --- Indicador 2: ritmo baixo por veículo ----------------------------
+        const ritmo = obras
+            .filter(o => o.veiculos > 0 && o.hDiaVeiculo < RITMO_BAIXO_H_DIA_VEICULO)
+            .sort((a, b) => a.hDiaVeiculo - b.hDiaVeiculo)
+            .map(o => ({
+                obraId: o.obraId,
+                obraNome: o.obraNome,
+                valor: o.hDiaVeiculo,
+                rotulo: `${fmtNum1(o.hDiaVeiculo)} h/dia`,
+                apoio: `${o.veiculos} veículo${o.veiculos > 1 ? 's' : ''}`,
+                critico: o.hDiaVeiculo < RITMO_CRITICO_H_DIA_VEICULO,
+            }));
+
+        // --- Indicador 3: tempo em produção ----------------------------------
+        const duracao = obras
+            .filter(o => o.diasProducao > DIAS_PRODUCAO_LONGA)
+            .sort((a, b) => b.diasProducao - a.diasProducao)
+            .map(o => ({
+                obraId: o.obraId,
+                obraNome: o.obraNome,
+                valor: o.diasProducao,
+                rotulo: `${o.diasProducao} dias`,
+                apoio: `desde ${o.inicio.split('-').reverse().join('/')}`,
+                critico: o.diasProducao > DIAS_PRODUCAO_CRITICA,
+            }));
+
+        res.json({
+            generatedAt: today.toISOString(),
+            obrasEmProducao: obras.length,
+            indicadores: [
+                {
+                    id: 'diesel',
+                    titulo: 'Diesel acima do limite',
+                    criterio: `acima de ${FUEL_LIMIT_PCT}% da receita`,
+                    total: diesel.length,
+                    criticos: diesel.filter(x => x.critico).length,
+                    obras: diesel,
+                },
+                {
+                    id: 'ritmo',
+                    titulo: 'Ritmo baixo',
+                    criterio: `menos de ${fmtNum1(RITMO_BAIXO_H_DIA_VEICULO)} h/dia por veículo`,
+                    total: ritmo.length,
+                    criticos: ritmo.filter(x => x.critico).length,
+                    obras: ritmo,
+                },
+                {
+                    id: 'duracao',
+                    titulo: 'Tempo em produção',
+                    criterio: `mais de ${DIAS_PRODUCAO_LONGA} dias apontando`,
+                    total: duracao.length,
+                    criticos: duracao.filter(x => x.critico).length,
+                    obras: duracao,
+                },
+            ],
+        });
+    } catch (error) {
+        console.error('❌ Erro em /dashboard/obras-foco:', error);
         res.status(500).json({ error: error.message });
     }
 };
