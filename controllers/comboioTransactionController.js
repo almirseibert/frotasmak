@@ -316,16 +316,35 @@ const avaliarSaida = async (conn, recebedor, obraId, readings, { checarLeitura =
     const ficticio = recebedor.permiteMultiplosAbastecimentos == 1;
 
     let motivo = null;
+    let alerta = null;
     let status = 'Concluída';
     if (checarLeitura && valor && !terceirizado && !ficticio) {
-        motivo = await checkLeituraBloqueada(conn, recebedor.id, leituras.odometro, leituras.horimetro);
-        if (motivo) status = 'BloqueadoLeitura';
+        // Leitura INFERIOR à atual não bloqueia na saída do comboio: há
+        // abastecimentos antigos sendo lançados agora com leitura menor que a
+        // de hoje. Só avisa; a leitura do veículo não recua (updateVehicleReading
+        // só grava valor maior). O salto excessivo continua bloqueando.
+        alerta = await leituraInferiorAoAtual(conn, recebedor.id, campo, valor);
+        if (!alerta) {
+            motivo = await checkLeituraBloqueada(conn, recebedor.id, leituras.odometro, leituras.horimetro);
+            if (motivo) status = 'BloqueadoLeitura';
+        }
     }
     if (!motivo && checarOrcamento && !terceirizado && obraId && await checkOrcamentoBloqueado(conn, obraId)) {
         status = 'BloqueadoOrcamento';
         motivo = 'Obra atingiu 20% ou mais do valor de contrato em combustível.';
     }
-    return { status, motivo, ...leituras };
+    return { status, motivo, alerta, ...leituras };
+};
+
+// Aviso (não trava) de leitura menor que a atual do veículo.
+const leituraInferiorAoAtual = async (conn, vehicleId, campo, valor) => {
+    if (campo !== 'odometro' && campo !== 'horimetro') return null;
+    const [[v]] = await conn.execute(`SELECT ${campo} AS atual FROM vehicles WHERE id = ?`, [vehicleId]);
+    const atual = parseFloat(v?.atual || 0);
+    if (!(atual > 0) || !(valor < atual)) return null;
+    return campo === 'odometro'
+        ? `Odômetro informado (${valor} Km) é inferior ao atual do veículo (${atual} Km). O odômetro do veículo não foi alterado.`
+        : `Horímetro informado (${valor} h) é inferior ao atual do veículo (${atual} h). O horímetro do veículo não foi alterado.`;
 };
 
 // Efeitos de uma saída CONCLUÍDA (na criação ou na liberação pelo admin):
@@ -921,11 +940,12 @@ const createSaidaTransaction = async (req, res) => {
         res.status(201).json({
             message: bloqueada
                 ? `Saída Nº ${authNumber} registrada, mas BLOQUEADA: ${ct.motivoBloqueio} Aguarde a liberação do administrador.`
-                : 'Abastecimento registrado.',
+                : (avaliacao.alerta ? `Abastecimento registrado. Atenção: ${avaliacao.alerta}` : 'Abastecimento registrado.'),
             id: ct.id,
             status: ct.status,
             bloqueada,
             motivoBloqueio: ct.motivoBloqueio,
+            alertaLeitura: avaliacao.alerta,
             refuelingOrder: { authNumber },
         });
     } catch (error) {
@@ -1449,10 +1469,11 @@ const updateTransaction = async (req, res) => {
         res.json({
             message: bloqueada
                 ? `Saída atualizada, mas BLOQUEADA: ${atualizado.motivoBloqueio}`
-                : 'Transação atualizada com sucesso',
+                : (avaliacao.alerta ? `Transação atualizada. Atenção: ${avaliacao.alerta}` : 'Transação atualizada com sucesso'),
             status: atualizado.status,
             bloqueada,
             motivoBloqueio: atualizado.motivoBloqueio,
+            alertaLeitura: avaliacao.alerta,
         });
     } catch (e) {
         if (conn) await conn.rollback().catch(() => {});
