@@ -1286,6 +1286,11 @@ const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel')
             { column: 'contratadaRepresentanteNome',         def: 'VARCHAR(160) DEFAULT NULL' },
             { column: 'contratadaRepresentanteQualificacao', def: 'VARCHAR(200) DEFAULT NULL' },
             { column: 'contratadaRepresentanteCpf',          def: 'VARCHAR(20) DEFAULT NULL' },
+            // Data que vai no fecho da minuta ("Santa Maria, RS, 3 de março de 2026").
+            // 'atual' = dia da geração; 'inicio_obra' = vigenciaInicio (terceiro já
+            // trabalhava antes da assinatura); 'personalizada' = dataContratoPersonalizada.
+            { column: 'dataContratoModo',                    def: "VARCHAR(20) NOT NULL DEFAULT 'atual'" },
+            { column: 'dataContratoPersonalizada',           def: 'DATE DEFAULT NULL' },
         ];
         for (const { column, def } of clausulasJuridicas) {
             try {

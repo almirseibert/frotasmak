@@ -10,8 +10,21 @@ const PDFDocument = require('pdfkit');
 const {
     ensureLogo, fmtBRL, fmtNum, fmtHoras, fmtDate, fmtDateExtenso,
     mesesExtenso, maskCNPJ, maskCPF, normalizeSufixoSocietario, sanitizeText,
-    MAK_REPRESENTANTE, qualificacaoPartes,
+    MAK_REPRESENTANTE, qualificacaoPartes, parseDataLocal,
 } = require('./contratoPdfCommon');
+
+// Data que o contrato declara como de assinatura (fecho + ratificação), conforme
+// o modo escolhido na criação. Sem a data exigida pelo modo, cai no dia atual.
+const resolverDataAssinatura = (contrato) => {
+    const hoje = new Date();
+    const hojeLocal = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
+    const origem = contrato.dataContratoModo === 'inicio_obra' ? contrato.vigenciaInicio
+        : contrato.dataContratoModo === 'personalizada' ? contrato.dataContratoPersonalizada
+        : null;
+    if (!origem) return hojeLocal;
+    const d = parseDataLocal(origem);
+    return isNaN(d.getTime()) ? hojeLocal : new Date(d.getFullYear(), d.getMonth(), d.getDate());
+};
 
 /**
  * Gera o PDF do contrato. Recebe { contrato, locador, obra }.
@@ -19,6 +32,7 @@ const {
  */
 const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = {}) => {
     const logoPath = await ensureLogo();
+    const dataAssinatura = resolverDataAssinatura(contrato);
 
     return new Promise((resolve, reject) => {
         const doc = new PDFDocument({ size: 'A4', margin: 50 });
@@ -194,7 +208,7 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         );
         // Quando o início de vigência é anterior à assinatura, ratifica os atos já
         // praticados para não deixar a execução pretérita sem cobertura contratual.
-        const _assinatura = new Date();
+        const _assinatura = dataAssinatura;
         const _vigIni = contrato.vigenciaInicio ? new Date(contrato.vigenciaInicio) : null;
         if (_vigIni && !isNaN(_vigIni.getTime()) &&
             _vigIni < new Date(_assinatura.getFullYear(), _assinatura.getMonth(), _assinatura.getDate())) {
@@ -360,7 +374,7 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
         const sigY = Math.min(doc.y, doc.page.height - 190);
         doc.y = sigY;
         doc.font('Helvetica').fontSize(10)
-            .text(`${contrato.foroComarca || 'Santa Maria'}, RS, ${fmtDateExtenso(new Date())}.`, margin, doc.y, { width: contentWidth });
+            .text(`${contrato.foroComarca || 'Santa Maria'}, RS, ${fmtDateExtenso(dataAssinatura)}.`, margin, doc.y, { width: contentWidth });
         doc.moveDown(3);
 
         const colW = (contentWidth - 30) / 2;

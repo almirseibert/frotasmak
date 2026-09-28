@@ -55,6 +55,26 @@ const representanteContratada = (body) => ({
     contratadaRepresentanteCpf: trim160(body.contratadaRepresentanteCpf, 20),
 });
 
+// Data impressa na minuta. Modo desconhecido cai em 'atual' (comportamento antigo).
+const MODOS_DATA_CONTRATO = ['atual', 'inicio_obra', 'personalizada'];
+const dataDoContrato = (body) => {
+    const modo = MODOS_DATA_CONTRATO.includes(body.dataContratoModo) ? body.dataContratoModo : 'atual';
+    const data = /^\d{4}-\d{2}-\d{2}$/.test(String(body.dataContratoPersonalizada || '').slice(0, 10))
+        ? String(body.dataContratoPersonalizada).slice(0, 10) : null;
+    return { dataContratoModo: modo, dataContratoPersonalizada: modo === 'personalizada' ? data : null };
+};
+
+// Valida o par modo/data contra a vigência informada. Retorna mensagem ou null.
+const erroDataContrato = ({ dataContratoModo, dataContratoPersonalizada }, vigenciaInicio) => {
+    if (dataContratoModo === 'inicio_obra' && !vigenciaInicio) {
+        return 'Para usar a data de início do terceiro na obra, preencha "Vigência início".';
+    }
+    if (dataContratoModo === 'personalizada' && !dataContratoPersonalizada) {
+        return 'Informe a data personalizada do contrato.';
+    }
+    return null;
+};
+
 const normalizeMaquinas = (m) => {
     if (Array.isArray(m)) return m.filter(Boolean);
     if (typeof m === 'string') {
@@ -266,6 +286,9 @@ const createTerceiroContrato = async (req, res) => {
     const maqs = normalizeMaquinas(maquinas);
     const clausulas = clausulasJuridicas(req.body);
     const rep = representanteContratada(req.body);
+    const dataCt = dataDoContrato(req.body);
+    const erroData = erroDataContrato(dataCt, vigenciaInicio);
+    if (erroData) return res.status(400).json({ error: erroData });
 
     const id = randomUUID();
     const criadoPor = createdBy?.userEmail || req.user?.email || null;
@@ -286,15 +309,17 @@ const createTerceiroContrato = async (req, res) => {
                  prazoPagamentoDias, percentualJurosMora, percentualMultaMora,
                  prazoSubstituicaoHoras, prazoInicioServicoHoras, percentualMultaInadimplemento,
                  avisoPrevioRescisaoDias, foroComarca, prazoVigenciaMeses,
-                 contratadaRepresentanteNome, contratadaRepresentanteQualificacao, contratadaRepresentanteCpf)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 contratadaRepresentanteNome, contratadaRepresentanteQualificacao, contratadaRepresentanteCpf,
+                 dataContratoModo, dataContratoPersonalizada)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [id, numero, locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
              maqs === null ? null : JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal), criadoPor,
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
              clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
-             rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf]
+             rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf,
+             dataCt.dataContratoModo, dataCt.dataContratoPersonalizada]
         );
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
@@ -327,6 +352,9 @@ const updateTerceiroContrato = async (req, res) => {
     const maqs = maquinas === undefined ? null : normalizeMaquinas(maquinas);
     const clausulas = clausulasJuridicas(req.body);
     const rep = representanteContratada(req.body);
+    const dataCt = dataDoContrato(req.body);
+    const erroData = erroDataContrato(dataCt, vigenciaInicio);
+    if (erroData) return res.status(400).json({ error: erroData });
 
     try {
         // Contrato assinado é imutável: bloqueia edição enquanto houver documento
@@ -350,7 +378,8 @@ const updateTerceiroContrato = async (req, res) => {
                     prazoPagamentoDias = ?, percentualJurosMora = ?, percentualMultaMora = ?,
                     prazoSubstituicaoHoras = ?, prazoInicioServicoHoras = ?, percentualMultaInadimplemento = ?,
                     avisoPrevioRescisaoDias = ?, foroComarca = ?, prazoVigenciaMeses = ?,
-                    contratadaRepresentanteNome = ?, contratadaRepresentanteQualificacao = ?, contratadaRepresentanteCpf = ?
+                    contratadaRepresentanteNome = ?, contratadaRepresentanteQualificacao = ?, contratadaRepresentanteCpf = ?,
+                    dataContratoModo = ?, dataContratoPersonalizada = ?
               WHERE id = ?`,
             [locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
@@ -358,7 +387,8 @@ const updateTerceiroContrato = async (req, res) => {
              clausulas.prazoPagamentoDias, clausulas.percentualJurosMora, clausulas.percentualMultaMora,
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
              clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
-             rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf, id]
+             rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf,
+             dataCt.dataContratoModo, dataCt.dataContratoPersonalizada, id]
         );
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);

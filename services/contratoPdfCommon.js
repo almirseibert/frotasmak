@@ -183,7 +183,7 @@ const qualificacaoPartes = ({ contrato = {}, locador = {} } = {}) => {
 
 module.exports = {
     ensureLogo,
-    fmtBRL, fmtNum, fmtHoras, fmtDate, fmtDateExtenso,
+    fmtBRL, fmtNum, fmtHoras, fmtDate, fmtDateExtenso, parseDataLocal,
     NUM_EXTENSO, mesesExtenso,
     maskCNPJ, maskCPF,
     normalizeSufixoSocietario, sanitizeText,
