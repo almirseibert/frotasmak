@@ -1,5 +1,5 @@
 const db = require('../database');
-const { chaveNoNivelDoMapa } = require('../utils/planoItem');
+const { precificacaoDaObra, custoCombustivelPorObra } = require('../utils/obraFinanceiro');
 const { _computeAnalyticsCore, _fmtDate } = require('./obraSupervisorController');
 
 const HORAS_PADRAO_DIA = 8;
@@ -36,20 +36,21 @@ const computeProjecoesLeves = async (obraIds) => {
     const placeholders = obraIds.map(() => '?').join(',');
 
     const obras = await safeQuery(
-        `SELECT id, nome, horasContratadasPorTipo, valoresPorTipo
+        `SELECT id, nome, horasContratadasPorTipo, valoresPorTipo,
+                horasContratadasPorSubTipo, valoresPorSubTipo
            FROM obras WHERE id IN (${placeholders})`,
         obraIds
     );
 
-    // Traz o item declarado na alocação e o grupo do veículo lado a lado. Qual dos
-    // dois vale é decidido por `chaveNoNivelDoMapa` na hora de consultar
-    // `valoresPorTipo`, que é nível GRUPO: `planoItemKey` costuma ser SUBGRUPO, e
-    // consultar o mapa de preços com chave de subgrupo devolve 0 em silêncio.
-    // Ver docs/item-de-contrato-e-substituicao-plano.md.
+    // Item declarado na alocação, grupo e subgrupo do veículo lado a lado: o
+    // preço sai de `precificacaoDaObra`, que precifica por subgrupo (o nível do
+    // contrato) e só cai no mapa legado por grupo quando não acha.
+    // Ver utils/obraFinanceiro.js e docs/item-de-contrato-e-substituicao-plano.md.
     const logs = await safeQuery(`
         SELECT l.obraId,
                NULLIF(l.planoItemKey, '') AS itemKey,
                v.tipo                     AS grupoVeiculo,
+               NULLIF(v.sub_tipo, '')     AS subgrupoVeiculo,
                SUM(l.totalHours) AS horas,
                MIN(DATE_FORMAT(l.date, '%Y-%m-%d')) AS primeira_data,
                MAX(DATE_FORMAT(l.date, '%Y-%m-%d')) AS ultima_data,
@@ -57,19 +58,16 @@ const computeProjecoesLeves = async (obraIds) => {
           FROM daily_work_logs l
           LEFT JOIN vehicles v ON v.id = l.vehicleId
          WHERE l.obraId IN (${placeholders})
-         GROUP BY l.obraId, itemKey, grupoVeiculo
+         GROUP BY l.obraId, itemKey, grupoVeiculo, subgrupoVeiculo
     `, obraIds);
 
-    const refuels = await safeQuery(`
-        SELECT obraId,
-               COALESCE(SUM(litrosLiberados * pricePerLiter), 0) AS custo
-          FROM refuelings
-         WHERE obraId IN (${placeholders})
-           AND litrosLiberados IS NOT NULL
-           AND pricePerLiter IS NOT NULL
-         GROUP BY obraId
-    `, obraIds);
-    const custoCombustivelPorObra = new Map(refuels.map(r => [String(r.obraId), parseFloat(r.custo) || 0]));
+    // Custo real: abastecimentos concluídos + comboio/manuais. Ver obraFinanceiro.
+    let custoCombustivel = new Map();
+    try {
+        custoCombustivel = await custoCombustivelPorObra(db, obraIds);
+    } catch (e) {
+        console.warn('[dashboard] custo de combustível falhou, devolvendo vazio:', e.code || e.message);
+    }
 
     const logsPorObra = new Map();
     for (const r of logs) {
@@ -90,23 +88,17 @@ const computeProjecoesLeves = async (obraIds) => {
     const out = new Map();
     for (const obra of obras) {
         const key = String(obra.id);
-        let horasContratadasPorTipo = {};
-        let valoresPorTipo = {};
-        try { horasContratadasPorTipo = obra.horasContratadasPorTipo ? (typeof obra.horasContratadasPorTipo === 'string' ? JSON.parse(obra.horasContratadasPorTipo) : obra.horasContratadasPorTipo) : {}; } catch {}
-        try { valoresPorTipo = obra.valoresPorTipo ? (typeof obra.valoresPorTipo === 'string' ? JSON.parse(obra.valoresPorTipo) : obra.valoresPorTipo) : {}; } catch {}
-
-        const horasContratadas = Object.values(horasContratadasPorTipo).reduce((a, b) => a + (parseFloat(b) || 0), 0);
+        const { precoDaHora, horasContratadas, faturamentoContratado } = precificacaoDaObra(obra);
         const entry = logsPorObra.get(key) || { totalHoras: 0, diasLancamento: 0, porTipo: [] };
 
         let faturamento = 0;
-        // Horas que caem fora do contrato: a chave resolvida nao existe em
-        // valoresPorTipo (preco 0). Quase sempre e cadastro -- veiculo sem
-        // sub_tipo, ou item de contrato nao mapeado -- e some em silencio do
-        // faturamento. Ver docs/item-de-contrato-e-substituicao-plano.md.
+        // Horas que caem fora do contrato: nem o subgrupo nem o grupo têm preço.
+        // Quase sempre é cadastro -- veículo sem sub_tipo, ou item de contrato
+        // não mapeado -- e some em silêncio do faturamento.
+        // Ver docs/item-de-contrato-e-substituicao-plano.md.
         let horasSemPreco = 0;
         for (const t of entry.porTipo) {
-            const chave = chaveNoNivelDoMapa(t.itemKey, t.grupoVeiculo, valoresPorTipo) || '';
-            const preco = parseFloat(valoresPorTipo[chave] || valoresPorTipo[chave.trim()] || 0);
+            const preco = precoDaHora(t);
             const horas = parseFloat(t.horas) || 0;
             faturamento += horas * preco;
             if (preco <= 0 && horas > 0) {
@@ -119,13 +111,11 @@ const computeProjecoesLeves = async (obraIds) => {
         const horasRestantes = Math.max(0, horasContratadas - entry.totalHoras);
         const diasParaFinalizar = ritmoHorasPorDia > 0 ? Math.ceil(horasRestantes / ritmoHorasPorDia) : null;
 
-        const custoCombust = custoCombustivelPorObra.get(key) || 0;
+        const custoCombust = custoCombustivel.get(key)?.total || 0;
         const percentCombust = faturamento > 0 ? (custoCombust / faturamento) * 100 : 0;
         // Mesma regra de getProjecaoObra (analiseGerencialController): custo
         // projetado a 100% sobre o faturamento do contrato inteiro (horas
         // contratadas × valor hora), mesma base do percentCombust.
-        const faturamentoContratado = Object.entries(horasContratadasPorTipo)
-            .reduce((acc, [k, h]) => acc + (parseFloat(h) || 0) * (parseFloat(valoresPorTipo[k]) || 0), 0);
         const custoCombustProjetado = percentConcluido > 1
             ? custoCombust / (percentConcluido / 100)
             : null;
@@ -380,7 +370,7 @@ exports.getHomeSummary = async (req, res) => {
 //    para. Problema fantasma numa janela que já fecha com buffer de 7 dias.
 //    Esse controle vive na página de Desempenho.
 //  - Qualquer estimativa de "receita não faturada": a nota fiscal NÃO é
-//    emitida por este sistema. Item sem preço em valoresPorTipo é lacuna de
+//    emitida por este sistema. Item sem preço no contrato é lacuna de
 //    cadastro, não dinheiro perdido — concluir o contrário é inventar número.
 // ---------------------------------------------------------------------------
 

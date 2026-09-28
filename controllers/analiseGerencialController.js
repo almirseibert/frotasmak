@@ -1,5 +1,6 @@
 const db = require('../database');
 const { chaveNoNivelDoMapa, itensDoPlano } = require('../utils/planoItem');
+const { precificacaoDaObra, custoCombustivelPorObra } = require('../utils/obraFinanceiro');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
 const { todayBRT } = require('../utils/dateBRT');
 
@@ -454,18 +455,13 @@ const getProjecaoObra = async (req, res) => {
         const [[obra]] = await db.query('SELECT * FROM obras WHERE id = ?', [obraId]);
         if (!obra) return res.status(404).json({ error: 'Obra não encontrada.' });
 
-        const horasContratadasPorTipo = parseJson(obra.horasContratadasPorTipo, {});
-        const valoresPorTipo         = parseJson(obra.valoresPorTipo, {});
-        const horasContratadas = Object.values(horasContratadasPorTipo)
-            .reduce((a, b) => a + (parseFloat(b) || 0), 0);
+        // Preço por subgrupo (nível do contrato), com o mapa legado por grupo de
+        // fallback — ver utils/obraFinanceiro.js. É a mesma regra do painel.
+        const { precoDaHora, horasContratadas, faturamentoContratado } = precificacaoDaObra(obra);
 
-        // Logs diários: horas por (data, item do plano, grupo do veículo).
-        // O item declarado na alocação vem SEPARADO do grupo do veículo porque
-        // `valoresPorTipo` é um mapa de nível GRUPO e `planoItemKey` costuma ser
-        // SUBGRUPO: consultar o mapa de preços com chave de subgrupo devolve 0 em
-        // silêncio, e a obra apareceria faturando nada. `chaveNoNivelDoMapa` escolhe
-        // a chave certa — preserva a substituição quando o item existe no mapa, cai
-        // no grupo da máquina quando não existe.
+        // Logs diários: horas por (data, item do plano, grupo e subgrupo do
+        // veículo). O item declarado na alocação vem SEPARADO da máquina porque é
+        // ele que preserva a substituição (uma 11T no item 23T vale o 23T).
         // Ver docs/item-de-contrato-e-substituicao-plano.md.
         const [logRows] = await db.query(`
             SELECT DATE_FORMAT(l.date, '%Y-%m-%d')  AS data_log,
@@ -491,7 +487,7 @@ const getProjecaoObra = async (req, res) => {
             const d = r.data_log;
             if (!porData[d]) porData[d] = [];
             porData[d].push({
-                tipo: chaveNoNivelDoMapa(r.itemKey, r.grupoVeiculo, valoresPorTipo),
+                preco: precoDaHora(r),
                 horas: parseFloat(r.horas) || 0,
             });
         });
@@ -506,9 +502,8 @@ const getProjecaoObra = async (req, res) => {
         todasDatas.forEach(d => {
             porData[d].forEach(e => {
                 totalHoras += e.horas;
-                const preco = parseFloat(valoresPorTipo[e.tipo] || valoresPorTipo[e.tipo?.trim()] || 0);
-                if (preco > 0) temValores = true;
-                totalFaturamentoRS += e.horas * preco;
+                if (e.preco > 0) temValores = true;
+                totalFaturamentoRS += e.horas * e.preco;
             });
         });
 
@@ -639,8 +634,7 @@ const getProjecaoObra = async (req, res) => {
                 datasNaQ.forEach(d => {
                     porData[d].forEach(e => {
                         horasQ += e.horas;
-                        const preco = parseFloat(valoresPorTipo[e.tipo] || 0);
-                        faturQ += e.horas * preco;
+                        faturQ += e.horas * e.preco;
                     });
                 });
 
@@ -672,22 +666,14 @@ const getProjecaoObra = async (req, res) => {
         const diasParaFinalizar = ritmoHorasPorDia > 0 ? Math.ceil(horasRestantes / ritmoHorasPorDia) : null;
         const percentConcluido  = horasContratadas > 0 ? (totalHoras / horasContratadas) * 100 : 0;
 
-        // Custo de combustível (diesel) da obra.
-        // Fonte única de verdade: a tabela `expenses` (categoria 'Combustível'),
-        // que consolida TODOS os fluxos de combustível — ordens de abastecimento,
-        // comboio (saída/drenagem/descarte), lançamentos automáticos e manuais.
-        // É exatamente o mesmo número exibido no painel de Gestão de Obras.
-        //
-        // Antes, este cálculo recomputava o custo apenas a partir de `refuelings`
-        // (litros × preço, com resgate do preço do comboio), o que subestimava o
-        // total: ignorava abastecimentos lançados por outros fluxos e zerava o
-        // custo das saídas de comboio cujo preço de entrada não fosse resolvido.
-        const [[custoRow]] = await db.query(`
-            SELECT COALESCE(SUM(amount), 0) AS total
-              FROM expenses
-             WHERE obraId = ? AND category = 'Combustível'
-        `, [obraId]);
-        const totalCustoCombust = parseFloat(custoRow.total) || 0;
+        // Custo de combustível da obra: abastecimentos concluídos (litros
+        // abastecidos × preço) + despesas de combustível que não derivam de
+        // abastecimento (saída de comboio, drenagem, manuais). Somar `expenses`
+        // direto contava em dobro o mês de posto renomeado — ver
+        // utils/obraFinanceiro.js. Mesmo número do painel Obras em foco.
+        const custoComb = (await custoCombustivelPorObra(db, [obraId])).get(String(obraId))
+            || { total: 0, abastecimentos: 0, outros: 0 };
+        const totalCustoCombust = custoComb.total;
 
         // Litros consumidos (informativo) — somados dos abastecimentos vinculados
         // à obra. Serve só para exibição; o custo NÃO deriva mais daqui.
@@ -698,8 +684,8 @@ const getProjecaoObra = async (req, res) => {
         `, [obraId]);
         const totalLitros = parseFloat(litrosRow.total) || 0;
 
-        // Lista dos abastecimentos da obra. O custo exibido continua vindo de
-        // `expenses` (fonte única); esta lista é a memória do consumo físico.
+        // Lista dos abastecimentos da obra — a memória do consumo físico. Inclui
+        // ordens abertas, que ainda não entram no custo.
         const [abastecimentosRows] = await db.query(`
             SELECT r.id,
                    DATE_FORMAT(r.data, '%Y-%m-%d %H:%i') AS data,
@@ -761,8 +747,7 @@ const getProjecaoObra = async (req, res) => {
         // NÃO usar valorTotalContrato: ele inclui km de prancha, que não tem hora,
         // e mudaria a base (a projeção sairia artificialmente abaixo do atual).
         // Sem preços ou com progresso < 1%, fica a proporção atual.
-        const faturamentoContratado = Object.entries(horasContratadasPorTipo)
-            .reduce((acc, [k, h]) => acc + (parseFloat(h) || 0) * (parseFloat(valoresPorTipo[k]) || 0), 0);
+        // `faturamentoContratado` vem de precificacaoDaObra (mesmo nível do preço).
         const custoCombustProjetado = percentConcluido > 1
             ? totalCustoCombust / (percentConcluido / 100)
             : null;
@@ -792,6 +777,9 @@ const getProjecaoObra = async (req, res) => {
             combustivel: {
                 totalLitros:           Math.round(totalLitros        * 10)  / 10,
                 totalCustoRS:          Math.round(totalCustoCombust  * 100) / 100,
+                // Composição do custo: abastecimentos concluídos + comboio/manuais.
+                custoAbastecimentosRS: Math.round(custoComb.abastecimentos * 100) / 100,
+                custoOutrosRS:         Math.round(custoComb.outros * 100) / 100,
                 percentualAtual:       Math.round(percentCombust     * 10)  / 10,
                 projecaoFinalPercent:  Math.round(projecaoFinalPercent * 10) / 10,
                 custoProjetadoRS:      custoCombustProjetado != null ? Math.round(custoCombustProjetado * 100) / 100 : null,                alertaCritico:         projecaoFinalPercent > 20,
