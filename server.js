@@ -10,6 +10,7 @@ const http = require('http');
 // Helpers das migrações inline: encapsulam o fallback de ADD COLUMN IF NOT EXISTS,
 // que é sintaxe de MariaDB e o MySQL 8 recusa com ER_PARSE_ERROR.
 const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
+const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel');
 
 // ====================================================================
 // MIGRAÇÃO AUTOMÁTICA DE SCHEMA (adiciona colunas se não existirem)
@@ -175,6 +176,10 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
         { table: 'employees',              column: 'cidade_ibge',                      def: 'VARCHAR(7) DEFAULT NULL' },
         { table: 'employees',              column: 'equipamentos_aptos',               def: 'JSON DEFAULT NULL' },
         { table: 'employees',              column: 'is_lider_obra',                    def: 'TINYINT(1) NOT NULL DEFAULT 0' },
+        // Chave da despesa mensal de combustível (obra|posto|combustível|mês). A
+        // linha era achada pela descrição, que leva o nome do posto: renomear o
+        // posto duplicava o mês. Ver utils/despesaMensalCombustivel.js.
+        { table: 'expenses',               column: 'chaveMensal',                      def: 'VARCHAR(191) DEFAULT NULL' },
         // NOTA: admin_holidays.regiao é migrada em routes/adminRoutes.js (initAdminTables),
         // logo após o CREATE TABLE — aqui correria antes da tabela existir.
     ];
@@ -197,6 +202,16 @@ const { addColumnIfMissing, addIndexIfMissing } = require('./utils/migrations');
 
     // Índice para casar ordem <-> solicitação sem varrer a tabela
     await addIndexIfMissing(db, 'refuelings', 'idx_from_solicitacao', '`createdFromSolicitacaoId`');
+
+    // Despesa mensal de combustível: índice da chave + carimbo das linhas que já
+    // existiam (enquanto o nome na descrição ainda é o atual do posto).
+    await addIndexIfMissing(db, 'expenses', 'idx_chave_mensal', '`chaveMensal`');
+    try {
+        const n = await carimbarChavesExistentes(db);
+        if (n > 0) console.log(`✅ [migration] chaveMensal carimbada em ${n} despesa(s) de combustível.`);
+    } catch (e) {
+        console.warn('⚠️ [migration] chaveMensal:', e.message);
+    }
 
     // Índice para o filtro de ordens reservadas (GET /refuelings e cron de liberação)
     try {

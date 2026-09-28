@@ -15,6 +15,7 @@
 const crypto = require('crypto');
 const { COMBOIO_TANK_KEYS, toComboioTankKey, priceKeysFor } = require('../utils/fuelTypes');
 const { getActivePeriodId } = require('../utils/comboioPeriodo');
+const { sincronizarDespesaMensal } = require('../utils/despesaMensalCombustivel');
 
 // Medidores analógicos e conversões geram sobras de fração de litro. Recusar
 // por 0,2 L seria falso positivo.
@@ -106,75 +107,11 @@ const getCustoUnitarioComboio = async (conn, comboioVehicleId, tankKey, atDate =
 };
 
 // Despesa mensal do posto referente ao diesel comprado para o comboio.
-// obraId nulo = "Estoque Comboio" (o custo da obra entra na saída). A descrição
-// é a mesma de sempre para que despesas existentes sejam atualizadas, e não
-// duplicadas.
-const updateEstoqueExpense = async (conn, obraId, partnerId, fuelType, dateInput) => {
-    if (!partnerId || !fuelType || !dateInput) return;
-
-    if (obraId) {
-        const [obraCheck] = await conn.execute('SELECT id FROM obras WHERE id = ?', [obraId]);
-        if (obraCheck.length === 0) return;
-    }
-
-    const dateObj = new Date(dateInput);
-    const startDate = new Date(dateObj.getFullYear(), dateObj.getMonth(), 1);
-    const endDate = new Date(dateObj.getFullYear(), dateObj.getMonth() + 1, 0, 23, 59, 59);
-
-    const [partners] = await conn.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
-    const partnerName = partners[0]?.razaoSocial || 'Posto Desconhecido';
-
-    let querySum = `
-        SELECT SUM(
-            (COALESCE(litrosAbastecidos, 0) * COALESCE(pricePerLiter, 0)) +
-            (COALESCE(litrosAbastecidosArla, 0) * COALESCE(pricePerLiterArla, 0)) +
-            COALESCE(outrosValor, 0)
-        ) AS total
-          FROM refuelings
-         WHERE partnerId = ?
-           AND fuelType = ?
-           AND status IN ('Concluída', 'Concluida')
-           AND data BETWEEN ? AND ?`;
-    const paramsSum = [partnerId, fuelType, startDate, endDate];
-    if (obraId) {
-        querySum += ' AND obraId = ?';
-        paramsSum.push(obraId);
-    } else {
-        querySum += ' AND obraId IS NULL';
-    }
-    const [rows] = await conn.execute(querySum, paramsSum);
-    const totalAmount = parseFloat(rows[0]?.total) || 0;
-
-    const monthName = startDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
-    const description = `Combustível: ${fuelType} - ${partnerName} (${monthName})`;
-
-    let queryExisting = 'SELECT id FROM expenses WHERE description = ?';
-    const paramsExisting = [description];
-    if (obraId) {
-        queryExisting += ' AND obraId = ?';
-        paramsExisting.push(obraId);
-    } else {
-        queryExisting += ' AND obraId IS NULL';
-    }
-    const [existing] = await conn.execute(queryExisting, paramsExisting);
-
-    if (totalAmount > 0) {
-        if (existing.length > 0) {
-            await conn.execute(
-                'UPDATE expenses SET amount = ?, weekStartDate = ? WHERE id = ?',
-                [totalAmount, startDate, existing[0].id]
-            );
-        } else {
-            await conn.execute(
-                `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, weekStartDate, partnerName, fuelType)
-                 VALUES (?, ?, ?, ?, 'Combustível', NOW(), ?, ?, ?)`,
-                [crypto.randomUUID(), obraId || null, description, totalAmount, startDate, partnerName, fuelType]
-            );
-        }
-    } else if (existing.length > 0) {
-        await conn.execute('DELETE FROM expenses WHERE id = ?', [existing[0].id]);
-    }
-};
+// obraId nulo = "Estoque Comboio" (o custo da obra entra na saída). Mesma rotina
+// da ordem comum — localizada por chave, não pelo nome do posto; ver
+// utils/despesaMensalCombustivel.js.
+const updateEstoqueExpense = (conn, obraId, partnerId, fuelType, dateInput) =>
+    sincronizarDespesaMensal(conn, { obraId, partnerId, fuelType, dateInput });
 
 // ─── ENTRADA = ORDEM AO POSTO ──────────────────────────────────────────────
 // Espelha a ordem de entrada (refuelings.comboioEntrada = 1) em

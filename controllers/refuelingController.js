@@ -13,6 +13,7 @@ const {
     checkOperadorPlaceholder,
 } = require('../utils/regrasAbastecimento');
 const { ymdBRT } = require('../utils/dateBRT');
+const { sincronizarDespesaMensal, mesBRT } = require('../utils/despesaMensalCombustivel');
 const { notifyComboioEntrada } = require('../services/orderNotifier');
 const comboioEstoque = require('../services/comboioEstoqueService');
 const { toComboioTankKey, tankKeyToOrderKey } = require('../utils/fuelTypes');
@@ -177,65 +178,11 @@ const parseRefuelingRows = (rows) => {
 };
 
 // --- ATUALIZAÇÃO DE DESPESAS MENSAIS ---
+// Localizada por chave (obra + ID do posto + combustível + mês BRT), não pelo
+// nome do posto — ver utils/despesaMensalCombustivel.js.
 const updateMonthlyExpense = async (connection, obraId, partnerId, fuelType, dateInput) => {
-    if (!obraId || !partnerId || !fuelType || !dateInput) return;
-
-    const [obraCheck] = await connection.execute('SELECT id FROM obras WHERE id = ?', [obraId]);
-    if (obraCheck.length === 0) return; 
-
-    const dateObj = new Date(dateInput);
-    const month = dateObj.getMonth();
-    const year = dateObj.getFullYear();
-    const startDate = new Date(year, month, 1);
-    const endDate = new Date(year, month + 1, 0, 23, 59, 59);
-
-    const [partners] = await connection.execute('SELECT razaoSocial FROM partners WHERE id = ?', [partnerId]);
-    const partnerName = partners[0]?.razaoSocial || 'Posto Desconhecido';
-
-    const querySum = `
-        SELECT SUM(
-            (COALESCE(litrosAbastecidos, 0) * COALESCE(pricePerLiter, 0)) +
-            (COALESCE(litrosAbastecidosArla, 0) * COALESCE(pricePerLiterArla, 0)) +
-            COALESCE(outrosValor, 0)
-        ) as total
-        FROM refuelings
-        WHERE obraId = ?
-          AND partnerId = ?
-          AND fuelType = ?
-          AND data BETWEEN ? AND ?
-          AND status = 'Concluída' -- Importante: Somar apenas concluídas para não duplicar valores pendentes
-    `;
-
-    const [rows] = await connection.execute(querySum, [obraId, partnerId, fuelType, startDate, endDate]);
-    const totalAmount = rows[0]?.total || 0;
-
-    const monthName = startDate.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
-    const description = `Combustível: ${fuelType} - ${partnerName} (${monthName})`;
-
-    const [existingExpense] = await connection.execute(
-        'SELECT id FROM expenses WHERE obraId = ? AND description = ?',
-        [obraId, description]
-    );
-
-    if (totalAmount > 0) {
-        if (existingExpense.length > 0) {
-            await connection.execute(
-                'UPDATE expenses SET amount = ?, weekStartDate = ? WHERE id = ?',
-                [totalAmount, startDate, existingExpense[0].id]
-            );
-        } else {
-            const newId = crypto.randomUUID();
-            await connection.execute(
-                `INSERT INTO expenses (id, obraId, description, amount, category, createdAt, weekStartDate, partnerName, fuelType)
-                 VALUES (?, ?, ?, ?, 'Combustível', NOW(), ?, ?, ?)`,
-                [newId, obraId, description, totalAmount, startDate, partnerName, fuelType]
-            );
-        }
-    } else {
-        if (existingExpense.length > 0) {
-            await connection.execute('DELETE FROM expenses WHERE id = ?', [existingExpense[0].id]);
-        }
-    }
+    if (!obraId) return;
+    await sincronizarDespesaMensal(connection, { obraId, partnerId, fuelType, dateInput });
 };
 
 // --- CONTROLLER DE UPLOAD ---
@@ -1304,10 +1251,18 @@ const updateRefuelingOrder = async (req, res) => {
             await updateMonthlyExpense(connection, currentObra, currentPartner, currentFuel, currentDate);
         }
 
+        // A combinação antiga também precisa ser recalculada quando a ordem sai
+        // dela — inclusive quando só a DATA muda de mês: antes o mês antigo
+        // ficava com o valor velho para sempre.
+        const mesAntigo = mesBRT(oldRefueling.data);
+        const mesNovo = mesBRT(currentDate);
+        const mudouDeMes = !!(mesAntigo && mesNovo)
+            && (mesAntigo.ano !== mesNovo.ano || mesAntigo.mes !== mesNovo.mes);
         if (
             (updateData.obraId && updateData.obraId !== oldRefueling.obraId) ||
             (updateData.partnerId && updateData.partnerId !== oldRefueling.partnerId) ||
-            (updateData.fuelType && updateData.fuelType !== oldRefueling.fuelType)
+            (updateData.fuelType && updateData.fuelType !== oldRefueling.fuelType) ||
+            mudouDeMes
         ) {
             if (oldRefueling.obraId && oldRefueling.partnerId && oldRefueling.fuelType) {
                 await updateMonthlyExpense(connection, oldRefueling.obraId, oldRefueling.partnerId, oldRefueling.fuelType, oldRefueling.data);
