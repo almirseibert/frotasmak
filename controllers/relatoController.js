@@ -1039,6 +1039,11 @@ const fecharRelato = async (req, res) => {
         });
     } catch (error) {
         await connection.rollback();
+        // Saída de obra recusada (data antes da entrada ou invadindo outro
+        // período do veículo): é correção de dado, não falha do servidor.
+        if (error.statusCode === 400 || error.statusCode === 409) {
+            return res.status(error.statusCode).json({ error: error.message, code: error.code, conflicts: error.conflicts });
+        }
         console.error('❌ Erro POST /relatos/:id/fechar:', error);
         res.status(500).json({ error: 'Erro ao fechar o relato.', details: error.message });
     } finally {

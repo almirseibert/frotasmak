@@ -21,6 +21,7 @@
 
 const { closeActivePeriod: closeComboioPeriod } = require('../utils/comboioPeriodo');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
+const { diaCivil } = require('../utils/periodosObra');
 
 const parseJsonSafe = (field, key, defaultValue = null) => {
     if (field === null || typeof field === 'undefined') return defaultValue;
@@ -75,6 +76,22 @@ const deallocateFromObraTx = async (connection, vehicleId, {
     if (!targetObraId) {
         const [vRows] = await connection.execute('SELECT obraAtualId FROM vehicles WHERE id = ?', [id]);
         if (vRows.length > 0) targetObraId = vRows[0].obraAtualId;
+    }
+
+    // Saída antes da entrada é recusada. Sobreposição com outra obra NÃO é
+    // checada aqui de propósito: fechar um período aberto só encurta
+    // [entrada, ∞) para [entrada, saída] — nunca cria colisão nova. Bloquear
+    // por colisão antiga travaria a desalocação de veículos com histórico
+    // legado sobreposto (ver utils/periodosObra.js).
+    const estadiaAberta = await getActiveObraAllocation(connection, id);
+    if (estadiaAberta) {
+        const diaEntrada = diaCivil(estadiaAberta.dataEntrada);
+        const diaSaida = diaCivil(exitTimestamp);
+        if (diaEntrada && diaSaida && diaSaida < diaEntrada) {
+            const err = new Error('A data de saída não pode ser anterior à data de entrada na obra.');
+            err.statusCode = 400;
+            throw err;
+        }
     }
 
     const [historyRows] = await connection.execute(

@@ -6,6 +6,7 @@ const { ensureComboioPartner, deactivateComboioPartner } = require('../utils/ens
 const { openPeriod: openComboioPeriod, closeActivePeriod: closeComboioPeriod } = require('../utils/comboioPeriodo');
 // Item do plano de trabalho desempenhado pela maquina (docs/item-de-contrato-e-substituicao-plano.md)
 const { validarItemKey, consomeHorasDoPlano } = require('../utils/planoItem');
+const { buscarConflitosObra, erroSobreposicao, respostaSobreposicao } = require('../utils/periodosObra');
 // Transições de estado do veículo: a lógica vive no service para poder rodar
 // dentro da transação de outro fluxo (fechamento de relato de ocorrência).
 const {
@@ -367,6 +368,16 @@ const allocateToObra = async (req, res) => {
         }
         const planoItemKeyValidado = validacaoItem.itemKey;
 
+        // A nova estadia começa aberta: colide com qualquer período que ainda
+        // esteja em curso na data de entrada (ex.: saída da obra anterior
+        // lançada depois da entrada nesta).
+        const conflitos = await buscarConflitosObra(connection, id, { inicio: dataEntrada || new Date(), fim: null });
+        if (conflitos.length > 0) {
+            throw erroSobreposicao(conflitos, {
+                placa: vehicle.placa || vehicle.registroInterno,
+                acao: 'corrija a data de saída do período anterior antes de alocar',
+            });
+        }
 
         const newHistoryEntry = {
             vehicleId: id,
@@ -482,6 +493,9 @@ const allocateToObra = async (req, res) => {
         // Item de plano inválido é erro do cliente (400), não falha do servidor —
         // o frontend precisa distinguir para reabrir a escolha em vez de dizer
         // "falha ao alocar".
+        if (error.code === 'PERIODO_SOBREPOSTO') {
+            return res.status(409).json(respostaSobreposicao(error));
+        }
         if (error.statusCode === 400) {
             return res.status(400).json({ error: error.message });
         }
@@ -507,6 +521,12 @@ const deallocateFromObra = async (req, res) => {
         res.status(200).json({ message: 'Veículo desalocado com sucesso.' });
     } catch (error) {
         await connection.rollback();
+        if (error.code === 'PERIODO_SOBREPOSTO') {
+            return res.status(409).json(respostaSobreposicao(error));
+        }
+        if (error.statusCode === 400) {
+            return res.status(400).json({ error: error.message });
+        }
         console.error("Erro CRÍTICO ao desalocar:", error);
         res.status(500).json({ error: 'Falha ao desalocar veículo.', details: error.message });
     } finally {

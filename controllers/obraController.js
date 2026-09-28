@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const { updateVehicleReading } = require('../utils/updateVehicleReading');
 const { dispatchAsync } = require('../services/notificationDispatcher');
 const { itensDoPlano, carregarTaxonomia, resolverItemDaAlocacao, verificarItensRemovidos, chaveNoNivelDoMapa, consomeHorasDoPlano } = require('../utils/planoItem');
+const { diaCivil, buscarConflitosObra, erroSobreposicao, respostaSobreposicao } = require('../utils/periodosObra');
 
 // ===================================================================================
 // FUNÇÃO AUXILIAR DE PARSE SEGURO
@@ -412,7 +413,7 @@ const finishObra = async (req, res) => {
 // --- UPDATE HISTORICO (SINCRONIZADO E ROBUSTO) ---
 const updateObraHistoryEntry = async (req, res) => {
     const { historyId } = req.params;
-    const { dataEntrada, dataSaida, employeeId, leituraEntrada, leituraSaida } = req.body;
+    const { leituraEntrada, leituraSaida } = req.body;
 
     let connection;
     try {
@@ -431,6 +432,46 @@ const updateObraHistoryEntry = async (req, res) => {
         const oldEmployeeId = currentEntry.employeeId;
         const obraId = currentEntry.obraId;
 
+        // Atualização parcial: campo ausente no body mantém o valor gravado.
+        // Os modais de edição mandam tudo; o atalho "corrigir saída" da tela de
+        // alocação manda só dataSaida e não pode zerar operador nem leituras.
+        const veio = (campo) => req.body[campo] !== undefined;
+        const dataEntrada = veio('dataEntrada') ? req.body.dataEntrada : currentEntry.dataEntrada;
+        const dataSaida = veio('dataSaida') ? req.body.dataSaida : currentEntry.dataSaida;
+        const employeeId = veio('employeeId') ? req.body.employeeId : oldEmployeeId;
+
+        // 1b. Período coerente e sem colidir com outra obra do mesmo veículo
+        const diaEntrada = diaCivil(dataEntrada);
+        const diaSaida = diaCivil(dataSaida);
+        if (!diaEntrada) {
+            await connection.rollback();
+            return res.status(400).json({ error: 'Informe a data de entrada na obra.' });
+        }
+        if (diaSaida && diaSaida < diaEntrada) {
+            await connection.rollback();
+            return res.status(400).json({ error: 'A data de saída não pode ser anterior à data de entrada.' });
+        }
+        // Período que só encolhe (ou não muda) não é checado: não cria nem
+        // aumenta colisão, e barrar por colisão legada impediria até trocar o
+        // operador — ou a própria correção, que é encurtar o período. Se o
+        // período cresce ou se desloca, qualquer colisão bloqueia.
+        const diaEntradaAntes = diaCivil(currentEntry.dataEntrada);
+        const diaSaidaAntes = diaCivil(currentEntry.dataSaida);
+        const soEncolheu = diaEntradaAntes && diaEntrada >= diaEntradaAntes
+            && (!diaSaidaAntes || (diaSaida && diaSaida <= diaSaidaAntes));
+        const conflitos = soEncolheu ? [] : await buscarConflitosObra(
+            connection, veiculoId,
+            { inicio: dataEntrada, fim: dataSaida || null },
+            { ignorarIds: [historyId] }
+        );
+        if (conflitos.length > 0) {
+            await connection.rollback();
+            return res.status(409).json(respostaSobreposicao(erroSobreposicao(conflitos, {
+                placa: currentEntry.placa || currentEntry.registroInterno,
+                acao: 'ajuste as datas do outro período antes (ou escolha datas que não se cruzem)',
+            })));
+        }
+
         // 2. Busca nome do novo funcionário (se mudou)
         let employeeName = currentEntry.employeeName;
         if (employeeId && String(employeeId) !== String(oldEmployeeId)) {
@@ -445,9 +486,12 @@ const updateObraHistoryEntry = async (req, res) => {
         let horimetroEntrada = currentEntry.horimetroEntrada;
         let odometroSaida = currentEntry.odometroSaida;
         let horimetroSaida = currentEntry.horimetroSaida;
+        const veioLeitura = veio('leituraEntrada') || veio('leituraSaida');
 
         // Se o registro original tinha odômetro ou se a nova leitura veio e não há horímetro
-        if (currentEntry.odometroEntrada !== null || (leituraEntrada && !currentEntry.horimetroEntrada)) {
+        if (!veioLeitura) {
+            // Sem leitura no body: mantém as gravadas.
+        } else if (currentEntry.odometroEntrada !== null || (leituraEntrada && !currentEntry.horimetroEntrada)) {
             odometroEntrada = leituraEntrada ? parseFloat(leituraEntrada) : null;
             odometroSaida = leituraSaida ? parseFloat(leituraSaida) : null;
         } else {
@@ -475,7 +519,7 @@ const updateObraHistoryEntry = async (req, res) => {
         ]);
 
         // 5. Propaga leitura máxima (entrada ou saída) para vehicles
-        {
+        if (veioLeitura) {
             const [[vRow]] = await connection.execute('SELECT tipo FROM vehicles WHERE id = ?', [veiculoId]);
             if (vRow) {
                 const maxOdo = Math.max(odometroEntrada || 0, odometroSaida || 0);
