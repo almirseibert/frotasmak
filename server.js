@@ -1339,7 +1339,7 @@ const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel')
 // ── Termos aditivos de contrato de terceirizado ───────────────────────────────
 // Aditivo NÃO é edição: a linha de terceiro_contratos permanece imutável (é o que
 // o PDF assinado diz) e cada aditivo guarda apenas o DELTA. Os valores vigentes
-// (base + soma dos aditivos assinados) são derivados em utils/contratoAditivos.js.
+// (base + soma dos aditivos em minuta ou assinados) são derivados em utils/contratoAditivos.js.
 // Só existe aditivo sobre contrato que já tem documento assinado vigente.
 (async () => {
     try {
@@ -1369,6 +1369,13 @@ const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel')
                 INDEX idx_aditivo_contrato (contratoId)
             )
         `);
+        // Efeito retroativo do aditivo — só quando o usuário informa. Sem ele, o
+        // aditivo vigora a partir da própria assinatura.
+        try {
+            await db.query('ALTER TABLE terceiro_contrato_aditivos ADD COLUMN efeitosDesde DATE DEFAULT NULL AFTER novaVigenciaFim');
+        } catch (e) {
+            if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+        }
         console.log('✅ Migração terceiro_contrato_aditivos concluída.');
     } catch (e) {
         console.warn('⚠️ [migration] terceiro_contrato_aditivos:', e.message);

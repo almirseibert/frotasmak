@@ -140,8 +140,8 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
             }
         } else if (itens.length > 0) {
             paragraph(
-                `A CONTRATADA executará os seguintes volumes de máquina, cujo somatório perfaz o valor ` +
-                `global e fechado de ${fmtBRL(contrato.valorTotal)}:`
+                `A CONTRATADA executará até os seguintes volumes de máquina, cujo somatório perfaz o valor ` +
+                `máximo contratual de ${fmtBRL(contrato.valorTotal)}:`
             );
             itens.forEach((i) => {
                 const h = Number(i.hours) || 0;
@@ -152,19 +152,39 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
             });
         } else {
             paragraph(
-                `A CONTRATADA executará o total de ${fmtHoras(contrato.horasContratadas)} horas de máquina, ` +
-                `ao valor de ${fmtBRL(contrato.valorHora)} por hora, totalizando o valor global e fechado de ` +
+                `A CONTRATADA executará até o total de ${fmtHoras(contrato.horasContratadas)} horas de máquina, ` +
+                `ao valor de ${fmtBRL(contrato.valorHora)} por hora, totalizando o valor máximo contratual de ` +
                 `${fmtBRL(contrato.valorTotal)}.`
+            );
+        }
+        const fechado = contrato.contractType === 'fechado';
+        if (!fechado) {
+            paragraph(
+                `O valor máximo contratual corresponde ao limite do contrato e não representa obrigação ` +
+                `de pagamento integral pela CONTRATANTE.`
             );
         }
         paragraph(
             `O preço para o presente contrato é o constante da proposta aprovada pela CONTRATANTE, ` +
             `entendido este como preço justo e suficiente para a total execução do presente objeto.`
         );
-        paragraph(
-            `As horas efetivamente executadas serão apuradas pelo Relatório de Horas da CONTRATANTE, ` +
-            `servindo de acompanhamento físico da execução, sem alterar o valor global ora ajustado.`
-        );
+        if (fechado) {
+            paragraph(
+                `As horas efetivamente executadas serão apuradas pelo Relatório de Horas da CONTRATANTE, ` +
+                `servindo de acompanhamento físico da execução, sem alterar o valor global ora ajustado.`
+            );
+        } else {
+            paragraph(
+                `As horas efetivamente executadas serão apuradas pelo Relatório de Horas da CONTRATANTE, ` +
+                `observadas as condições de medição, comprovação e apresentação dos relatórios previstas ` +
+                `neste contrato.`
+            );
+            paragraph(
+                `O pagamento será realizado exclusivamente pelas horas efetivamente executadas, medidas e ` +
+                `aceitas pela CONTRATANTE, ao valor unitário contratado para cada equipamento, observado o ` +
+                `limite máximo de horas estabelecido neste contrato.`
+            );
+        }
         const prazoPagamentoDias = contrato.prazoPagamentoDias || 45;
         paragraph(
             `O pagamento pela prestação dos serviços será feito em favor da CONTRATADA mediante ` +
@@ -191,11 +211,13 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
 
         // ── Abatimentos ──────────────────────────────────────────────
         heading('CLÁUSULA 3ª — DOS ABATIMENTOS');
+        // Por hora não há "valor global" a pagar — desconta-se do que foi medido.
+        const baseAbatimento = fechado ? 'valor global' : 'valor devido pelas horas medidas e aceitas';
         paragraph(
-            `Serão descontados do valor global os adiantamentos pagos pela CONTRATANTE. Caso a ` +
+            `Serão descontados do ${baseAbatimento} os adiantamentos pagos pela CONTRATANTE. Caso a ` +
             `CONTRATANTE forneça combustível aos equipamentos da CONTRATADA, o respectivo valor, apurado ` +
-            `pelo preço efetivo de cada abastecimento, será igualmente deduzido do valor global, a título ` +
-            `de adiantamento. O saldo a pagar corresponde ao valor global deduzido de tais abatimentos.`
+            `pelo preço efetivo de cada abastecimento, será igualmente deduzido do ${baseAbatimento}, a título ` +
+            `de adiantamento. O saldo a pagar corresponde ao ${baseAbatimento} deduzido de tais abatimentos.`
         );
 
         // ── Vigência ─────────────────────────────────────────────────
@@ -370,26 +392,34 @@ const generateContratoPdf = async ({ contrato = {}, locador = {}, obra = {} } = 
             `em duas vias de igual teor e forma, na presença de duas testemunhas, dando fiel cumprimento ` +
             `ao estabelecido.`
         );
+        // O bloco de assinaturas vai inteiro numa página só. Se não couber no que
+        // sobrou da página atual, abre outra — nunca recua o cursor para cima do
+        // texto já escrito (era o que sobrepunha data e assinaturas às cláusulas).
+        const colW = (contentWidth - 30) / 2;
+        const contratadaLabel = `CONTRATADA — ${normalizeSufixoSocietario(sanitizeText(locador.razaoSocial || locador.nome)) || ''}`;
+        const contratanteLabel = 'CONTRATANTE — MAK Serviços e Pavimentações Ltda';
+        doc.font('Helvetica-Bold').fontSize(9);
+        const labelH = Math.max(
+            doc.heightOfString(contratadaLabel, { width: colW, align: 'center' }),
+            doc.heightOfString(contratanteLabel, { width: colW, align: 'center' })
+        );
+        const blocoH = 14 + 45 + 4 + labelH + 30 + 12 + 30;
         doc.moveDown(1);
-        const sigY = Math.min(doc.y, doc.page.height - 190);
-        doc.y = sigY;
+        if (doc.y + blocoH > doc.page.height - doc.page.margins.bottom) doc.addPage();
+
         doc.font('Helvetica').fontSize(10)
             .text(`${contrato.foroComarca || 'Santa Maria'}, RS, ${fmtDateExtenso(dataAssinatura)}.`, margin, doc.y, { width: contentWidth });
-        doc.moveDown(3);
 
-        const colW = (contentWidth - 30) / 2;
-        const lineY = doc.y;
+        const lineY = doc.y + 45;
         doc.moveTo(margin, lineY).lineTo(margin + colW, lineY).stroke('#000');
         doc.moveTo(margin + colW + 30, lineY).lineTo(pageWidth - margin, lineY).stroke('#000');
         doc.font('Helvetica-Bold').fontSize(9)
-            .text(`CONTRATADA — ${normalizeSufixoSocietario(sanitizeText(locador.razaoSocial || locador.nome)) || ''}`, margin, lineY + 4, { width: colW, align: 'center' });
-        doc.text('CONTRATANTE — MAK Serviços e Pavimentações Ltda', margin + colW + 30, lineY + 4, { width: colW, align: 'center' });
+            .text(contratadaLabel, margin, lineY + 4, { width: colW, align: 'center' });
+        doc.text(contratanteLabel, margin + colW + 30, lineY + 4, { width: colW, align: 'center' });
 
-        doc.moveDown(4);
-        const witY = doc.y;
+        const witY = lineY + 4 + labelH + 30;
         doc.font('Helvetica').fontSize(9).text('Testemunhas:', margin, witY);
-        doc.moveDown(2);
-        const witLineY = doc.y;
+        const witLineY = witY + 12 + 30;
         doc.moveTo(margin, witLineY).lineTo(margin + colW, witLineY).stroke('#000');
         doc.moveTo(margin + colW + 30, witLineY).lineTo(pageWidth - margin, witLineY).stroke('#000');
 

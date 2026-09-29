@@ -4,7 +4,9 @@
 // Regra central: a linha de `terceiro_contratos` NUNCA muda por causa de um
 // aditivo — ela é o contrato original, que é o que o PDF assinado diz. Os
 // valores VIGENTES (o que o terceiro tem a receber hoje) são derivados = base
-// + soma dos aditivos ASSINADOS. Aditivo em minuta não conta em lugar nenhum.
+// + soma dos aditivos em minuta ou assinados. A assinatura não é pré-requisito
+// para os números: no dia a dia o aditivo vale desde que é lançado. Ela só
+// trava edição/exclusão (aditivoVigente).
 
 const num = (v) => {
     const n = parseFloat(v);
@@ -28,9 +30,11 @@ const parseItens = (v) => {
 
 const TIPOS_ADITIVO = ['acrescimo', 'supressao', 'prazo', 'reajuste', 'escopo'];
 
-// Um aditivo só move os números depois que o documento assinado sobe — mesma
-// regra do contrato-base (status 'assinado' + assinadoUrl preenchida).
+// Aditivo com documento assinado (status 'assinado' + assinadoUrl) — imutável.
 const aditivoVigente = (a) => a && a.status === 'assinado' && !!a.assinadoUrl;
+
+// O que entra nos números do contrato: minuta ou assinado.
+const aditivoConta = (a) => a && (a.status === 'minuta' || a.status === 'assinado');
 
 // Soma os deltas de itens sobre a base, preservando a ordem: primeiro os
 // subgrupos do contrato original, depois os incluídos por aditivo de escopo.
@@ -55,21 +59,21 @@ const consolidarItens = (itensBase, aditivos) => {
 // subgrupo. Os campos da linha base seguem intactos ao lado, para exibir o
 // "original R$ X" e para a geração da minuta do contrato.
 const calcularVigente = (contrato, aditivos = []) => {
-    const assinados = aditivos.filter(aditivoVigente);
+    const validos = aditivos.filter(aditivoConta);
     const itensBase = parseItens(contrato.itensContratados);
-    const itens = consolidarItens(itensBase, assinados);
+    const itens = consolidarItens(itensBase, validos);
 
     const horasBase = num(contrato.horasContratadas);
     const valorBase = num(contrato.valorTotal);
-    const horasDelta = assinados.reduce((a, x) => a + num(x.horasDelta), 0);
-    const valorDelta = assinados.reduce((a, x) => a + num(x.valorDelta), 0);
+    const horasDelta = validos.reduce((a, x) => a + num(x.horasDelta), 0);
+    const valorDelta = validos.reduce((a, x) => a + num(x.valorDelta), 0);
 
     const horasContratadas = horasBase + horasDelta;
     const valorTotal = valorBase + valorDelta;
 
-    // Última data de vigência estipulada por aditivo assinado (prazo/escopo),
+    // Última data de vigência estipulada por aditivo (prazo/escopo),
     // na ordem de sequência; sem aditivo de prazo, mantém a do contrato.
-    const vigenciaFim = assinados
+    const vigenciaFim = validos
         .filter((a) => a.novaVigenciaFim)
         .reduce((acc, a) => a.novaVigenciaFim, contrato.vigenciaFim);
 
@@ -83,7 +87,7 @@ const calcularVigente = (contrato, aditivos = []) => {
         vigenciaFim,
         horasDelta,
         valorDelta,
-        totalAditivos: assinados.length,
+        totalAditivos: validos.length,
         temAditivoPendente: aditivos.some((a) => a.status === 'minuta'),
     };
 };
@@ -119,6 +123,7 @@ module.exports = {
     parseItens,
     TIPOS_ADITIVO,
     aditivoVigente,
+    aditivoConta,
     consolidarItens,
     calcularVigente,
     anexarVigente,

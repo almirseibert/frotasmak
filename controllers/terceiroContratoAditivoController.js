@@ -49,8 +49,8 @@ const normalizeItensDelta = (itens) => {
 
 // Carrega o contrato + seus aditivos e devolve o consolidado VIGENTE, que é a
 // referência de validação (preço atual de cada subgrupo, horas disponíveis para
-// supressão). Aditivos em minuta são ignorados de propósito: um aditivo é
-// validado contra o que está assinado, nunca contra rascunho de outro.
+// supressão). Inclui aditivos em minuta — eles contam nos números. Na edição,
+// o próprio aditivo sai da base (ver updateAditivo).
 const carregarContexto = async (contratoId) => {
     const [cRows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [contratoId]);
     if (cRows.length === 0) return null;
@@ -179,7 +179,7 @@ const getAditivos = async (req, res) => {
 
 const createAditivo = async (req, res) => {
     const { id } = req.params;
-    const { tipo, itensDelta, novaVigenciaFim, justificativa, observacoes, valorDelta, confirmarLimite } = req.body;
+    const { tipo, itensDelta, novaVigenciaFim, efeitosDesde, justificativa, observacoes, valorDelta, confirmarLimite } = req.body;
 
     if (!TIPOS_ADITIVO.includes(tipo)) return res.status(400).json({ error: 'Tipo de aditivo inválido.' });
     const motivo = trim(justificativa, 1000);
@@ -221,10 +221,10 @@ const createAditivo = async (req, res) => {
         await db.execute(
             `INSERT INTO terceiro_contrato_aditivos
                 (id, contratoId, numero, sequencia, tipo, itensDelta, horasDelta, valorDelta,
-                 novaVigenciaFim, justificativa, status, observacoes, created_by_email)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'minuta', ?, ?)`,
+                 novaVigenciaFim, efeitosDesde, justificativa, status, observacoes, created_by_email)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'minuta', ?, ?)`,
             [aditivoId, id, numero, sequencia, tipo, JSON.stringify(calc.itens),
-             calc.horasDelta, calc.valorDelta, novaVigenciaFim || null, motivo,
+             calc.horasDelta, calc.valorDelta, novaVigenciaFim || null, efeitosDesde || null, motivo,
              trim(observacoes, 1000), req.user?.email || null]
         );
 
@@ -240,7 +240,7 @@ const createAditivo = async (req, res) => {
 // Edição só enquanto o aditivo é minuta — assinado é imutável, como o contrato.
 const updateAditivo = async (req, res) => {
     const { id, aditivoId } = req.params;
-    const { tipo, itensDelta, novaVigenciaFim, justificativa, observacoes, valorDelta, confirmarLimite } = req.body;
+    const { tipo, itensDelta, novaVigenciaFim, efeitosDesde, justificativa, observacoes, valorDelta, confirmarLimite } = req.body;
 
     if (!TIPOS_ADITIVO.includes(tipo)) return res.status(400).json({ error: 'Tipo de aditivo inválido.' });
     const motivo = trim(justificativa, 1000);
@@ -249,7 +249,9 @@ const updateAditivo = async (req, res) => {
     try {
         const ctx = await carregarContexto(id);
         if (!ctx) return res.status(404).json({ error: 'Contrato não encontrado.' });
-        const { contrato, aditivos, vigente } = ctx;
+        const { contrato, aditivos } = ctx;
+        // Base de validação sem o próprio aditivo — senão ele se somaria a si mesmo.
+        const vigente = calcularVigente(contrato, aditivos.filter((a) => a.id !== aditivoId));
 
         const atual = aditivos.find((a) => a.id === aditivoId);
         if (!atual) return res.status(404).json({ error: 'Aditivo não encontrado.' });
@@ -271,10 +273,10 @@ const updateAditivo = async (req, res) => {
         await db.execute(
             `UPDATE terceiro_contrato_aditivos
                 SET tipo = ?, itensDelta = ?, horasDelta = ?, valorDelta = ?,
-                    novaVigenciaFim = ?, justificativa = ?, observacoes = ?
+                    novaVigenciaFim = ?, efeitosDesde = ?, justificativa = ?, observacoes = ?
               WHERE id = ? AND contratoId = ?`,
             [tipo, JSON.stringify(calc.itens), calc.horasDelta, calc.valorDelta,
-             novaVigenciaFim || null, motivo, trim(observacoes, 1000), aditivoId, id]
+             novaVigenciaFim || null, efeitosDesde || null, motivo, trim(observacoes, 1000), aditivoId, id]
         );
 
         const [rows] = await db.query('SELECT * FROM terceiro_contrato_aditivos WHERE id = ?', [aditivoId]);
