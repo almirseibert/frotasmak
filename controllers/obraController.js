@@ -280,6 +280,19 @@ const updateObra = async (req, res) => {
         return res.status(400).json({ error: `Status inválido. Use: ${VALID_OBRA_STATUSES.join(', ')}.` });
     }
 
+    // Reabertura: dataFim é a data de encerramento gravada pelo finishObra. Se a obra
+    // sai de 'finalizada' e ele fica, os seletores seguem tratando a obra como
+    // inativa (dataFim vencido). Só limpa quando a obra ESTAVA finalizada — em obras
+    // antigas não finalizadas o dataFim ainda serve de previsão de fim.
+    if (data.status !== undefined && data.status !== 'finalizada') {
+        try {
+            const [curRows] = await db.query('SELECT status FROM obras WHERE id = ?', [id]);
+            if (curRows[0]?.status === 'finalizada') data.dataFim = null;
+        } catch (e) {
+            console.warn('⚠️ [reabertura] Falha ao checar status anterior da obra:', e.message);
+        }
+    }
+
     // Radar → planejada automático quando o contrato de horas é registrado na edição.
     if (temContratoDeHoras(data.horasContratadasPorSubTipo) || temContratoDeHoras(data.horasContratadasPorTipo)) {
         try {
