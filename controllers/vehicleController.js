@@ -560,8 +560,12 @@ const registrarEstadiaRetroativa = async (req, res) => {
         return res.status(400).json({ error: "readingType deve ser 'odometro' ou 'horimetro'." });
     }
 
-    const entradaB = new Date(dataEntrada);
-    const saidaB = new Date(dataSaida);
+    // <input type="date"> manda 'YYYY-MM-DD', que new Date() lê como meia-noite
+    // UTC (= 21h do dia anterior em Brasília) — a estadia "começava" antes do
+    // início da alocação do mesmo dia. Data pura é meia-noite de Brasília.
+    const parseDataBR = (v) => new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? `${v}T00:00:00-03:00` : v);
+    const entradaB = parseDataBR(dataEntrada);
+    const saidaB = parseDataBR(dataSaida);
     if (isNaN(entradaB.getTime()) || isNaN(saidaB.getTime())) {
         return res.status(400).json({ error: 'Datas inválidas.' });
     }
@@ -594,7 +598,9 @@ const registrarEstadiaRetroativa = async (req, res) => {
         const vehicle = vehicleRows[0];
 
         if (!obraB || !employeeB || !vehicle) {
-            throw new Error('Obra, Funcionário ou Veículo não encontrado (ID inválido).');
+            const err = new Error('Obra, Funcionário ou Veículo não encontrado (ID inválido).');
+            err.statusCode = 404;
+            throw err;
         }
 
         // Período ABERTO atual da obra (Obra A), se houver — é o que será fatiado.
@@ -604,20 +610,20 @@ const registrarEstadiaRetroativa = async (req, res) => {
             'SELECT * FROM vehicle_history WHERE vehicleId = ? AND historyType = ? AND endDate IS NULL ORDER BY startDate DESC LIMIT 1',
             [id, 'obra']
         );
-        const openHist = (openHistRows && openHistRows.length > 0) ? openHistRows[0] : null;
+        const openHistRow = (openHistRows && openHistRows.length > 0) ? openHistRows[0] : null;
+        // Split só quando a estadia começa DENTRO do período aberto da A. Se começa
+        // antes (estadia num período passado), o período aberto não é fatiado:
+        // entra na detecção de sobreposição como qualquer outro período.
+        const openHist = (openHistRow && entradaB >= new Date(openHistRow.startDate)) ? openHistRow : null;
         const openDetails = openHist ? (parseJsonSafe(openHist.details, 'history.details') || {}) : {};
         const obraAId = openHist
             ? (openDetails.obraId ? String(openDetails.obraId) : (vehicle.obraAtualId ? String(vehicle.obraAtualId) : null))
             : null;
 
-        if (openHist) {
-            // Split só é válido se a estadia couber dentro do período aberto da A.
-            if (entradaB < new Date(openHist.startDate)) {
-                throw new Error('A entrada na obra da estadia é anterior ao início da alocação atual. Verifique as datas.');
-            }
-            if (String(obraAId) === obraBIdStr) {
-                throw new Error('A obra da estadia retroativa é a mesma da alocação atual.');
-            }
+        if (openHist && String(obraAId) === obraBIdStr) {
+            const err = new Error('A obra da estadia retroativa é a mesma da alocação atual.');
+            err.statusCode = 400;
+            throw err;
         }
 
         const entradaKey = `${readingType}Entrada`;
@@ -891,6 +897,9 @@ const registrarEstadiaRetroativa = async (req, res) => {
         res.status(200).json({ message: 'Estadia retroativa registrada com sucesso.' });
     } catch (error) {
         await connection.rollback();
+        if (error.statusCode === 400 || error.statusCode === 404) {
+            return res.status(error.statusCode).json({ error: error.message });
+        }
         console.error('❌ Erro ao registrar estadia retroativa:', error);
         res.status(500).json({ error: 'Falha ao registrar estadia retroativa.', details: error.message });
     } finally {
