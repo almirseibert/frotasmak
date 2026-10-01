@@ -3,6 +3,7 @@ const { chaveNoNivelDoMapa, itensDoPlano } = require('../utils/planoItem');
 const { precificacaoDaObra, custoCombustivelPorObra } = require('../utils/obraFinanceiro');
 const { processRange, processPlacaDay } = require('../services/discrepanciaService');
 const { todayBRT } = require('../utils/dateBRT');
+const { carregarTaxonomia } = require('../utils/consumo');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -296,13 +297,13 @@ const jornadasOperador = async (req, res) => {
         if (!empRows.length) return res.status(404).json({ error: 'Operador não encontrado.' });
         const operador = empRows[0];
 
-        const [linhas] = await db.query(
+        const [todasLinhas] = await db.query(
             `SELECT a.id, a.data, a.vehicle_id, a.employee_id, a.obra_id,
                     a.discrepancias_json, a.faturado_intervalos_json,
                     a.rastreador_intervalos_json, a.ponto_intervalos_json,
                     a.fontes_disponiveis_json, a.maior_magnitude_min,
                     a.fonte_sinal, a.justificado_em, a.justificativa,
-                    v.placa, v.registroInterno, v.modelo,
+                    v.placa, v.registroInterno, v.modelo, v.tipo,
                     o.nome AS obra_nome,
                     dwl.employeeId AS dwl_employee_id,
                     dwl.morningStart, dwl.morningEnd,
@@ -325,6 +326,11 @@ const jornadasOperador = async (req, res) => {
               ORDER BY a.data ASC, v.registroInterno ASC`,
             [employeeId, startDate, endDate, employeeId, employeeId, startDate, endDate]
         );
+
+        // Deslocamento com veículo leve não é jornada de operação: fica fora de
+        // todas as trilhas (faturado, rastreador e ponto), dos totais e do resumo.
+        const { tipoParaGrupo } = await carregarTaxonomia();
+        const linhas = todasLinhas.filter(r => tipoParaGrupo.get(r.tipo) !== 'Veículos Leves');
 
         const totaisMin = { faturado: 0, rastreador: 0, ponto: 0 };
         const fontesGlobais = { faturado: false, rastreador: false, ponto: false };
