@@ -1,7 +1,15 @@
 const db = require('../database');
 const { chaveNoNivelDoMapa, itensDoPlano } = require('../utils/planoItem');
 const { precificacaoDaObra, custoCombustivelPorObra } = require('../utils/obraFinanceiro');
-const { processRange, processPlacaDay } = require('../services/discrepanciaService');
+const {
+    processRange, processPlacaDay,
+    _internal: {
+        buildLogIntervals, serializeIntervals,
+        detectMaquinaAlemDoFaturado, detectFaturadoAlemDaMaquina, detectSemLancamentoComAtividade,
+    },
+} = require('../services/discrepanciaService');
+const { _internal: { unionIntervals } } = require('../services/confrontoService');
+const { marcacoesParaIntervalos } = require('../services/pontoEspelhoService');
 const { todayBRT } = require('../utils/dateBRT');
 const { carregarTaxonomia } = require('../utils/consumo');
 
@@ -268,9 +276,11 @@ const justificar = async (req, res) => {
 
 // ── GET /api/analise-gerencial/jornadas/operador/:employeeId ─────────────────
 //
-// Relatório de jornadas por operador num período. Agrega o que já está
-// materializado em `analise_dia_maquina` cruzando com `daily_work_logs`
-// (porque o caminho com-lançamento grava employee_id = NULL na materializada).
+// Relatório de jornadas por operador num período. Três trilhas por máquina-dia:
+//   Faturado   — daily_work_logs (ao vivo);
+//   Rastreador — analise_dia_maquina (materializado na madrugada);
+//   Ponto      — ponto_espelho_dias (espelho de ponto importado).
+// As discrepâncias são recalculadas aqui, com o faturado atual.
 
 const sumIntervalsMin = (intervals) => {
     if (!Array.isArray(intervals) || !intervals.length) return 0;
@@ -282,6 +292,10 @@ const sumIntervalsMin = (intervals) => {
     }
     return Math.round(ms / 60000);
 };
+
+const msIntervals = (ivs) => (Array.isArray(ivs) ? ivs : [])
+    .map(iv => ({ inicio: new Date(iv.inicio).getTime(), fim: new Date(iv.fim).getTime() }))
+    .filter(iv => iv.fim > iv.inicio);
 
 const jornadasOperador = async (req, res) => {
     const { employeeId } = req.params;
@@ -297,24 +311,38 @@ const jornadasOperador = async (req, res) => {
         if (!empRows.length) return res.status(404).json({ error: 'Operador não encontrado.' });
         const operador = empRows[0];
 
-        const [todasLinhas] = await db.query(
-            `SELECT a.id, a.data, a.vehicle_id, a.employee_id, a.obra_id,
-                    a.discrepancias_json, a.faturado_intervalos_json,
-                    a.rastreador_intervalos_json, a.ponto_intervalos_json,
-                    a.fontes_disponiveis_json, a.maior_magnitude_min,
-                    a.fonte_sinal, a.justificado_em, a.justificativa,
+        // Deslocamento com veículo leve não é jornada de operação: fica fora de
+        // todas as trilhas (faturado, rastreador e ponto), dos totais e do resumo.
+        const { tipoParaGrupo } = await carregarTaxonomia();
+        const ehLeve = (tipo) => tipoParaGrupo.get(tipo) === 'Veículos Leves';
+
+        // Trilha FATURADO: sai direto de daily_work_logs (Faturamento e Controle),
+        // e não do faturado_intervalos_json materializado. A materialização roda
+        // uma vez, na madrugada seguinte ao dia; hora lançada depois disso (o caso
+        // comum: o mês é digitado no fechamento) nunca entrava no relatório.
+        const SELECT_LOG = `
+            SELECT DATE_FORMAT(l.date, '%Y-%m-%d') AS data, l.vehicleId, l.obraId, l.employeeId,
+                   l.morningStart, l.morningEnd, l.afternoonStart, l.afternoonEnd,
+                   v.placa, v.registroInterno, v.modelo, v.tipo, o.nome AS obra_nome
+              FROM daily_work_logs l
+              LEFT JOIN vehicles v ON v.id = l.vehicleId
+              LEFT JOIN obras    o ON o.id = l.obraId`;
+        const [logsOperador] = await db.query(
+            `${SELECT_LOG} WHERE l.employeeId = ? AND l.date BETWEEN ? AND ?`,
+            [employeeId, startDate, endDate]
+        );
+
+        // Trilha RASTREADOR (+ justificativas): materializada. Traz as máquinas
+        // que o operador lançou no período e as que estavam alocadas a ele.
+        const [analise] = await db.query(
+            `SELECT a.id, DATE_FORMAT(a.data, '%Y-%m-%d') AS data, a.vehicle_id, a.employee_id, a.obra_id,
+                    a.rastreador_intervalos_json, a.fontes_disponiveis_json, a.fonte_sinal,
+                    a.justificado_em, a.justificativa,
                     v.placa, v.registroInterno, v.modelo, v.tipo,
-                    o.nome AS obra_nome,
-                    dwl.employeeId AS dwl_employee_id,
-                    dwl.morningStart, dwl.morningEnd,
-                    dwl.afternoonStart, dwl.afternoonEnd
+                    o.nome AS obra_nome
                FROM analise_dia_maquina a
                LEFT JOIN vehicles v ON v.id = a.vehicle_id
                LEFT JOIN obras    o ON o.id = a.obra_id
-               LEFT JOIN daily_work_logs dwl
-                      ON dwl.vehicleId = a.vehicle_id
-                     AND dwl.date = a.data
-                     AND dwl.employeeId = ?
               WHERE a.data BETWEEN ? AND ?
                 AND (
                     a.employee_id = ?
@@ -322,76 +350,199 @@ const jornadasOperador = async (req, res) => {
                         SELECT DISTINCT vehicleId FROM daily_work_logs
                          WHERE employeeId = ? AND date BETWEEN ? AND ?
                     )
-                )
-              ORDER BY a.data ASC, v.registroInterno ASC`,
-            [employeeId, startDate, endDate, employeeId, employeeId, startDate, endDate]
+                )`,
+            [startDate, endDate, employeeId, employeeId, startDate, endDate]
         );
 
-        // Deslocamento com veículo leve não é jornada de operação: fica fora de
-        // todas as trilhas (faturado, rastreador e ponto), dos totais e do resumo.
-        const { tipoParaGrupo } = await carregarTaxonomia();
-        const linhas = todasLinhas.filter(r => tipoParaGrupo.get(r.tipo) !== 'Veículos Leves');
+        // Lançamentos de OUTROS (ou sem operador) nas mesmas máquinas: o dia em
+        // que outro operador lançou a máquina não é jornada deste; lançamento sem
+        // operador numa máquina dele entra como faturado.
+        const vehicleIds = [...new Set([
+            ...logsOperador.map(l => l.vehicleId),
+            ...analise.map(a => a.vehicle_id),
+        ])];
+        let logsOutros = [];
+        if (vehicleIds.length) {
+            [logsOutros] = await db.query(
+                `${SELECT_LOG}
+                  WHERE l.date BETWEEN ? AND ? AND l.vehicleId IN (?)
+                    AND (l.employeeId IS NULL OR l.employeeId <> ?)`,
+                [startDate, endDate, vehicleIds, employeeId]
+            );
+        }
+
+        // Trilha PONTO: espelho de ponto importado (um registro por dia).
+        let pontoRows = [];
+        try {
+            [pontoRows] = await db.query(
+                `SELECT DATE_FORMAT(data, '%Y-%m-%d') AS data, marcacoes_json, observacao
+                   FROM ponto_espelho_dias
+                  WHERE employee_id = ? AND data BETWEEN ? AND ?`,
+                [employeeId, startDate, endDate]
+            );
+        } catch (e) {
+            if (e.code !== 'ER_NO_SUCH_TABLE') throw e;
+        }
+        const pontoPorDia = new Map();
+        for (const p of pontoRows) {
+            const intervalos = marcacoesParaIntervalos(p.data, parseJson(p.marcacoes_json, []));
+            pontoPorDia.set(p.data, {
+                intervalos,
+                min: sumIntervalsMin(intervalos),
+                observacao: p.observacao || null,
+            });
+        }
+
+        const vdKey = (vehicleId, data) => `${vehicleId}|${data}`;
+
+        const diaDeOutro = new Set();          // máquina-dia lançado por outro operador
+        const logsDoDia = new Map();           // máquina-dia → intervalos de TODOS os lançamentos
+        const addLogsDoDia = (l) => {
+            const k = vdKey(l.vehicleId, l.data);
+            if (!logsDoDia.has(k)) logsDoDia.set(k, []);
+            logsDoDia.get(k).push(...buildLogIntervals(l, l.data));
+        };
+        logsOperador.forEach(addLogsDoDia);
+        for (const l of logsOutros) {
+            addLogsDoDia(l);
+            if (l.employeeId) diaDeOutro.add(vdKey(l.vehicleId, l.data));
+        }
+
+        const rastreadorDoDia = new Map();     // máquina-dia → rastreador materializado
+        const analisePorObra = new Map();      // máquina-dia-obra → linha (justificativa)
+        for (const a of analise) {
+            const k = vdKey(a.vehicle_id, a.data);
+            if (!rastreadorDoDia.has(k)) {
+                rastreadorDoDia.set(k, {
+                    intervalos: msIntervals(parseJson(a.rastreador_intervalos_json, [])),
+                    temDados: !!parseJson(a.fontes_disponiveis_json, {}).rastreador,
+                    fonteSinal: a.fonte_sinal,
+                });
+            }
+            analisePorObra.set(`${k}|${a.obra_id || '__none__'}`, a);
+        }
+
+        // Blocos (máquina, dia, obra) com lançamento: os do operador e os sem
+        // operador em máquina-dia que ninguém mais lançou.
+        const blocos = new Map();
+        const addAoBloco = (l) => {
+            const k = `${vdKey(l.vehicleId, l.data)}|${l.obraId || '__none__'}`;
+            if (!blocos.has(k)) blocos.set(k, { ref: l, vehicleId: l.vehicleId, obraId: l.obraId, intervalos: [], lancado: false });
+            const b = blocos.get(k);
+            b.intervalos.push(...buildLogIntervals(l, l.data));
+            if (l.employeeId) b.lancado = true;
+        };
+        logsOperador.forEach(addAoBloco);
+        logsOutros
+            .filter(l => !l.employeeId && !diaDeOutro.has(vdKey(l.vehicleId, l.data)))
+            .forEach(addAoBloco);
+
+        // Máquina-dia sem lançamento nenhum, mas com a máquina alocada/usada por ele.
+        const comBloco = new Set([...blocos.values()].map(b => vdKey(b.vehicleId, b.ref.data)));
+        for (const a of analise) {
+            const k = vdKey(a.vehicle_id, a.data);
+            if (comBloco.has(k) || diaDeOutro.has(k)) continue;
+            comBloco.add(k);
+            blocos.set(`${k}|__sem__`, {
+                ref: { ...a, vehicleId: a.vehicle_id },
+                vehicleId: a.vehicle_id, obraId: a.obra_id, intervalos: [], lancado: false,
+            });
+        }
 
         const totaisMin = { faturado: 0, rastreador: 0, ponto: 0 };
-        const fontesGlobais = { faturado: false, rastreador: false, ponto: false };
+        const fontesGlobais = { faturado: false, rastreador: false, ponto: pontoPorDia.size > 0 };
         let totalDiscrepancias = 0;
         let totalMagnitudeMin = 0;
         const diasMap = new Map();
+        const maquinas = new Set();
+        const rastreadorContado = new Set();
 
-        for (const r of linhas) {
-            const fat = parseJson(r.faturado_intervalos_json, []);
-            const ras = parseJson(r.rastreador_intervalos_json, []);
-            const pon = parseJson(r.ponto_intervalos_json, null);
-            const disc = parseJson(r.discrepancias_json, []);
-            const fontes = parseJson(r.fontes_disponiveis_json, {});
+        const ordenados = [...blocos.values()]
+            .filter(b => !ehLeve(b.ref.tipo))
+            .sort((x, y) => x.ref.data.localeCompare(y.ref.data)
+                || String(x.ref.registroInterno || '').localeCompare(String(y.ref.registroInterno || '')));
 
+        for (const b of ordenados) {
+            const { ref } = b;
+            const k = vdKey(b.vehicleId, ref.data);
+            const fatMs = unionIntervals(b.intervalos);
+            const ras = rastreadorDoDia.get(k) || { intervalos: [], temDados: false, fonteSinal: null };
+            const temLancamento = logsDoDia.has(k);
+
+            // "Rodou além do faturado" compara com TODOS os lançamentos da
+            // máquina no dia e entra só no 1º bloco da máquina-dia (não duplica
+            // quando ela foi lançada em duas obras).
+            const primeiroDoDia = !rastreadorContado.has(k);
+            const disc = [
+                ...(primeiroDoDia && temLancamento
+                    ? detectMaquinaAlemDoFaturado(ras.intervalos, unionIntervals(logsDoDia.get(k))) : []),
+                ...(temLancamento ? detectFaturadoAlemDaMaquina(ras.intervalos, fatMs) : []),
+                ...(primeiroDoDia ? detectSemLancamentoComAtividade(ras.intervalos, temLancamento) : []),
+            ];
+
+            const fat = serializeIntervals(fatMs);
+            const rasSer = serializeIntervals(ras.intervalos);
+            const ponto = pontoPorDia.get(ref.data) || null;
             const minFat = sumIntervalsMin(fat);
-            const minRas = sumIntervalsMin(ras);
-            const minPon = pon ? sumIntervalsMin(pon) : 0;
+            const minRas = sumIntervalsMin(rasSer);
 
             totaisMin.faturado += minFat;
-            totaisMin.rastreador += minRas;
-            totaisMin.ponto += minPon;
-            if (fontes.faturado) fontesGlobais.faturado = true;
-            if (fontes.rastreador) fontesGlobais.rastreador = true;
-            if (fontes.ponto) fontesGlobais.ponto = true;
+            if (primeiroDoDia) {
+                totaisMin.rastreador += minRas;
+                rastreadorContado.add(k);
+            }
+            if (fatMs.length) fontesGlobais.faturado = true;
+            if (ras.temDados) fontesGlobais.rastreador = true;
             totalDiscrepancias += disc.length;
             totalMagnitudeMin += disc.reduce((s, d) => s + (d.magnitude_min || 0), 0);
+            maquinas.add(b.vehicleId);
 
-            const dataStr = r.data instanceof Date
-                ? r.data.toISOString().slice(0, 10)
-                : String(r.data).slice(0, 10);
-            if (!diasMap.has(dataStr)) diasMap.set(dataStr, []);
-            diasMap.get(dataStr).push({
-                analiseId: r.id,
-                vehicleId: r.vehicle_id,
-                placa: r.placa,
-                registroInterno: r.registroInterno,
-                modelo: r.modelo,
-                obraId: r.obra_id,
-                obraNome: r.obra_nome,
+            const linha = analisePorObra.get(`${k}|${b.obraId || '__none__'}`) || null;
+            if (!diasMap.has(ref.data)) diasMap.set(ref.data, []);
+            diasMap.get(ref.data).push({
+                analiseId: linha ? linha.id : null,
+                vehicleId: b.vehicleId,
+                placa: ref.placa,
+                registroInterno: ref.registroInterno,
+                modelo: ref.modelo,
+                obraId: b.obraId || null,
+                obraNome: ref.obra_nome,
                 faturadoIntervalos: fat,
-                rastreadorIntervalos: ras,
-                pontoIntervalos: pon,
-                totaisMin: { faturado: minFat, rastreador: minRas, ponto: minPon },
+                rastreadorIntervalos: rasSer,
+                pontoIntervalos: ponto ? ponto.intervalos : null,
+                totaisMin: { faturado: minFat, rastreador: minRas, ponto: ponto ? ponto.min : 0 },
                 discrepancias: disc,
-                maiorMagnitudeMin: r.maior_magnitude_min,
-                fonteSinal: r.fonte_sinal,
-                fontesDisponiveis: fontes,
-                justificadoEm: r.justificado_em,
-                justificativa: r.justificativa,
-                // marca se esse veículo foi lançado pelo operador no dia (não só alocado)
-                lancadoPeloOperador: !!r.dwl_employee_id,
-                jornadaLancada: r.dwl_employee_id ? {
-                    morningStart: r.morningStart, morningEnd: r.morningEnd,
-                    afternoonStart: r.afternoonStart, afternoonEnd: r.afternoonEnd,
-                } : null,
+                maiorMagnitudeMin: disc.reduce((m, d) => Math.max(m, d.magnitude_min || 0), 0),
+                fonteSinal: ras.fonteSinal,
+                fontesDisponiveis: { faturado: fatMs.length > 0, rastreador: ras.temDados, ponto: !!ponto },
+                justificadoEm: linha ? linha.justificado_em : null,
+                justificativa: linha ? linha.justificativa : null,
+                lancadoPeloOperador: b.lancado,
             });
+        }
+
+        // Ponto conta uma vez por DIA (não por máquina). Dia com ponto e sem
+        // máquina lançada/rastreada entra como bloco próprio, sem equipamento.
+        for (const [data, ponto] of pontoPorDia) {
+            totaisMin.ponto += ponto.min;
+            if (diasMap.has(data) || !ponto.intervalos.length) continue;
+            diasMap.set(data, [{
+                analiseId: null, vehicleId: null, placa: null,
+                registroInterno: 'Sem equipamento lançado', modelo: null,
+                obraId: null, obraNome: ponto.observacao || null,
+                semEquipamento: true,
+                faturadoIntervalos: [], rastreadorIntervalos: [],
+                pontoIntervalos: ponto.intervalos,
+                totaisMin: { faturado: 0, rastreador: 0, ponto: ponto.min },
+                discrepancias: [], maiorMagnitudeMin: 0, fonteSinal: null,
+                fontesDisponiveis: { faturado: false, rastreador: false, ponto: true },
+                justificadoEm: null, justificativa: null, lancadoPeloOperador: false,
+            }]);
         }
 
         const dias = [...diasMap.entries()]
             .sort(([a], [b]) => a.localeCompare(b))
-            .map(([data, maquinas]) => ({ data, maquinas }));
+            .map(([data, maquinasDoDia]) => ({ data, maquinas: maquinasDoDia }));
 
         res.json({
             operador,
@@ -400,7 +551,7 @@ const jornadasOperador = async (req, res) => {
             fontesDisponiveis: fontesGlobais,
             resumo: {
                 diasComAtividade: dias.length,
-                maquinasOperadas: new Set(linhas.map(r => r.vehicle_id)).size,
+                maquinasOperadas: maquinas.size,
                 totalDiscrepancias,
                 totalMagnitudeMin,
             },

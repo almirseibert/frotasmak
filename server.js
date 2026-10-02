@@ -2417,6 +2417,30 @@ const migracaoEvidenciasFase2 = (async () => {
     }
 })();
 
+// ---- Espelho de ponto importado (Relatório de Jornadas por Operador) ----
+// Uma linha por (funcionário, dia) com as marcações lidas do espelho de ponto
+// (PDF do sistema de ponto). Alimenta a trilha "Ponto" do relatório de jornadas.
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS ponto_espelho_dias (
+                id             VARCHAR(36) PRIMARY KEY,
+                employee_id    VARCHAR(36) NOT NULL,
+                data           DATE NOT NULL,
+                marcacoes_json JSON NOT NULL,
+                observacao     VARCHAR(120) DEFAULT NULL,
+                origem         ENUM('pdf','manual') NOT NULL DEFAULT 'pdf',
+                arquivo_nome   VARCHAR(255) DEFAULT NULL,
+                importado_por  VARCHAR(36) DEFAULT NULL,
+                importado_em   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_ponto_emp_data (employee_id, data)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] ponto_espelho_dias:', e.message);
+    }
+})();
+
 // Varredura única do cache de carimbo após uma mudança no DESENHO (Fase 10:
 // saíram a tarja escura e a barra marrom). Só apaga variantes 'stamped' de
 // revisões antigas — NUNCA thumb*, que para um registro arquivado é a última

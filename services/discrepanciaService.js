@@ -347,6 +347,8 @@ module.exports = {
     processRange,
     processYesterday,
     _internal: {
+        buildLogIntervals,
+        serializeIntervals,
         detectMaquinaAlemDoFaturado,
         detectFaturadoAlemDaMaquina,
         detectSemLancamentoComAtividade,
