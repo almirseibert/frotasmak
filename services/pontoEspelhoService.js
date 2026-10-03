@@ -95,6 +95,10 @@ const FERRAMENTA = {
                 type: 'boolean',
                 description: 'false se o documento não for um espelho/folha de ponto.',
             },
+            mais_de_um_funcionario: {
+                type: 'boolean',
+                description: 'true se o documento traz espelhos de mais de um funcionário.',
+            },
             funcionario_nome: { type: ['string', 'null'], description: 'Nome do funcionário, como aparece no documento.' },
             funcionario_matricula: { type: ['string', 'null'], description: 'Código/matrícula que antecede o nome, se houver.' },
             funcionario_cpf: { type: ['string', 'null'], description: 'CPF do funcionário, só os dígitos.' },
@@ -131,7 +135,7 @@ const FERRAMENTA = {
             },
         },
         required: [
-            'eh_espelho_ponto', 'funcionario_nome', 'funcionario_matricula', 'funcionario_cpf',
+            'eh_espelho_ponto', 'mais_de_um_funcionario', 'funcionario_nome', 'funcionario_matricula', 'funcionario_cpf',
             'periodo_inicio', 'periodo_fim', 'dias',
         ],
     },
@@ -258,6 +262,11 @@ const lerEspelho = async ({ buffer, mimetype }) => {
     const d = uso.input;
     if (d.eh_espelho_ponto === false) {
         return falha('NAO_E_ESPELHO', 'O arquivo enviado não parece ser um espelho de ponto.');
+    }
+    // O schema é de UM funcionário: com vários, as linhas de pessoas diferentes
+    // se misturariam. Melhor recusar do que gravar o ponto de um no outro.
+    if (d.mais_de_um_funcionario === true) {
+        return falha('VARIOS_FUNCIONARIOS', 'O arquivo traz o ponto de mais de um funcionário. Envie um PDF por funcionário.');
     }
     const dias = montarDias(d.dias);
     if (!dias.length) return falha('SEM_DIAS', 'Nenhum dia foi identificado no arquivo.');
