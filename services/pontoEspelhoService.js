@@ -24,6 +24,10 @@
 const Anthropic = require('@anthropic-ai/sdk');
 
 const MODELO = process.env.PONTO_ESPELHO_MODELO || 'claude-opus-5-5';
+// Plano B: a combinação já usada em produção pela leitura de painel/cupom
+// (aiVisionService) — modelo anterior, ferramenta forçada e schema sem strict.
+// Entra quando o principal recusa a requisição (400/404).
+const MODELO_RESERVA = process.env.PONTO_ESPELHO_MODELO_RESERVA || 'claude-opus-5';
 
 // A API aceita até 32 MB por requisição; o base64 infla ~33%.
 const MAX_BYTES_ARQUIVO = 10 * 1024 * 1024;
@@ -86,7 +90,6 @@ const minutosTrabalhados = (marcacoes) => {
 const FERRAMENTA = {
     name: 'registrar_espelho_ponto',
     description: 'Registra os dados transcritos de um espelho de ponto: funcionário, período e as marcações de cada dia.',
-    strict: true,
     input_schema: {
         type: 'object',
         additionalProperties: false,
@@ -222,30 +225,53 @@ const lerEspelho = async ({ buffer, mimetype }) => {
     if (!bloco) return falha('FORMATO_NAO_SUPORTADO', 'Envie o espelho em PDF, JPG, PNG ou WEBP.');
 
     const inicio = Date.now();
-    let resposta;
-    try {
-        resposta = await getCliente().messages.create({
-            model: MODELO,
-            max_tokens: 16000,
-            system: SISTEMA,
-            tools: [FERRAMENTA],
-            tool_choice: { type: 'auto' },
-            messages: [{
-                role: 'user',
-                content: [
-                    bloco,
-                    { type: 'text', text: 'Transcreva este espelho de ponto e registre pela ferramenta registrar_espelho_ponto.' },
-                ],
-            }],
-        });
-    } catch (e) {
-        const tipo = e instanceof Anthropic.RateLimitError ? 'RATE_LIMIT'
-            : e instanceof Anthropic.AuthenticationError ? 'CREDENCIAL_INVALIDA'
-            : e instanceof Anthropic.BadRequestError ? 'REQUISICAO_INVALIDA'
-            : e instanceof Anthropic.APIError ? 'ERRO_API'
-            : 'ERRO_INESPERADO';
-        console.error(`❌ [pontoEspelho] ${tipo} em ${MODELO}:`, e.message);
-        return falha(tipo, 'Não foi possível ler o arquivo agora. Tente de novo ou digite as marcações.');
+    const messages = [{
+        role: 'user',
+        content: [
+            bloco,
+            { type: 'text', text: 'Transcreva este espelho de ponto e registre pela ferramenta registrar_espelho_ponto.' },
+        ],
+    }];
+
+    // Principal: ferramenta com strict e tool_choice auto (o modelo atual recusa
+    // ferramenta forçada). Reserva: ferramenta forçada, sem strict.
+    const tentativas = [
+        { modelo: MODELO, tools: [{ ...FERRAMENTA, strict: true }], tool_choice: { type: 'auto' } },
+        { modelo: MODELO_RESERVA, tools: [FERRAMENTA], tool_choice: { type: 'tool', name: FERRAMENTA.name } },
+    ].filter((t, i, arr) => i === 0 || t.modelo !== arr[0].modelo);
+
+    let resposta = null;
+    let ultimoErro = null;
+    for (const t of tentativas) {
+        try {
+            resposta = await getCliente().messages.create({
+                model: t.modelo,
+                max_tokens: 16000,
+                system: SISTEMA,
+                tools: t.tools,
+                tool_choice: t.tool_choice,
+                messages,
+            });
+            break;
+        } catch (e) {
+            const tipo = e instanceof Anthropic.RateLimitError ? 'RATE_LIMIT'
+                : e instanceof Anthropic.AuthenticationError ? 'CREDENCIAL_INVALIDA'
+                : e instanceof Anthropic.BadRequestError ? 'REQUISICAO_INVALIDA'
+                : e instanceof Anthropic.NotFoundError ? 'MODELO_INDISPONIVEL'
+                : e instanceof Anthropic.APIError ? 'ERRO_API'
+                : 'ERRO_INESPERADO';
+            console.error(`❌ [pontoEspelho] ${tipo} em ${t.modelo}:`, e.message);
+            ultimoErro = { tipo, mensagem: e.message };
+            // Só a requisição recusada pelo modelo justifica tentar a reserva;
+            // limite de taxa e credencial não melhoram trocando de modelo.
+            if (tipo !== 'REQUISICAO_INVALIDA' && tipo !== 'MODELO_INDISPONIVEL') break;
+        }
+    }
+    if (!resposta) {
+        const dica = ultimoErro.tipo === 'RATE_LIMIT'
+            ? 'Muitas leituras ao mesmo tempo — aguarde um minuto e use "Tentar de novo".'
+            : 'Tente de novo ou digite as marcações.';
+        return falha(ultimoErro.tipo, `Não foi possível ler o arquivo (${ultimoErro.tipo}: ${String(ultimoErro.mensagem).slice(0, 200)}). ${dica}`);
     }
 
     if (resposta.stop_reason === 'refusal') {
