@@ -149,7 +149,7 @@ Só atualiza para cima (`newVal > currentVal`), nunca regride.
 
 ### 1.3 Campos Adicionais em Obras ✅
 - Migrações `obras.orgao_contratante` (VARCHAR 50) e `obras.regiao` (ENUM 'Lajeado','Santa Maria')
-- Valores válidos para `orgao_contratante`: ALUGUEL, DOAÇÃO, INCRA, MUNICÍPIO, PARTICULAR, SEAPI, SEDUR
+- Valores válidos para `orgao_contratante`: ALUGUEL, DOAÇÃO, INCRA, IRGA, MUNICÍPIO, PARTICULAR, SANEP, SEAPI, SEDUR
 - Modal de obra, listagem `[ÓRGÃO] Nome` e filtro de região implementados
 
 ---
