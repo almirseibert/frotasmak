@@ -12,6 +12,7 @@ const { _internal: { unionIntervals } } = require('../services/confrontoService'
 const { marcacoesParaIntervalos } = require('../services/pontoEspelhoService');
 const { todayBRT } = require('../utils/dateBRT');
 const { carregarTaxonomia } = require('../utils/consumo');
+const { producaoPeriodo } = require('../services/producaoPeriodoService');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -950,7 +951,27 @@ const getProjecaoObra = async (req, res) => {
     }
 };
 
+// ── GET /api/analise-gerencial/producao ──────────────────────────────────────
+// Aba "Produção" de Desempenho do negócio: horas do período por obra e por
+// máquina, próprio × terceiro. Regras em services/producaoPeriodoService.js.
+
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+const getProducao = async (req, res) => {
+    const { startDate, endDate } = req.query;
+    if (!YMD.test(startDate || '') || !YMD.test(endDate || '') || startDate > endDate) {
+        return res.status(400).json({ error: 'startDate e endDate (AAAA-MM-DD) são obrigatórios.' });
+    }
+    try {
+        res.json(await producaoPeriodo(startDate, endDate));
+    } catch (e) {
+        console.error('❌ [producao]', e);
+        res.status(500).json({ error: 'Erro ao calcular a produção do período.' });
+    }
+};
+
 module.exports = {
+    getProducao,
     obrasOverview,
     obraDetalhe,
     discrepanciaDrill,

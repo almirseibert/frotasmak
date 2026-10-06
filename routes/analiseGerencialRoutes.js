@@ -24,6 +24,7 @@ router.post('/discrepancias/:id/justificar', ctrl.justificar);
 router.post('/discrepancias/reprocessar', ctrl.reprocessar);
 router.get('/jornadas/operador/:employeeId', ctrl.jornadasOperador);
 router.get('/projecao/:obraId', ctrl.getProjecaoObra);
+router.get('/producao', ctrl.getProducao);
 
 // Espelho de ponto (trilha "Ponto" das jornadas). O arquivo fica só em memória:
 // é lido pelo modelo e descartado, nada vai para public/uploads.

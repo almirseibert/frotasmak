@@ -332,10 +332,7 @@ const PANORAMA = {
 };
 
 // Grupos que não são máquina de produção — mesma lista do Aproveitamento Produtivo.
-const TIPOS_EXCLUIDOS_PRODUTIVOS = [
-    'Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro',
-    'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria', 'Caminhão Prancha',
-];
+const { TIPOS_EXCLUIDOS_PRODUTIVOS } = require('../utils/tiposProdutivos');
 
 // Status de obra que entram no panorama. 'radar' fica fora: não tem plano de
 // trabalho, logo não tem horas nem máquinas para dimensionar.

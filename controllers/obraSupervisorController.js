@@ -646,10 +646,7 @@ function getStatusColor(perc) {
 // ==================================================================================
 // Helpers internos
 const HORAS_POR_DIA = 8;
-const TIPOS_EXCLUIDOS_PRODUTIVOS = [
-    'Leve', 'Passeio', 'Utilitario', 'Moto', 'Administrativo', 'Carro',
-    'Automóvel', 'Camionete', 'Semirreboques', 'Caminhão Carroceria', 'Caminhão Prancha'
-];
+const { TIPOS_EXCLUIDOS_PRODUTIVOS } = require('../utils/tiposProdutivos');
 
 const _isBusinessDay = (dateStr) => {
     const d = new Date(dateStr + 'T12:00:00');
