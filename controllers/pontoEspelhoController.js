@@ -1,6 +1,6 @@
 // Espelho de ponto importado — alimenta a trilha "Ponto" do Relatório de
 // Jornadas por Operador. Fluxo: ler (PDF → marcações, sem gravar) → o usuário
-// confere na tela → salvar.
+// confere na tela → salvar. Um arquivo pode trazer vários funcionários.
 
 const { randomUUID } = require('crypto');
 const db = require('../database');
@@ -25,21 +25,23 @@ const ler = async (req, res) => {
             return res.status(status).json({ error: r.detalhe, codigo: r.erro });
         }
 
-        // Sugere o funcionário pelo nome lido no documento (comparação sem acento).
-        let funcionarioSugerido = null;
-        if (r.funcionario.nome) {
-            const alvo = semAcento(r.funcionario.nome);
-            const [emps] = await db.query('SELECT id, nome FROM employees');
-            const achados = emps.filter(e => semAcento(e.nome) === alvo);
-            if (achados.length === 1) funcionarioSugerido = { id: achados[0].id, nome: achados[0].nome };
-        }
+        // Sugere o funcionário de cada espelho: pelo CPF (só dígitos) e, sem CPF
+        // que case, pelo nome (sem acento). Só sugere quando o cadastro é único.
+        const [emps] = await db.query('SELECT id, nome, cpf FROM employees');
+        const digitos = (v) => String(v || '').replace(/\D/g, '');
+        const sugerir = (f) => {
+            const cpf = digitos(f.cpf);
+            let achados = cpf.length === 11 ? emps.filter(e => digitos(e.cpf) === cpf) : [];
+            if (achados.length !== 1 && f.nome) {
+                const alvo = semAcento(f.nome);
+                achados = emps.filter(e => semAcento(e.nome) === alvo);
+            }
+            return achados.length === 1 ? { id: achados[0].id, nome: achados[0].nome } : null;
+        };
 
         res.json({
             arquivoNome: req.file.originalname || null,
-            funcionario: r.funcionario,
-            funcionarioSugerido,
-            periodo: r.periodo,
-            dias: r.dias,
+            espelhos: r.espelhos.map(e => ({ ...e, funcionarioSugerido: sugerir(e.funcionario) })),
         });
     } catch (e) {
         console.error('Erro ao ler espelho de ponto:', e);

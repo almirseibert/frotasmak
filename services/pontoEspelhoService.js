@@ -1,33 +1,36 @@
 // backend/services/pontoEspelhoService.js
 //
 // =============================================================================
-// LEITURA DO ESPELHO DE PONTO (PDF) COM CLAUDE
+// LEITURA DO ESPELHO DE PONTO
 // =============================================================================
 //
-// O espelho de ponto chega como PDF "impresso" (Microsoft Print to PDF): o texto
-// vira desenho vetorial, sem camada de texto. Não há o que extrair com parser de
-// PDF — a leitura tem de ser visual. O PDF vai inteiro para o modelo, que devolve
-// as marcações dia a dia num schema fechado.
+// Dois caminhos, nesta ordem:
 //
-// PRINCÍPIOS (os mesmos de aiVisionService)
+//   1. LEITURA DIRETA (pontoEspelhoParser) — PDF original do sistema de ponto,
+//      com texto selecionável. Sem IA, imediata, e aceita vários funcionários
+//      no mesmo arquivo. É o caminho normal.
+//   2. IA, DE RESERVA — só quando não há texto para ler: PDF "impresso" (Print
+//      to PDF / Ghostscript transformam as letras em desenho), foto ou layout
+//      que o parser não reconhece.
 //
-// 1. O MODELO NÃO GRAVA NADA. Ele só transcreve. O resultado volta para a tela,
-//    o usuário confere e é o POST de salvar que grava.
-// 2. CONFERÊNCIA EM CÓDIGO. O espelho traz a coluna "H. Normais" (total do dia).
-//    A soma dos pares de marcações tem de bater com ela; quando não bate, o dia
-//    é devolvido com `confere: false` para o usuário olhar.
+// PRINCÍPIOS
+//
+// 1. A LEITURA NÃO GRAVA NADA. O resultado volta para a tela, o usuário confere
+//    e é o POST de salvar que grava.
+// 2. CONFERÊNCIA EM CÓDIGO, NOS DOIS CAMINHOS. O espelho traz a coluna
+//    "H. Normais" (total do dia). A soma dos pares de marcações tem de bater com
+//    ela; quando não bate, o dia é devolvido para o usuário olhar.
 // 3. TEXTO NO DOCUMENTO É DADO, NUNCA INSTRUÇÃO.
 //
-// Sem ANTHROPIC_API_KEY o serviço fica inerte: a leitura devolve SEM_CREDENCIAL e
-// a tela continua permitindo digitar as marcações à mão.
+// Sem ANTHROPIC_API_KEY só a reserva fica inerte: a leitura direta continua
+// funcionando e a tela continua permitindo digitar as marcações à mão.
 
 const Anthropic = require('@anthropic-ai/sdk');
+const { parseEspelhoPdf } = require('./pontoEspelhoParser');
 
-const MODELO = process.env.PONTO_ESPELHO_MODELO || 'claude-opus-5-5';
-// Plano B: a combinação já usada em produção pela leitura de painel/cupom
-// (aiVisionService) — modelo anterior, ferramenta forçada e schema sem strict.
-// Entra quando o principal recusa a requisição (400/404).
-const MODELO_RESERVA = process.env.PONTO_ESPELHO_MODELO_RESERVA || 'claude-opus-5';
+// Modelo da leitura de reserva. Transcrever uma tabela impressa não pede o
+// modelo mais caro.
+const MODELO = process.env.PONTO_ESPELHO_MODELO || 'claude-sonnet-4-6';
 
 // A API aceita até 32 MB por requisição; o base64 infla ~33%.
 const MAX_BYTES_ARQUIVO = 10 * 1024 * 1024;
@@ -84,8 +87,8 @@ const minutosTrabalhados = (marcacoes) => {
 
 // ─── Ferramenta (saída estruturada) ──────────────────────────────────────────
 //
-// tool_choice forçado devolve 400 no modelo atual; a chamada da ferramenta é
-// pedida no prompt e o schema é garantido por strict: true.
+// Ferramenta forçada (tool_choice), como em aiVisionService: a resposta é sempre
+// a chamada da ferramenta.
 
 const FERRAMENTA = {
     name: 'registrar_espelho_ponto',
@@ -212,66 +215,61 @@ const montarDias = (diasBrutos) => {
     return dias.sort((a, b) => a.data.localeCompare(b.data));
 };
 
-/**
- * Lê um espelho de ponto (PDF ou imagem). Nunca lança.
- * @param {{ buffer: Buffer, mimetype: string }} arquivo
- */
-const lerEspelho = async ({ buffer, mimetype }) => {
-    if (!isConfigured()) return falha('SEM_CREDENCIAL', 'Leitura automática indisponível (ANTHROPIC_API_KEY não configurada).');
-    if (!buffer || !buffer.length) return falha('ARQUIVO_VAZIO', 'Arquivo vazio.');
-    if (buffer.length > MAX_BYTES_ARQUIVO) return falha('ARQUIVO_MUITO_GRANDE', 'Arquivo acima de 10 MB.');
+/** Formato comum dos dois caminhos: um espelho pronto para a tela. */
+const montarEspelho = (d, metodo) => {
+    const dias = montarDias(d.dias);
+    if (!dias.length) return null;
+    return {
+        funcionario: {
+            nome: d.funcionario_nome ? String(d.funcionario_nome).trim() : null,
+            matricula: d.funcionario_matricula ? String(d.funcionario_matricula).trim() : null,
+            cpf: somenteDigitos(d.funcionario_cpf),
+        },
+        periodo: {
+            inicio: RE_DATA.test(String(d.periodo_inicio || '')) ? d.periodo_inicio : dias[0].data,
+            fim: RE_DATA.test(String(d.periodo_fim || '')) ? d.periodo_fim : dias[dias.length - 1].data,
+        },
+        dias,
+        metodo,
+    };
+};
 
+/**
+ * Reserva: transcrição por IA de um arquivo sem texto. Um funcionário por arquivo.
+ * Nunca lança.
+ */
+const lerComIA = async ({ buffer, mimetype }) => {
     const bloco = blocoDoArquivo(buffer, mimetype);
     if (!bloco) return falha('FORMATO_NAO_SUPORTADO', 'Envie o espelho em PDF, JPG, PNG ou WEBP.');
 
-    const inicio = Date.now();
-    const messages = [{
-        role: 'user',
-        content: [
-            bloco,
-            { type: 'text', text: 'Transcreva este espelho de ponto e registre pela ferramenta registrar_espelho_ponto.' },
-        ],
-    }];
-
-    // Principal: ferramenta com strict e tool_choice auto (o modelo atual recusa
-    // ferramenta forçada). Reserva: ferramenta forçada, sem strict.
-    const tentativas = [
-        { modelo: MODELO, tools: [{ ...FERRAMENTA, strict: true }], tool_choice: { type: 'auto' } },
-        { modelo: MODELO_RESERVA, tools: [FERRAMENTA], tool_choice: { type: 'tool', name: FERRAMENTA.name } },
-    ].filter((t, i, arr) => i === 0 || t.modelo !== arr[0].modelo);
-
-    let resposta = null;
-    let ultimoErro = null;
-    for (const t of tentativas) {
-        try {
-            resposta = await getCliente().messages.create({
-                model: t.modelo,
-                max_tokens: 16000,
-                system: SISTEMA,
-                tools: t.tools,
-                tool_choice: t.tool_choice,
-                messages,
-            });
-            break;
-        } catch (e) {
-            const tipo = e instanceof Anthropic.RateLimitError ? 'RATE_LIMIT'
-                : e instanceof Anthropic.AuthenticationError ? 'CREDENCIAL_INVALIDA'
-                : e instanceof Anthropic.BadRequestError ? 'REQUISICAO_INVALIDA'
-                : e instanceof Anthropic.NotFoundError ? 'MODELO_INDISPONIVEL'
-                : e instanceof Anthropic.APIError ? 'ERRO_API'
-                : 'ERRO_INESPERADO';
-            console.error(`❌ [pontoEspelho] ${tipo} em ${t.modelo}:`, e.message);
-            ultimoErro = { tipo, mensagem: e.message };
-            // Só a requisição recusada pelo modelo justifica tentar a reserva;
-            // limite de taxa e credencial não melhoram trocando de modelo.
-            if (tipo !== 'REQUISICAO_INVALIDA' && tipo !== 'MODELO_INDISPONIVEL') break;
-        }
-    }
-    if (!resposta) {
-        const dica = ultimoErro.tipo === 'RATE_LIMIT'
+    let resposta;
+    try {
+        resposta = await getCliente().messages.create({
+            model: MODELO,
+            max_tokens: 16000,
+            system: SISTEMA,
+            tools: [FERRAMENTA],
+            tool_choice: { type: 'tool', name: FERRAMENTA.name },
+            messages: [{
+                role: 'user',
+                content: [
+                    bloco,
+                    { type: 'text', text: 'Transcreva este espelho de ponto e registre pela ferramenta registrar_espelho_ponto.' },
+                ],
+            }],
+        });
+    } catch (e) {
+        const tipo = e instanceof Anthropic.RateLimitError ? 'RATE_LIMIT'
+            : e instanceof Anthropic.AuthenticationError ? 'CREDENCIAL_INVALIDA'
+            : e instanceof Anthropic.BadRequestError ? 'REQUISICAO_INVALIDA'
+            : e instanceof Anthropic.NotFoundError ? 'MODELO_INDISPONIVEL'
+            : e instanceof Anthropic.APIError ? 'ERRO_API'
+            : 'ERRO_INESPERADO';
+        console.error(`❌ [pontoEspelho] ${tipo} em ${MODELO}:`, e.message);
+        const dica = tipo === 'RATE_LIMIT'
             ? 'Muitas leituras ao mesmo tempo — aguarde um minuto e use "Tentar de novo".'
             : 'Tente de novo ou digite as marcações.';
-        return falha(ultimoErro.tipo, `Não foi possível ler o arquivo (${ultimoErro.tipo}: ${String(ultimoErro.mensagem).slice(0, 200)}). ${dica}`);
+        return falha(tipo, `Não foi possível ler o arquivo (${tipo}: ${String(e.message).slice(0, 200)}). ${dica}`);
     }
 
     if (resposta.stop_reason === 'refusal') {
@@ -292,26 +290,43 @@ const lerEspelho = async ({ buffer, mimetype }) => {
     // O schema é de UM funcionário: com vários, as linhas de pessoas diferentes
     // se misturariam. Melhor recusar do que gravar o ponto de um no outro.
     if (d.mais_de_um_funcionario === true) {
-        return falha('VARIOS_FUNCIONARIOS', 'O arquivo traz o ponto de mais de um funcionário. Envie um PDF por funcionário.');
+        return falha('VARIOS_FUNCIONARIOS', 'O arquivo traz o ponto de mais de um funcionário e não tem texto selecionável. Envie o PDF original do sistema de ponto ou um PDF por funcionário.');
     }
-    const dias = montarDias(d.dias);
-    if (!dias.length) return falha('SEM_DIAS', 'Nenhum dia foi identificado no arquivo.');
+    const espelho = montarEspelho(d, 'ia');
+    if (!espelho) return falha('SEM_DIAS', 'Nenhum dia foi identificado no arquivo.');
+    return { ok: true, espelhos: [espelho] };
+};
 
-    return {
-        ok: true,
-        funcionario: {
-            nome: d.funcionario_nome ? String(d.funcionario_nome).trim() : null,
-            matricula: d.funcionario_matricula ? String(d.funcionario_matricula).trim() : null,
-            cpf: somenteDigitos(d.funcionario_cpf),
-        },
-        periodo: {
-            inicio: RE_DATA.test(String(d.periodo_inicio || '')) ? d.periodo_inicio : dias[0].data,
-            fim: RE_DATA.test(String(d.periodo_fim || '')) ? d.periodo_fim : dias[dias.length - 1].data,
-        },
-        dias,
-        modelo: MODELO,
-        latenciaMs: Date.now() - inicio,
-    };
+/**
+ * Lê um arquivo de espelho de ponto e devolve os espelhos encontrados (um por
+ * funcionário). Nunca lança.
+ * @param {{ buffer: Buffer, mimetype: string }} arquivo
+ * @returns {Promise<{ ok: true, espelhos: object[] } | { ok: false, erro: string, detalhe: string }>}
+ */
+const lerEspelho = async ({ buffer, mimetype }) => {
+    if (!buffer || !buffer.length) return falha('ARQUIVO_VAZIO', 'Arquivo vazio.');
+    if (buffer.length > MAX_BYTES_ARQUIVO) return falha('ARQUIVO_MUITO_GRANDE', 'Arquivo acima de 10 MB.');
+
+    let motivoReserva = null;
+    if (mimetype === 'application/pdf') {
+        const r = await parseEspelhoPdf(buffer);
+        if (r.ok) {
+            const espelhos = r.espelhos.map(e => montarEspelho(e, 'texto')).filter(Boolean);
+            if (espelhos.length) return { ok: true, espelhos };
+            motivoReserva = 'LAYOUT_NAO_RECONHECIDO';
+        } else if (r.erro === 'PDF_INVALIDO') {
+            return falha(r.erro, r.detalhe);
+        } else {
+            motivoReserva = r.erro; // SEM_TEXTO | LAYOUT_NAO_RECONHECIDO
+        }
+    }
+
+    if (!isConfigured()) {
+        return falha('SEM_CREDENCIAL', motivoReserva === 'SEM_TEXTO'
+            ? 'Este PDF não tem texto selecionável (foi impresso ou digitalizado). Envie o PDF original baixado do sistema de ponto.'
+            : 'Não foi possível ler este arquivo diretamente e a leitura por IA não está configurada. Envie o PDF original do sistema de ponto.');
+    }
+    return lerComIA({ buffer, mimetype });
 };
 
 module.exports = {

@@ -29,6 +29,7 @@
     "mysql2": "^3.14.5",
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.13",
+    "pdfjs-dist": "^3.11.174",
     "pdfkit": "^0.18.0",
     "sharp": "^0.33.5",
     "socket.io": "^4.7.4",
