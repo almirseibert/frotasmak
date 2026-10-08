@@ -1,6 +1,7 @@
 const db = require('../database');
 const { precificacaoDaObra, custoCombustivelPorObra } = require('../utils/obraFinanceiro');
 const { _computeAnalyticsCore, _fmtDate } = require('./obraSupervisorController');
+const { carregarTaxonomia } = require('../utils/planoItem');
 
 const HORAS_PADRAO_DIA = 8;
 const FUEL_LIMIT_PCT = 20;
@@ -362,7 +363,7 @@ exports.getHomeSummary = async (req, res) => {
 // ---------------------------------------------------------------------------
 // Obras em foco — painel operacional de gestão.
 //
-// Três indicadores, nada de prosa. É tela de trabalho do gestor e também o que
+// Quatro indicadores, nada de prosa. É tela de trabalho do gestor e também o que
 // se projeta para o diretor: lê o número, sabe qual obra, segue a conversa.
 //
 // O que NÃO entra aqui, de propósito:
@@ -386,8 +387,95 @@ const RITMO_BAIXO_H_DIA_VEICULO = 3.5;
 const RITMO_CRITICO_H_DIA_VEICULO = 2.5;
 const DIAS_PRODUCAO_LONGA = 120;
 const DIAS_PRODUCAO_CRITICA = 160;
+// Medianas da mesma calibragem, enviadas à tela junto com os cortes.
+const RITMO_MEDIANA_H_DIA_VEICULO = 4.7;
+const DIAS_PRODUCAO_MEDIANA = 70;
 
 const fmtNum1 = (v) => (v || 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+
+// Substituição que ainda está acontecendo pesa mais que uma já encerrada.
+const DIAS_OUTRO_GRUPO_EM_CURSO = 7;
+
+/**
+ * Obras onde uma máquina apontou horas carimbadas (planoItemKey) num item do
+ * plano que pertence a OUTRO grupo de veículo. Só olha apontamentos com item
+ * declarado: sem carimbo, a hora é classificada pelo próprio veículo e não
+ * existe "outro grupo". Ver docs/item-de-contrato-e-substituicao-plano.md.
+ */
+const obrasComItemDeOutroGrupo = async (obraIds, today) => {
+    if (!obraIds.length) return [];
+    const ph = obraIds.map(() => '?').join(',');
+
+    const [linhas, grupos] = await Promise.all([
+        safeQuery(`
+            SELECT l.obraId,
+                   o.nome                               AS obraNome,
+                   TRIM(l.planoItemKey)                 AS itemKey,
+                   TRIM(v.tipo)                         AS grupoVeiculo,
+                   SUM(l.totalHours)                    AS horas,
+                   COUNT(DISTINCT l.vehicleId)          AS veiculos,
+                   DATE_FORMAT(MAX(l.date), '%Y-%m-%d') AS ultimo
+              FROM daily_work_logs l
+              JOIN vehicles v ON v.id = l.vehicleId
+              JOIN obras o ON o.id = l.obraId
+             WHERE l.obraId IN (${ph})
+               AND l.totalHours > 0
+               AND l.planoItemKey IS NOT NULL AND TRIM(l.planoItemKey) <> ''
+             GROUP BY l.obraId, o.nome, itemKey, grupoVeiculo
+        `, obraIds),
+        safeQuery(`SELECT nome FROM vehicle_types`),
+    ]);
+    if (!linhas.length) return [];
+
+    let taxonomia = new Map();
+    try {
+        taxonomia = await carregarTaxonomia(db);
+    } catch (e) {
+        console.warn('[dashboard] taxonomia falhou, indicador de outro grupo vazio:', e.code || e.message);
+        return [];
+    }
+    const nomesGrupo = new Set(grupos.map(g => (g.nome || '').trim()));
+
+    const gruposDoItem = (key) => {
+        const set = new Set(taxonomia.get(key) || []);
+        if (nomesGrupo.has(key)) set.add(key);
+        return set;
+    };
+
+    const limiteEmCurso = _fmtDate(addDays(today, -DIAS_OUTRO_GRUPO_EM_CURSO));
+    const porObra = new Map();
+    for (const r of linhas) {
+        const grupos = gruposDoItem(r.itemKey);
+        if (grupos.size === 0 || !r.grupoVeiculo || grupos.has(r.grupoVeiculo)) continue;
+
+        const key = String(r.obraId);
+        if (!porObra.has(key)) porObra.set(key, { obraId: r.obraId, obraNome: r.obraNome, horas: 0, pares: [], ultimo: null });
+        const entry = porObra.get(key);
+        const horas = parseFloat(r.horas) || 0;
+        entry.horas += horas;
+        entry.pares.push({ grupoVeiculo: r.grupoVeiculo, itemKey: r.itemKey, horas, veiculos: parseInt(r.veiculos, 10) || 0 });
+        if (!entry.ultimo || r.ultimo > entry.ultimo) entry.ultimo = r.ultimo;
+    }
+
+    return [...porObra.values()]
+        .sort((a, b) => b.horas - a.horas)
+        .map(o => {
+            const pares = o.pares.sort((a, b) => b.horas - a.horas);
+            const p = pares[0];
+            const veic = `${p.veiculos > 1 ? `${p.veiculos}× ` : ''}${p.grupoVeiculo}`;
+            const mais = pares.length > 1 ? ` · +${pares.length - 1}` : '';
+            return {
+                obraId: o.obraId,
+                obraNome: o.obraNome,
+                valor: Math.round(o.horas),
+                rotulo: `${fmtNum1(Math.round(o.horas))} h`,
+                apoio: `${veic} → ${p.itemKey}${mais}`,
+                pares: pares.map(x => ({ ...x, horas: Math.round(x.horas * 10) / 10 })),
+                ultimoLancamento: o.ultimo,
+                critico: o.ultimo >= limiteEmCurso,
+            };
+        });
+};
 
 exports.getObrasFoco = async (req, res) => {
     try {
@@ -465,6 +553,8 @@ exports.getObrasFoco = async (req, res) => {
                         ? `hoje ${Math.round(o.dieselAtual)}% · obra ${Math.round(o.percentConcluido)}%`
                         : `medido · obra ${Math.round(o.percentConcluido ?? 0)}%`,
                     projetado: projetavel,
+                    dieselAtual: o.dieselAtual,
+                    percentConcluido: o.percentConcluido,
                     critico: valor > FUEL_LIMIT_PCT * 1.5,
                 };
             })
@@ -481,6 +571,9 @@ exports.getObrasFoco = async (req, res) => {
                 valor: o.hDiaVeiculo,
                 rotulo: `${fmtNum1(o.hDiaVeiculo)} h/dia`,
                 apoio: `${o.veiculos} veículo${o.veiculos > 1 ? 's' : ''}`,
+                veiculos: o.veiculos,
+                horas: o.horas,
+                percentConcluido: o.percentConcluido,
                 critico: o.hDiaVeiculo < RITMO_CRITICO_H_DIA_VEICULO,
             }));
 
@@ -494,8 +587,18 @@ exports.getObrasFoco = async (req, res) => {
                 valor: o.diasProducao,
                 rotulo: `${o.diasProducao} dias`,
                 apoio: `desde ${o.inicio.split('-').reverse().join('/')}`,
+                inicio: o.inicio,
+                percentConcluido: o.percentConcluido,
                 critico: o.diasProducao > DIAS_PRODUCAO_CRITICA,
             }));
+
+        // --- Indicador 4: máquina consumindo item de outro grupo -------------
+        // Caçamba apontando no item "Escavadeira 23T", rolo no item de caçamba.
+        // Porte diferente do MESMO grupo (35T no item 23T) é substituição
+        // normal e não entra. O grupo do item sai da taxonomia (subgrupo N:N) ou
+        // da própria chave quando o plano é por grupo; item que não se resolve
+        // em grupo nenhum fica de fora — sem grupo conhecido não há "outro".
+        const outroGrupo = await obrasComItemDeOutroGrupo(obraIds, today);
 
         res.json({
             generatedAt: today.toISOString(),
@@ -505,6 +608,7 @@ exports.getObrasFoco = async (req, res) => {
                     id: 'diesel',
                     titulo: 'Diesel acima do limite',
                     criterio: `acima de ${FUEL_LIMIT_PCT}% da receita`,
+                    escala: { limite: FUEL_LIMIT_PCT, critico: FUEL_LIMIT_PCT * 1.5, sentido: 'acima' },
                     total: diesel.length,
                     criticos: diesel.filter(x => x.critico).length,
                     obras: diesel,
@@ -513,6 +617,7 @@ exports.getObrasFoco = async (req, res) => {
                     id: 'ritmo',
                     titulo: 'Ritmo baixo',
                     criterio: `menos de ${fmtNum1(RITMO_BAIXO_H_DIA_VEICULO)} h/dia por veículo`,
+                    escala: { limite: RITMO_BAIXO_H_DIA_VEICULO, critico: RITMO_CRITICO_H_DIA_VEICULO, referencia: RITMO_MEDIANA_H_DIA_VEICULO, sentido: 'abaixo' },
                     total: ritmo.length,
                     criticos: ritmo.filter(x => x.critico).length,
                     obras: ritmo,
@@ -521,9 +626,19 @@ exports.getObrasFoco = async (req, res) => {
                     id: 'duracao',
                     titulo: 'Tempo em produção',
                     criterio: `mais de ${DIAS_PRODUCAO_LONGA} dias apontando`,
+                    escala: { limite: DIAS_PRODUCAO_LONGA, critico: DIAS_PRODUCAO_CRITICA, referencia: DIAS_PRODUCAO_MEDIANA, sentido: 'acima' },
                     total: duracao.length,
                     criticos: duracao.filter(x => x.critico).length,
                     obras: duracao,
+                },
+                {
+                    id: 'outro_grupo',
+                    titulo: 'Item de outro grupo',
+                    criterio: 'máquina abatendo horas de item de outro grupo',
+                    escala: { emCursoDias: DIAS_OUTRO_GRUPO_EM_CURSO },
+                    total: outroGrupo.length,
+                    criticos: outroGrupo.filter(x => x.critico).length,
+                    obras: outroGrupo,
                 },
             ],
         });
