@@ -83,22 +83,32 @@ const normalizeMaquinas = (m) => {
     return [];
 };
 
-// Normaliza os itens do plano de trabalho ([{ type, hours, price }]).
+// Normaliza os itens do plano de trabalho ([{ type, hours, price, consomeDe? }]).
+// `consomeDe` só existe em máquina FORA do plano da obra: é o item do plano que
+// cede as horas (acordo informal — ver erroForaDoPlano).
 const normalizeItens = (itens) => {
     let arr = itens;
     if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { arr = []; } }
     if (!Array.isArray(arr)) return [];
     return arr
         .filter((i) => i && i.type)
-        .map((i) => ({ type: String(i.type), hours: num(i.hours), price: num(i.price) }));
+        .map((i) => {
+            const item = { type: String(i.type), hours: num(i.hours), price: num(i.price) };
+            const origem = String(i.consomeDe || '').trim();
+            if (origem && origem !== item.type) item.consomeDe = origem;
+            return item;
+        });
 };
+
+// Subgrupo do plano da obra de onde o item tira horas.
+const tipoNoPlano = (i) => i.consomeDe || i.type;
 
 // A partir do plano, calcula horas totais e valor total (por horas) ou usa o valor fechado.
 const derivarAgregados = ({ contractType, itens, horasContratadas, valorHora, valorTotal }) => {
     if (contractType === 'fechado') {
         // Fechado agora aceita máquinas (subgrupos) com horas, mas SEM valor/hora (price = 0):
         // o valor é o global informado; as horas são demonstrativas e alimentam o progresso físico.
-        const itensSemPreco = itens.map((i) => ({ type: i.type, hours: i.hours, price: 0 }));
+        const itensSemPreco = itens.map((i) => ({ ...i, price: 0 }));
         const horasItens = itensSemPreco.reduce((a, i) => a + i.hours, 0);
         return {
             horas: horasItens > 0 ? horasItens : num(horasContratadas),
@@ -195,17 +205,65 @@ const parseJsonObj = (v) => {
     return typeof v === 'object' ? v : {};
 };
 
-// Valida os itens do contrato contra o saldo do plano. Retorna [] ou a lista de
-// estouros [{ type, saldo, pedido }]. Obra sem plano por subgrupo não restringe nada.
-const validarContraPlanoDaObra = async (obraId, itens, exceptId = null) => {
-    const pedido = {};
-    itens.forEach((i) => { pedido[i.type] = (pedido[i.type] || 0) + num(i.hours); });
-    if (Object.keys(pedido).length === 0) return [];
-
+const carregarPlanoDaObra = async (obraId) => {
     const [obraRows] = await db.query(
         'SELECT horasContratadasPorSubTipo FROM obras WHERE id = ?', [obraId]
     );
-    const plano = parseJsonObj(obraRows[0]?.horasContratadasPorSubTipo);
+    return parseJsonObj(obraRows[0]?.horasContratadasPorSubTipo);
+};
+
+// Máquina fora do plano (acordo informal): o contrato pode ter um subgrupo que a
+// obra não prevê, DESDE QUE indique em `consomeDe` um item do plano que cede as
+// horas — o teto continua sendo o plano. O valor/hora do terceiro é livre.
+// Retorna a mensagem de erro ou null (e limpa `consomeDe` onde não se aplica).
+// `typesAnteriores` = subgrupos já gravados no contrato: item fora do plano sem
+// origem só passa se já existia (contrato legado, anterior a esta regra).
+const erroForaDoPlano = (plano, itens, typesAnteriores = []) => {
+    if (Object.keys(plano).length === 0) {
+        // Obra sem plano por subgrupo: não há de onde consumir.
+        itens.forEach((i) => { delete i.consomeDe; });
+        return null;
+    }
+    for (const i of itens) {
+        if (i.type in plano) { delete i.consomeDe; continue; }
+        if (i.consomeDe) {
+            if (!(i.consomeDe in plano)) {
+                return `"${i.type}": o item indicado para consumir as horas ("${i.consomeDe}") não está no plano de trabalho da obra.`;
+            }
+            continue;
+        }
+        if (!typesAnteriores.includes(i.type)) {
+            return `"${i.type}" não está no plano de trabalho da obra. Indique de qual máquina do plano as horas serão consumidas.`;
+        }
+    }
+    return null;
+};
+
+const ERRO_JUSTIFICATIVA = 'Contrato com máquina fora do plano de trabalho: informe a justificativa do acordo.';
+
+// Justificativa do acordo fora do plano: obrigatória quando há substituição e
+// zerada quando não há mais. Quem/quando registrou é preservado entre edições.
+const registroForaDoPlano = (itens, body, atual, email) => {
+    if (!itens.some((i) => i.consomeDe)) return { ok: true, justificativa: null, por: null, em: null };
+    const justificativa = trim160(body.foraDoPlanoJustificativa, 2000);
+    if (!justificativa) return { ok: false };
+    return {
+        ok: true,
+        justificativa,
+        por: atual?.foraDoPlanoRegistradoPor || email || null,
+        em: atual?.foraDoPlanoRegistradoEm || new Date(),
+    };
+};
+
+// Valida os itens do contrato contra o saldo do plano. Retorna [] ou a lista de
+// estouros [{ type, saldo, pedido }]. Obra sem plano por subgrupo não restringe nada.
+// Item fora do plano com `consomeDe` desconta do item de origem.
+const validarContraPlanoDaObra = async (obraId, itens, exceptId = null, plano = null) => {
+    const pedido = {};
+    itens.forEach((i) => { pedido[tipoNoPlano(i)] = (pedido[tipoNoPlano(i)] || 0) + num(i.hours); });
+    if (Object.keys(pedido).length === 0) return [];
+
+    if (!plano) plano = await carregarPlanoDaObra(obraId);
     if (Object.keys(plano).length === 0) return [];
 
     const [outrosRows] = await db.query(
@@ -219,7 +277,7 @@ const validarContraPlanoDaObra = async (obraId, itens, exceptId = null) => {
     const comprometido = {};
     outros.forEach((c) => {
         normalizeItens(c.vigente?.itensContratados ?? c.itensContratados).forEach((i) => {
-            comprometido[i.type] = (comprometido[i.type] || 0) + i.hours;
+            comprometido[tipoNoPlano(i)] = (comprometido[tipoNoPlano(i)] || 0) + i.hours;
         });
     });
 
@@ -298,7 +356,12 @@ const createTerceiroContrato = async (req, res) => {
             locadorId, obraId, itens: itensFinal, vigenciaInicio, vigenciaFim,
         });
         if (conflitoSub.length > 0) return res.status(400).json(erroDeSubgrupo(conflitoSub));
-        const estouros = await validarContraPlanoDaObra(obraId, itensFinal);
+        const plano = await carregarPlanoDaObra(obraId);
+        const erroFora = erroForaDoPlano(plano, itensFinal);
+        if (erroFora) return res.status(400).json({ error: erroFora });
+        const foraPlano = registroForaDoPlano(itensFinal, req.body, null, criadoPor);
+        if (!foraPlano.ok) return res.status(400).json({ error: ERRO_JUSTIFICATIVA });
+        const estouros = await validarContraPlanoDaObra(obraId, itensFinal, null, plano);
         if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
         const numero = await gerarNumero();
         await db.execute(
@@ -310,8 +373,9 @@ const createTerceiroContrato = async (req, res) => {
                  prazoSubstituicaoHoras, prazoInicioServicoHoras, percentualMultaInadimplemento,
                  avisoPrevioRescisaoDias, foroComarca, prazoVigenciaMeses,
                  contratadaRepresentanteNome, contratadaRepresentanteQualificacao, contratadaRepresentanteCpf,
-                 dataContratoModo, dataContratoPersonalizada)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 dataContratoModo, dataContratoPersonalizada,
+                 foraDoPlanoJustificativa, foraDoPlanoRegistradoPor, foraDoPlanoRegistradoEm)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [id, numero, locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
              maqs === null ? null : JSON.stringify(maqs), tipoContrato, JSON.stringify(itensFinal), criadoPor,
@@ -319,7 +383,8 @@ const createTerceiroContrato = async (req, res) => {
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
              clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
              rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf,
-             dataCt.dataContratoModo, dataCt.dataContratoPersonalizada]
+             dataCt.dataContratoModo, dataCt.dataContratoPersonalizada,
+             foraPlano.justificativa, foraPlano.por, foraPlano.em]
         );
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
         if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
@@ -359,7 +424,10 @@ const updateTerceiroContrato = async (req, res) => {
     try {
         // Contrato assinado é imutável: bloqueia edição enquanto houver documento
         // assinado vigente (mesma regra da geração de minuta).
-        const [cur] = await db.query('SELECT contratoAssinadoUrl FROM terceiro_contratos WHERE id = ?', [id]);
+        const [cur] = await db.query(
+            `SELECT contratoAssinadoUrl, obraId, itensContratados, foraDoPlanoRegistradoPor, foraDoPlanoRegistradoEm
+               FROM terceiro_contratos WHERE id = ?`, [id]
+        );
         if (cur.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         if (cur[0].contratoAssinadoUrl) {
             return res.status(409).json({ error: 'Contrato com versão assinada não pode ser editado. Remova o contrato assinado para editar.' });
@@ -368,7 +436,16 @@ const updateTerceiroContrato = async (req, res) => {
             locadorId, obraId, itens: itensFinal, vigenciaInicio, vigenciaFim, exceptId: id,
         });
         if (conflitoSub.length > 0) return res.status(400).json(erroDeSubgrupo(conflitoSub));
-        const estouros = await validarContraPlanoDaObra(obraId, itensFinal, id);
+        const plano = await carregarPlanoDaObra(obraId);
+        // Legado: subgrupo fora do plano já gravado neste contrato (mesma obra) segue
+        // aceito sem origem, para a edição de um contrato antigo não travar.
+        const typesAnteriores = String(cur[0].obraId) === String(obraId)
+            ? normalizeItens(cur[0].itensContratados).map((i) => i.type) : [];
+        const erroFora = erroForaDoPlano(plano, itensFinal, typesAnteriores);
+        if (erroFora) return res.status(400).json({ error: erroFora });
+        const foraPlano = registroForaDoPlano(itensFinal, req.body, cur[0], req.user?.email);
+        if (!foraPlano.ok) return res.status(400).json({ error: ERRO_JUSTIFICATIVA });
+        const estouros = await validarContraPlanoDaObra(obraId, itensFinal, id, plano);
         if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
         const [result] = await db.execute(
             `UPDATE terceiro_contratos
@@ -379,7 +456,8 @@ const updateTerceiroContrato = async (req, res) => {
                     prazoSubstituicaoHoras = ?, prazoInicioServicoHoras = ?, percentualMultaInadimplemento = ?,
                     avisoPrevioRescisaoDias = ?, foroComarca = ?, prazoVigenciaMeses = ?,
                     contratadaRepresentanteNome = ?, contratadaRepresentanteQualificacao = ?, contratadaRepresentanteCpf = ?,
-                    dataContratoModo = ?, dataContratoPersonalizada = ?
+                    dataContratoModo = ?, dataContratoPersonalizada = ?,
+                    foraDoPlanoJustificativa = ?, foraDoPlanoRegistradoPor = ?, foraDoPlanoRegistradoEm = ?
               WHERE id = ?`,
             [locadorId, obraId, tipoMaquina || null, horas, vHora, vTotal,
              vigenciaInicio || null, vigenciaFim || null, status || 'ativo', observacoes || null,
@@ -388,7 +466,8 @@ const updateTerceiroContrato = async (req, res) => {
              clausulas.prazoSubstituicaoHoras, clausulas.prazoInicioServicoHoras, clausulas.percentualMultaInadimplemento,
              clausulas.avisoPrevioRescisaoDias, clausulas.foroComarca, clausulas.prazoVigenciaMeses,
              rep.contratadaRepresentanteNome, rep.contratadaRepresentanteQualificacao, rep.contratadaRepresentanteCpf,
-             dataCt.dataContratoModo, dataCt.dataContratoPersonalizada, id]
+             dataCt.dataContratoModo, dataCt.dataContratoPersonalizada,
+             foraPlano.justificativa, foraPlano.por, foraPlano.em, id]
         );
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);

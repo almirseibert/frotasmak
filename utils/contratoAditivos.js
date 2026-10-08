@@ -19,13 +19,18 @@ const parseJson = (v, fallback) => {
     try { return JSON.parse(v); } catch { return fallback; }
 };
 
-// Itens ([{ type, hours, price }]) vindos do banco (JSON ou string).
+// Itens ([{ type, hours, price, consomeDe? }]) vindos do banco (JSON ou string).
+// `consomeDe`: máquina fora do plano da obra que consome horas de outro item.
 const parseItens = (v) => {
     const arr = parseJson(v, []);
     if (!Array.isArray(arr)) return [];
     return arr
         .filter((i) => i && i.type)
-        .map((i) => ({ type: String(i.type), hours: num(i.hours), price: num(i.price) }));
+        .map((i) => {
+            const item = { type: String(i.type), hours: num(i.hours), price: num(i.price) };
+            if (i.consomeDe) item.consomeDe = String(i.consomeDe);
+            return item;
+        });
 };
 
 const TIPOS_ADITIVO = ['acrescimo', 'supressao', 'prazo', 'reajuste', 'escopo'];
@@ -42,13 +47,16 @@ const aditivoConta = (a) => a && (a.status === 'minuta' || a.status === 'assinad
 const consolidarItens = (itensBase, aditivos) => {
     const ordem = [];
     const mapa = new Map();
-    const push = (type, hours, price) => {
+    const push = (type, hours, price, consomeDe) => {
         if (!mapa.has(type)) { ordem.push(type); mapa.set(type, { type, hours: 0, price: 0 }); }
         const cur = mapa.get(type);
         cur.hours += hours;
         if (price > 0) cur.price = price;
+        if (consomeDe) cur.consomeDe = consomeDe;
     };
-    itensBase.forEach((i) => push(i.type, i.hours, i.price));
+    // O aditivo herda o `consomeDe` da base: acréscimo numa máquina fora do plano
+    // continua saindo do mesmo item de origem.
+    itensBase.forEach((i) => push(i.type, i.hours, i.price, i.consomeDe));
     aditivos.forEach((a) => parseItens(a.itensDelta).forEach((i) => push(i.type, i.hours, i.price)));
     // Supressão total de um subgrupo o remove da lista vigente.
     return ordem.map((t) => mapa.get(t)).filter((i) => i.hours > 0 || i.price > 0);

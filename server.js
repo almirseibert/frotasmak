@@ -1291,6 +1291,12 @@ const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel')
             // trabalhava antes da assinatura); 'personalizada' = dataContratoPersonalizada.
             { column: 'dataContratoModo',                    def: "VARCHAR(20) NOT NULL DEFAULT 'atual'" },
             { column: 'dataContratoPersonalizada',           def: 'DATE DEFAULT NULL' },
+            // Máquina FORA do plano de trabalho da obra (acordo informal): o item do
+            // contrato leva `consomeDe` (item do plano que cede as horas) e o contrato
+            // guarda o porquê e quem registrou — aviso permanente na ficha.
+            { column: 'foraDoPlanoJustificativa',            def: 'TEXT DEFAULT NULL' },
+            { column: 'foraDoPlanoRegistradoPor',            def: 'VARCHAR(255) DEFAULT NULL' },
+            { column: 'foraDoPlanoRegistradoEm',             def: 'TIMESTAMP NULL DEFAULT NULL' },
         ];
         for (const { column, def } of clausulasJuridicas) {
             try {
