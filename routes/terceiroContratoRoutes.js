@@ -52,6 +52,7 @@ const uploadAditivo = multer({
 router.use(authMiddleware);
 
 router.get('/', controller.getTerceiroContratos);
+router.get('/primeiro-lancamento', controller.getPrimeiroLancamento);
 router.post('/', controller.createTerceiroContrato);
 router.put('/:id', controller.updateTerceiroContrato);
 router.delete('/:id', controller.deleteTerceiroContrato);

@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const { generateContratoPdf } = require('../services/contratoPdfGenerator');
 const { anexarVigente } = require('../utils/contratoAditivos');
-const { STATUS_ENCERRADOS } = require('../utils/terceirosCusto');
+const { STATUS_ENCERRADOS, veiculoElegivel } = require('../utils/terceirosCusto');
 
 const CONTRATOS_PDF_DIR = path.join(__dirname, '..', 'public', 'uploads', 'contratos');
 
@@ -64,15 +64,31 @@ const dataDoContrato = (body) => {
     return { dataContratoModo: modo, dataContratoPersonalizada: modo === 'personalizada' ? data : null };
 };
 
-// Valida o par modo/data contra a vigência informada. Retorna mensagem ou null.
-const erroDataContrato = ({ dataContratoModo, dataContratoPersonalizada }, vigenciaInicio) => {
-    if (dataContratoModo === 'inicio_obra' && !vigenciaInicio) {
-        return 'Para usar a data de início do terceiro na obra, preencha "Vigência início".';
-    }
+// Valida o par modo/data. 'inicio_obra' não exige nada no cadastro: a data vem
+// dos lançamentos de horas na hora de gerar a minuta (primeiroLancamentoDoTerceiro).
+const erroDataContrato = ({ dataContratoModo, dataContratoPersonalizada }) => {
     if (dataContratoModo === 'personalizada' && !dataContratoPersonalizada) {
         return 'Informe a data personalizada do contrato.';
     }
     return null;
+};
+
+// Início do terceiro na obra = data do PRIMEIRO lançamento de horas (totalHours > 0)
+// de uma máquina dele nesta obra, nos subgrupos do contrato — mesma derivação
+// máquina ↔ contrato do custo (veiculoElegivel). Retorna 'AAAA-MM-DD' ou null.
+const primeiroLancamentoDoTerceiro = async ({ locadorId, obraId, itensContratados }) => {
+    if (!locadorId || !obraId) return null;
+    const [rows] = await db.query(`
+        SELECT v.id, v.locadorId, v.isOutsourced, v.tipo, v.sub_tipo,
+               DATE_FORMAT(MIN(l.date), '%Y-%m-%d') AS primeira
+          FROM daily_work_logs l
+          JOIN vehicles v ON v.id = l.vehicleId
+         WHERE l.obraId = ? AND v.locadorId = ? AND v.isOutsourced = 1 AND l.totalHours > 0
+         GROUP BY v.id, v.locadorId, v.isOutsourced, v.tipo, v.sub_tipo
+    `, [obraId, locadorId]);
+    const contrato = { locadorId, itensContratados };
+    const datas = rows.filter((v) => veiculoElegivel(v, contrato)).map((v) => v.primeira).filter(Boolean).sort();
+    return datas[0] || null;
 };
 
 const normalizeMaquinas = (m) => {
@@ -291,6 +307,9 @@ const validarContraPlanoDaObra = async (obraId, itens, exceptId = null, plano = 
     return estouros;
 };
 
+// Estourar o saldo do plano é permitido, mas só com confirmação explícita do
+// usuário (`confirmarExcessoPlano`): sem ela, devolve 409 com os estouros para o
+// frontend avisar e reenviar.
 const erroDePlano = (estouros) => ({
     error: 'Horas acima do saldo do plano de trabalho da obra: ' +
         estouros.map((e) => `${e.type} (pedido ${e.pedido} h, saldo ${e.saldo} h)`).join(', ') + '.',
@@ -345,7 +364,7 @@ const createTerceiroContrato = async (req, res) => {
     const clausulas = clausulasJuridicas(req.body);
     const rep = representanteContratada(req.body);
     const dataCt = dataDoContrato(req.body);
-    const erroData = erroDataContrato(dataCt, vigenciaInicio);
+    const erroData = erroDataContrato(dataCt);
     if (erroData) return res.status(400).json({ error: erroData });
 
     const id = randomUUID();
@@ -362,7 +381,7 @@ const createTerceiroContrato = async (req, res) => {
         const foraPlano = registroForaDoPlano(itensFinal, req.body, null, criadoPor);
         if (!foraPlano.ok) return res.status(400).json({ error: ERRO_JUSTIFICATIVA });
         const estouros = await validarContraPlanoDaObra(obraId, itensFinal, null, plano);
-        if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
+        if (estouros.length > 0 && req.body.confirmarExcessoPlano !== true) return res.status(409).json(erroDePlano(estouros));
         const numero = await gerarNumero();
         await db.execute(
             `INSERT INTO terceiro_contratos
@@ -418,7 +437,7 @@ const updateTerceiroContrato = async (req, res) => {
     const clausulas = clausulasJuridicas(req.body);
     const rep = representanteContratada(req.body);
     const dataCt = dataDoContrato(req.body);
-    const erroData = erroDataContrato(dataCt, vigenciaInicio);
+    const erroData = erroDataContrato(dataCt);
     if (erroData) return res.status(400).json({ error: erroData });
 
     try {
@@ -446,7 +465,7 @@ const updateTerceiroContrato = async (req, res) => {
         const foraPlano = registroForaDoPlano(itensFinal, req.body, cur[0], req.user?.email);
         if (!foraPlano.ok) return res.status(400).json({ error: ERRO_JUSTIFICATIVA });
         const estouros = await validarContraPlanoDaObra(obraId, itensFinal, id, plano);
-        if (estouros.length > 0) return res.status(400).json(erroDePlano(estouros));
+        if (estouros.length > 0 && req.body.confirmarExcessoPlano !== true) return res.status(409).json(erroDePlano(estouros));
         const [result] = await db.execute(
             `UPDATE terceiro_contratos
                 SET locadorId = ?, obraId = ?, tipoMaquina = ?, horasContratadas = ?, valorHora = ?,
@@ -518,6 +537,16 @@ const gerarContratoPdf = async (req, res) => {
         const [obraRows] = await db.query('SELECT * FROM obras WHERE id = ?', [contrato.obraId]);
         const locador = locRows[0] || {};
         const obra = obraRows[0] || {};
+
+        // 'inicio_obra': a minuta é datada do primeiro lançamento de horas do
+        // terceiro na obra. Sem lançamento, cai na Vigência início (se houver).
+        if (contrato.dataContratoModo === 'inicio_obra') {
+            const primeira = await primeiroLancamentoDoTerceiro(contrato);
+            if (primeira) contrato.dataInicioTerceiro = primeira;
+            else if (!contrato.vigenciaInicio) {
+                return res.status(400).json({ error: 'O terceiro ainda não tem lançamento de horas nesta obra. Para usar "Início do terceiro na obra", lance as horas ou preencha "Vigência início" — ou escolha outra data do contrato.' });
+            }
+        }
 
         const buffer = await generateContratoPdf({ contrato, locador, obra });
 
@@ -633,6 +662,22 @@ const removerContratoAssinado = async (req, res) => {
 
 
 // Histórico de documentos assinados de um contrato (vigente + arquivados).
+// GET /primeiro-lancamento?locadorId&obraId&subgrupos=a,b — prévia, no modal, da
+// data que o modo 'inicio_obra' vai imprimir na minuta.
+const getPrimeiroLancamento = async (req, res) => {
+    const { locadorId, obraId } = req.query;
+    const subgrupos = String(req.query.subgrupos || '').split(',').map((t) => t.trim()).filter(Boolean);
+    try {
+        const data = await primeiroLancamentoDoTerceiro({
+            locadorId, obraId, itensContratados: subgrupos.map((type) => ({ type })),
+        });
+        res.json({ data });
+    } catch (error) {
+        console.error('❌ Erro ao buscar primeiro lançamento do terceiro:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao buscar o primeiro lançamento de horas.' });
+    }
+};
+
 const getContratoDocs = async (req, res) => {
     const { id } = req.params;
     try {
@@ -656,5 +701,6 @@ module.exports = {
     enviarContratoAssinado,
     removerContratoAssinado,
     getContratoDocs,
+    getPrimeiroLancamento,
     slugArquivo,
 };

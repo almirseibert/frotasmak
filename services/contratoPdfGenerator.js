@@ -18,7 +18,9 @@ const {
 const resolverDataAssinatura = (contrato) => {
     const hoje = new Date();
     const hojeLocal = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate());
-    const origem = contrato.dataContratoModo === 'inicio_obra' ? contrato.vigenciaInicio
+    // 'inicio_obra': primeiro lançamento de horas do terceiro na obra (resolvido no
+    // controller); sem lançamento, Vigência início.
+    const origem = contrato.dataContratoModo === 'inicio_obra' ? (contrato.dataInicioTerceiro || contrato.vigenciaInicio)
         : contrato.dataContratoModo === 'personalizada' ? contrato.dataContratoPersonalizada
         : null;
     if (!origem) return hojeLocal;
