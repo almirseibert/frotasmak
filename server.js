@@ -34,6 +34,9 @@ const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel')
         // chat_notif_prefs: preferências de notificação do chat (JSON) — eventos,
         // DND, horário de silêncio, mute por conversa, prévia de texto.
         { table: 'users',                  column: 'chat_notif_prefs',                def: 'JSON DEFAULT NULL' },
+        // ui_prefs: preferências de tela por usuário (JSON chave→valor), ex.:
+        // { "terceirizados.ordenacao": "devemos" }. PUT mescla por chave.
+        { table: 'users',                  column: 'ui_prefs',                        def: 'JSON DEFAULT NULL' },
         { table: 'comboio_transactions',   column: 'authNumber',                      def: 'INT UNSIGNED DEFAULT NULL' },
         { table: 'obras',                  column: 'tipo_registro',                   def: "ENUM('obra','centro_custo') DEFAULT 'obra'" },
         // FASE 1.3 — Campos adicionais em obras

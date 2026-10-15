@@ -17,7 +17,7 @@ const parseJson = (v) => {
 const getMySettings = async (req, res) => {
     try {
         const [rows] = await db.query(
-            'SELECT id, name, display_name, chat_status, chat_status_msg, chat_notif_prefs FROM users WHERE id = ?',
+            'SELECT id, name, display_name, chat_status, chat_status_msg, chat_notif_prefs, ui_prefs FROM users WHERE id = ?',
             [req.user.id]
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Usuário não encontrado.' });
@@ -29,6 +29,7 @@ const getMySettings = async (req, res) => {
             chatStatus: u.chat_status || 'disponivel',
             chatStatusMsg: u.chat_status_msg || '',
             chatNotifPrefs: parseJson(u.chat_notif_prefs),
+            uiPrefs: parseJson(u.ui_prefs) || {},
         });
     } catch (error) {
         console.error('❌ Erro ao carregar configurações:', error.message);
@@ -70,6 +71,26 @@ const updateMySettings = async (req, res) => {
             params.push(json);
         }
 
+        // uiPrefs: preferências de tela. MESCLA por chave com o que já está salvo,
+        // para uma tela não apagar a preferência de outra. Valor null remove a chave.
+        if (req.body.uiPrefs !== undefined) {
+            const patch = req.body.uiPrefs;
+            if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+                return res.status(400).json({ error: 'uiPrefs inválido.' });
+            }
+            const [cur] = await db.query('SELECT ui_prefs FROM users WHERE id = ?', [me]);
+            const merged = { ...(parseJson(cur[0]?.ui_prefs) || {}) };
+            Object.entries(patch).forEach(([k, v]) => {
+                const key = String(k).slice(0, 80);
+                if (v === null) delete merged[key];
+                else merged[key] = v;
+            });
+            const json = JSON.stringify(merged);
+            if (json.length > 8000) return res.status(400).json({ error: 'uiPrefs muito grande.' });
+            fields.push('ui_prefs = ?');
+            params.push(json);
+        }
+
         if (fields.length === 0) return res.status(400).json({ error: 'Nada para atualizar.' });
 
         params.push(me);
@@ -92,7 +113,7 @@ const updateMySettings = async (req, res) => {
         }
 
         const [rows] = await db.query(
-            'SELECT id, name, display_name, chat_status, chat_status_msg, chat_notif_prefs FROM users WHERE id = ?',
+            'SELECT id, name, display_name, chat_status, chat_status_msg, chat_notif_prefs, ui_prefs FROM users WHERE id = ?',
             [me]
         );
         const u = rows[0];
@@ -103,6 +124,7 @@ const updateMySettings = async (req, res) => {
             chatStatus: u.chat_status || 'disponivel',
             chatStatusMsg: u.chat_status_msg || '',
             chatNotifPrefs: parseJson(u.chat_notif_prefs),
+            uiPrefs: parseJson(u.ui_prefs) || {},
         });
     } catch (error) {
         console.error('❌ Erro ao salvar configurações:', error.message);
