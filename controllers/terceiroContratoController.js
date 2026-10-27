@@ -7,7 +7,7 @@ const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { generateContratoPdf } = require('../services/contratoPdfGenerator');
-const { anexarVigente } = require('../utils/contratoAditivos');
+const { anexarVigente, MODOS_CONCLUSAO } = require('../utils/contratoAditivos');
 const { STATUS_ENCERRADOS, veiculoElegivel } = require('../utils/terceirosCusto');
 
 const CONTRATOS_PDF_DIR = path.join(__dirname, '..', 'public', 'uploads', 'contratos');
@@ -173,34 +173,47 @@ const ymdStr = (v) => {
     return String(v).slice(0, 10);
 };
 
-// Retorna [] ou a lista de subgrupos já comprometidos [{ type, contratoId, numero }].
+// Retorna [] ou a lista de subgrupos já comprometidos [{ type, contratoId, numero, concluidoEm? }].
+//
+// Contrato CONCLUÍDO continua dono dos lançamentos até a data de conclusão (é por
+// eles que o saldo final dele é apurado): entra na checagem com a janela fechada
+// em conclusaoData. Um contrato novo com a mesma chave precisa começar depois.
 const subgruposEmConflito = async ({ locadorId, obraId, itens, vigenciaInicio, vigenciaFim, exceptId = null }) => {
     const meus = [...new Set(itens.map((i) => String(i.type || '').trim()).filter(Boolean))];
     if (!locadorId || !obraId) return [];
     const [rows] = await db.query(
-        `SELECT id, numero, itensContratados, vigenciaInicio, vigenciaFim
+        `SELECT id, numero, status, itensContratados, vigenciaInicio, vigenciaFim, conclusaoData
            FROM terceiro_contratos
           WHERE locadorId = ? AND obraId = ?
-            AND status NOT IN (${STATUS_ENCERRADOS.map(() => '?').join(',')})` +
+            AND (status NOT IN (${STATUS_ENCERRADOS.map(() => '?').join(',')})
+                 OR (status = 'concluido' AND conclusaoData IS NOT NULL))` +
         (exceptId ? ' AND id <> ?' : ''),
         exceptId ? [locadorId, obraId, ...STATUS_ENCERRADOS, exceptId] : [locadorId, obraId, ...STATUS_ENCERRADOS]
     );
 
     const out = [];
     rows.forEach((r) => {
-        if (!seCruzam(vigenciaInicio, vigenciaFim, r.vigenciaInicio, r.vigenciaFim)) return;
+        const concluidoEm = r.status === 'concluido' ? ymdStr(r.conclusaoData) : null;
+        if (!seCruzam(vigenciaInicio, vigenciaFim, r.vigenciaInicio, concluidoEm || r.vigenciaFim)) return;
         const outros = normalizeItens(r.itensContratados).map((i) => String(i.type || '').trim());
         // Contrato sem subgrupo declarado (valor fechado sem plano) captura tudo do
         // terceiro naquela obra: não pode conviver com nenhum outro na mesma janela.
         const colide = (meus.length === 0 || outros.length === 0)
             ? [meus.length === 0 ? (outros[0] || '(todos)') : '(todos)']
             : meus.filter((t) => outros.includes(t));
-        colide.forEach((type) => out.push({ type, contratoId: r.id, numero: r.numero }));
+        colide.forEach((type) => out.push({ type, contratoId: r.id, numero: r.numero, concluidoEm }));
     });
     return out;
 };
 
-const erroDeSubgrupo = (conflitos) => ({
+const dataBR = (ymd) => (ymd ? ymd.split('-').reverse().join('/') : '');
+
+const erroDeSubgrupo = (conflitos) => conflitos.every((c) => c.concluidoEm) ? ({
+    error: `O contrato ${conflitos[0].numero} deste terceiro nesta obra, para o mesmo equipamento, foi concluído em `
+        + `${dataBR(conflitos[0].concluidoEm)}. Informe a Vigência início a partir do dia seguinte — antes disso, `
+        + 'horas e diesel pertencem ao contrato concluído.',
+    conflitos,
+}) : ({
     error: 'Já existe contrato vigente deste terceiro nesta obra para o mesmo equipamento.',
     detalhe: 'Horas e diesel são atribuídos por terceiro + obra + subgrupo + data. Dois contratos '
         + 'vigentes com a mesma chave deixariam o lançamento sem destino. Encerre o contrato anterior '
@@ -354,6 +367,9 @@ const createTerceiroContrato = async (req, res) => {
 
     if (!locadorId) return res.status(400).json({ error: 'Terceiro (locador) é obrigatório.' });
     if (!obraId) return res.status(400).json({ error: 'Obra é obrigatória.' });
+    if (status === 'concluido') {
+        return res.status(400).json({ error: 'Cadastre o contrato e use "Concluir contrato" para registrar a conclusão.' });
+    }
 
     const tipoContrato = contractType === 'fechado' ? 'fechado' : 'horas';
     const itens = normalizeItens(itensContratados);
@@ -444,12 +460,19 @@ const updateTerceiroContrato = async (req, res) => {
         // Contrato assinado é imutável: bloqueia edição enquanto houver documento
         // assinado vigente (mesma regra da geração de minuta).
         const [cur] = await db.query(
-            `SELECT contratoAssinadoUrl, obraId, itensContratados, foraDoPlanoRegistradoPor, foraDoPlanoRegistradoEm
+            `SELECT status, contratoAssinadoUrl, obraId, itensContratados, foraDoPlanoRegistradoPor, foraDoPlanoRegistradoEm
                FROM terceiro_contratos WHERE id = ?`, [id]
         );
         if (cur.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         if (cur[0].contratoAssinadoUrl) {
             return res.status(409).json({ error: 'Contrato com versão assinada não pode ser editado. Remova o contrato assinado para editar.' });
+        }
+        // Conclusão tem fluxo próprio (valor final + data): não entra nem sai por edição.
+        if (cur[0].status === 'concluido') {
+            return res.status(409).json({ error: 'Contrato concluído não pode ser editado. Reabra o contrato para editar.' });
+        }
+        if (status === 'concluido') {
+            return res.status(400).json({ error: 'Use "Concluir contrato" para registrar a conclusão e o valor final.' });
         }
         const conflitoSub = await subgruposEmConflito({
             locadorId, obraId, itens: itensFinal, vigenciaInicio, vigenciaFim, exceptId: id,
@@ -501,10 +524,13 @@ const updateTerceiroContrato = async (req, res) => {
 const deleteTerceiroContrato = async (req, res) => {
     const { id } = req.params;
     try {
-        const [cur] = await db.query('SELECT contratoAssinadoUrl FROM terceiro_contratos WHERE id = ?', [id]);
+        const [cur] = await db.query('SELECT status, contratoAssinadoUrl FROM terceiro_contratos WHERE id = ?', [id]);
         if (cur.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
         if (cur[0].contratoAssinadoUrl) {
             return res.status(409).json({ error: 'Contrato com versão assinada não pode ser excluído. Remova o contrato assinado antes.' });
+        }
+        if (cur[0].status === 'concluido') {
+            return res.status(409).json({ error: 'Contrato concluído não pode ser excluído. Reabra o contrato antes.' });
         }
         const [result] = await db.execute('DELETE FROM terceiro_contratos WHERE id = ?', [id]);
         if (result.affectedRows === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
@@ -588,8 +614,9 @@ const enviarContratoAssinado = async (req, res) => {
 
     const cleanup = () => { try { fs.unlinkSync(req.file.path); } catch (_) {} };
     try {
-        const [rows] = await db.query('SELECT id FROM terceiro_contratos WHERE id = ?', [id]);
+        const [rows] = await db.query('SELECT id, status FROM terceiro_contratos WHERE id = ?', [id]);
         if (rows.length === 0) { cleanup(); return res.status(404).json({ error: 'Contrato não encontrado.' }); }
+        const concluido = rows[0].status === 'concluido';
 
         const url = `/uploads/contratos_assinados/${req.file.filename}`;
         const nome = req.file.originalname;
@@ -602,11 +629,12 @@ const enviarContratoAssinado = async (req, res) => {
              VALUES (?, ?, ?, ?, 1, ?)`,
             [randomUUID(), id, url, nome, por]
         );
-        // Espelha o vigente nas colunas do contrato + status 'assinado'.
+        // Espelha o vigente nas colunas do contrato + status 'assinado'. Concluído
+        // segue concluído: o 'assinado' fica guardado para quando for reaberto.
         await db.execute(
             `UPDATE terceiro_contratos
                 SET contratoAssinadoUrl = ?, contratoAssinadoNome = ?, contratoAssinadoEm = CURRENT_TIMESTAMP,
-                    contratoAssinadoPor = ?, status = 'assinado'
+                    contratoAssinadoPor = ?, ${concluido ? "statusAntesConclusao = 'assinado'" : "status = 'assinado'"}
               WHERE id = ?`,
             [url, nome, por, id]
         );
@@ -627,8 +655,9 @@ const enviarContratoAssinado = async (req, res) => {
 const removerContratoAssinado = async (req, res) => {
     const { id } = req.params;
     try {
-        const [rows] = await db.query('SELECT id FROM terceiro_contratos WHERE id = ?', [id]);
+        const [rows] = await db.query('SELECT id, status FROM terceiro_contratos WHERE id = ?', [id]);
         if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+        const concluido = rows[0].status === 'concluido';
 
         // Aditivo só existe sobre contrato assinado: reabrir a base deixaria os
         // aditivos assinados pendurados em um contrato que voltou a ser minuta.
@@ -641,14 +670,15 @@ const removerContratoAssinado = async (req, res) => {
             return res.status(409).json({ error: 'Contrato possui aditivo assinado. Remova os aditivos antes de reabrir o contrato.' });
         }
 
-        const novo = ['ativo', 'concluido', 'cancelado'].includes(req.body?.status) ? req.body.status : 'ativo';
+        // Concluído segue concluído (só volta a ser 'ativo' quando reaberto).
+        const novo = ['ativo', 'cancelado'].includes(req.body?.status) ? req.body.status : 'ativo';
         await db.execute('UPDATE terceiro_contrato_docs SET vigente = 0 WHERE contratoId = ? AND vigente = 1', [id]);
         await db.execute(
             `UPDATE terceiro_contratos
                 SET contratoAssinadoUrl = NULL, contratoAssinadoNome = NULL, contratoAssinadoEm = NULL,
-                    contratoAssinadoPor = NULL, status = ?
+                    contratoAssinadoPor = NULL, ${concluido ? "statusAntesConclusao = 'ativo'" : 'status = ?'}
               WHERE id = ?`,
-            [novo, id]
+            concluido ? [id] : [novo, id]
         );
 
         const [updated] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
@@ -660,6 +690,114 @@ const removerContratoAssinado = async (req, res) => {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Conclusão do contrato
+// ---------------------------------------------------------------------------
+// O serviço pode encerrar antes de bater 100% das horas. Concluir registra a data
+// e o VALOR FINAL, que substitui o valor do contrato no saldo a pagar
+// (calcularVigente): o contratado ('original'), o apurado pelas horas executadas
+// até a data ('apurado' — calculado no frontend, mesma conta da tela) ou um valor
+// livre ('personalizado', com justificativa). O valor é um retrato: lançamentos
+// tardios não o alteram. Horas e diesel posteriores à data deixam de ser do contrato.
+//
+// POST /:id/conclusao { data, modo, valorApurado?, valor?, horasExecutadas?, observacao? }
+const concluirContrato = async (req, res) => {
+    const { id } = req.params;
+    const b = req.body || {};
+    const modo = MODOS_CONCLUSAO.includes(b.modo) ? b.modo : null;
+    if (!modo) return res.status(400).json({ error: 'Escolha como o contrato será concluído.' });
+    const data = /^\d{4}-\d{2}-\d{2}$/.test(String(b.data || '').slice(0, 10)) ? String(b.data).slice(0, 10) : null;
+    if (!data) return res.status(400).json({ error: 'Informe a data de conclusão.' });
+    if (data > ymdStr(new Date())) return res.status(400).json({ error: 'A data de conclusão não pode ser futura.' });
+    const observacao = trim160(b.observacao, 2000);
+
+    try {
+        const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+        const atual = await anexarVigente(db, rows[0]);
+        if (STATUS_ENCERRADOS.includes(atual.status)) {
+            return res.status(409).json({ error: `Contrato ${atual.status === 'concluido' ? 'já concluído' : 'cancelado'}.` });
+        }
+        const inicio = ymdStr(atual.vigenciaInicio);
+        if (inicio && data < inicio) {
+            return res.status(400).json({ error: `A data de conclusão é anterior à vigência início (${dataBR(inicio)}).` });
+        }
+
+        const valorContratado = num(atual.vigente.valorContratado);
+        const apurado = b.valorApurado != null && b.valorApurado !== '' ? num(b.valorApurado) : null;
+        let valor;
+        if (modo === 'original') valor = valorContratado;
+        else if (modo === 'apurado') {
+            if (apurado == null || apurado < 0) return res.status(400).json({ error: 'Valor apurado inválido.' });
+            valor = apurado;
+        } else {
+            if (b.valor == null || b.valor === '' || num(b.valor) < 0) return res.status(400).json({ error: 'Informe o valor final do contrato.' });
+            if (!observacao) return res.status(400).json({ error: 'Valor personalizado: informe a justificativa.' });
+            valor = num(b.valor);
+        }
+        valor = Math.round(valor * 100) / 100;
+
+        await db.execute(
+            `UPDATE terceiro_contratos
+                SET status = 'concluido', statusAntesConclusao = ?,
+                    conclusaoData = ?, conclusaoModo = ?, conclusaoValor = ?,
+                    conclusaoValorContratado = ?, conclusaoValorApurado = ?, conclusaoHorasExecutadas = ?,
+                    conclusaoObservacao = ?, conclusaoRegistradaPor = ?, conclusaoRegistradaEm = CURRENT_TIMESTAMP
+              WHERE id = ?`,
+            [atual.status, data, modo, valor, valorContratado, apurado,
+             b.horasExecutadas != null && b.horasExecutadas !== '' ? num(b.horasExecutadas) : null,
+             observacao, req.user?.email || null, id]
+        );
+        const [updated] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
+        res.json(await anexarVigente(db, updated[0]));
+    } catch (error) {
+        console.error('❌ Erro ao concluir contrato de terceirizado:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao concluir contrato.' });
+    }
+};
+
+// DELETE /:id/conclusao — reabre: volta ao status anterior e o valor/vigência
+// voltam a ser os contratados. Bloqueia se, enquanto concluído, outro contrato
+// assumiu a mesma chave (terceiro × obra × subgrupo) no período.
+const reabrirContrato = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const [rows] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
+        if (rows.length === 0) return res.status(404).json({ error: 'Contrato não encontrado.' });
+        const c = rows[0];
+        if (c.status !== 'concluido') return res.status(409).json({ error: 'Contrato não está concluído.' });
+
+        const conflitos = await subgruposEmConflito({
+            locadorId: c.locadorId, obraId: c.obraId, itens: normalizeItens(c.itensContratados),
+            vigenciaInicio: c.vigenciaInicio, vigenciaFim: c.vigenciaFim, exceptId: id,
+        });
+        if (conflitos.length > 0) {
+            return res.status(409).json({
+                error: `Não é possível reabrir: o contrato ${conflitos[0].numero} já cobre este terceiro, obra e equipamento no período.`,
+                conflitos,
+            });
+        }
+
+        const voltaPara = ['ativo', 'assinado'].includes(c.statusAntesConclusao)
+            ? c.statusAntesConclusao : (c.contratoAssinadoUrl ? 'assinado' : 'ativo');
+        await db.execute(
+            `UPDATE terceiro_contratos
+                SET status = ?, statusAntesConclusao = NULL,
+                    conclusaoData = NULL, conclusaoModo = NULL, conclusaoValor = NULL,
+                    conclusaoValorContratado = NULL, conclusaoValorApurado = NULL, conclusaoHorasExecutadas = NULL,
+                    conclusaoObservacao = NULL, conclusaoRegistradaPor = NULL, conclusaoRegistradaEm = NULL
+              WHERE id = ?`,
+            [voltaPara, id]
+        );
+        const [updated] = await db.query('SELECT * FROM terceiro_contratos WHERE id = ?', [id]);
+        if (req.io) req.io.emit('server:sync', { targets: ['terceiroContratos'] });
+        res.json(await anexarVigente(db, updated[0]));
+    } catch (error) {
+        console.error('❌ Erro ao reabrir contrato de terceirizado:', error.code, '|', error.sqlMessage || error.message);
+        res.status(500).json({ error: 'Erro ao reabrir contrato.' });
+    }
+};
 
 // Histórico de documentos assinados de um contrato (vigente + arquivados).
 // GET /primeiro-lancamento?locadorId&obraId&subgrupos=a,b — prévia, no modal, da
@@ -700,6 +838,8 @@ module.exports = {
     gerarContratoPdf,
     enviarContratoAssinado,
     removerContratoAssinado,
+    concluirContrato,
+    reabrirContrato,
     getContratoDocs,
     getPrimeiroLancamento,
     slugArquivo,

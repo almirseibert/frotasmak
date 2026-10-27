@@ -1120,9 +1120,20 @@ const getPanorama = async (req, res) => {
         const tarifaMedia = horasComTarifa > 0 ? valorAExecutar / horasComTarifa : 0;
 
         // Custo dos contratos de terceiros (valor, diesel abatido, adiantamentos).
+        // Concluído sai da capacidade (não é mais compromisso de horas), mas segue no
+        // DINHEIRO enquanto houver saldo a pagar — valor final da conclusão − diesel −
+        // pagamentos. Mesma regra de `filtrarContratosEmAberto` no frontend.
         let custos = new Map();
+        const concluidosEmAberto = [];
         try {
-            custos = await calcularCustoContratos(db, contratos);
+            const [concluidosRaw] = await db.query(
+                `SELECT * FROM terceiro_contratos WHERE status = 'concluido'`);
+            const concluidos = await anexarVigente(db, concluidosRaw);
+            custos = await calcularCustoContratos(db, [...contratos, ...concluidos]);
+            concluidos.forEach(c => {
+                if (Math.abs(custos.get(String(c.id))?.saldo || 0) >= 0.01) concluidosEmAberto.push(c);
+                else custos.delete(String(c.id));
+            });
         } catch (e) {
             console.warn('⚠️ Panorama: custo de terceiros indisponivel —', e.code || e.message);
         }
@@ -1139,7 +1150,7 @@ const getPanorama = async (req, res) => {
         // o R$/h que a obra paga para a empresa e o R$/h que a empresa paga ao
         // terceiro naquela mesma obra.
         const contratosPorObra = {};
-        contratos.forEach(c => {
+        [...contratos, ...concluidosEmAberto].forEach(c => {
             if (!c.obraId) return;
             (contratosPorObra[c.obraId] = contratosPorObra[c.obraId] || []).push(c);
         });

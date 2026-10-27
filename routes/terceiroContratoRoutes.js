@@ -63,6 +63,10 @@ router.get('/:id/docs', controller.getContratoDocs);
 router.post('/:id/assinado', uploadAssinado.single('file'), controller.enviarContratoAssinado);
 router.delete('/:id/assinado', controller.removerContratoAssinado);
 
+// Conclusão (data + valor final: original, apurado ou personalizado) e reabertura.
+router.post('/:id/conclusao', controller.concluirContrato);
+router.delete('/:id/conclusao', controller.reabrirContrato);
+
 
 // ── Termos aditivos ───────────────────────────────────────────────────────────
 // Só sobre contrato assinado. O delta entra nos números vigentes apenas quando o

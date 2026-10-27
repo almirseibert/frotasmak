@@ -61,7 +61,8 @@ const maquinasDoContrato = (c) => {
 };
 
 const isEncerrado = (c) => STATUS_ENCERRADOS.includes(String(c?.status || 'ativo').toLowerCase());
-const usaListaLegada = (c) => isEncerrado(c) && maquinasDoContrato(c).length > 0;
+// Concluído pelo fluxo de conclusão (conclusaoData) segue derivando — ver frontend.
+const usaListaLegada = (c) => isEncerrado(c) && !c?.conclusaoData && maquinasDoContrato(c).length > 0;
 
 // ─── Derivação máquina ↔ contrato ───────────────────────────────────────────
 // Espelho EXATO de `veiculoElegivelAoContrato` em frontend/src/utils/terceirizados.js.

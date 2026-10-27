@@ -95,6 +95,7 @@ router.post(
 router.post('/:id/allocate-obra', vehicleController.allocateToObra);
 router.post('/:id/deallocate-obra', vehicleController.deallocateFromObra);
 router.post('/:id/estadia-retroativa', vehicleController.registrarEstadiaRetroativa);
+router.get('/:id/leituras-sugeridas', vehicleController.getLeiturasSugeridas);
 router.post('/:id/assign-operational', vehicleController.assignToOperational);
 router.post('/:id/unassign-operational', vehicleController.unassignFromOperational);
 router.post('/:id/start-maintenance', vehicleController.startMaintenance);

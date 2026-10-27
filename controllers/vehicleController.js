@@ -7,6 +7,7 @@ const { openPeriod: openComboioPeriod, closeActivePeriod: closeComboioPeriod } =
 // Item do plano de trabalho desempenhado pela maquina (docs/item-de-contrato-e-substituicao-plano.md)
 const { validarItemKey, consomeHorasDoPlano } = require('../utils/planoItem');
 const { buscarConflitosObra, erroSobreposicao, respostaSobreposicao } = require('../utils/periodosObra');
+const { sugerirLeituras } = require('../utils/leiturasSugeridas');
 // Transições de estado do veículo: a lógica vive no service para poder rodar
 // dentro da transação de outro fluxo (fechamento de relato de ocorrência).
 const {
@@ -194,11 +195,35 @@ const updateVehicle = async (req, res) => {
     if (data.operationalAssignment) data.operationalAssignment = JSON.stringify(data.operationalAssignment);
 
     const fields = Object.keys(data).filter(key => key !== 'id' && ALLOWED_VEHICLE_FIELDS.has(key));
+    if (fields.length === 0) return res.status(400).json({ error: 'Nenhum dado para atualizar.' });
+
+    // Inativar/reativar registra autor e data: o botão da tela de Veículos é o
+    // único caminho que mexe em `ativo`, e sem rastro não havia como saber quem
+    // tirava terceiros de circulação. Só registra quando o valor de fato muda.
+    let mudancaAtivo = null;
+    if ('ativo' in data) {
+        const novoAtivo = (data.ativo === true || data.ativo == 1) ? 1 : 0;
+        try {
+            const [cur] = await db.query('SELECT ativo FROM vehicles WHERE id = ?', [id]);
+            const atualAtivo = cur[0] && cur[0].ativo == 0 ? 0 : 1; // NULL conta como ativo
+            if (cur[0] && atualAtivo !== novoAtivo) {
+                const [u] = await db.query('SELECT name FROM users WHERE id = ?', [req.user?.id]);
+                mudancaAtivo = {
+                    ativo: novoAtivo,
+                    userName: u[0]?.name || req.user?.email || null,
+                };
+                data.ativoAlteradoEm = new Date();
+                data.ativoAlteradoPor = mudancaAtivo.userName;
+                fields.push('ativoAlteradoEm', 'ativoAlteradoPor');
+            }
+        } catch (e) {
+            console.warn('[updateVehicle] autoria de ativo falhou —', e.code || e.message);
+        }
+    }
+
     const values = fields.map(field => data[field]);
     const setClause = fields.map(field => `\`${field}\` = ?`).join(', ');
     const query = `UPDATE vehicles SET ${setClause} WHERE id = ?`;
-
-    if (fields.length === 0) return res.status(400).json({ error: 'Nenhum dado para atualizar.' });
 
     // Na edição o corpo é parcial: só barra quando a requisição de fato deixa o
     // veículo terceirizado sem locador — seja marcando a flag agora, seja apagando
@@ -220,6 +245,16 @@ const updateVehicle = async (req, res) => {
 
     try {
         await db.execute(query, [...values, id]);
+        if (mudancaAtivo) {
+            try {
+                await db.query(
+                    'INSERT INTO vehicle_ativo_log (vehicleId, ativo, userId, userName, userEmail) VALUES (?, ?, ?, ?, ?)',
+                    [id, mudancaAtivo.ativo, req.user?.id ?? null, mudancaAtivo.userName, req.user?.email || null]
+                );
+            } catch (e) {
+                console.warn('⚠️ [updateVehicle] vehicle_ativo_log:', e.message);
+            }
+        }
         // Sincroniza o partner espelho do comboio conforme a flag enviada.
         // Se ela não foi tocada nesta requisição, não fazemos nada (preserva estado atual).
         if ('isComboioVehicle' in data) {
@@ -539,6 +574,22 @@ const deallocateFromObra = async (req, res) => {
 // da obra atual (Obra A). Faz o "split": fecha a A na saída p/ B, insere a
 // estadia fechada em B, e reabre um novo período da A a partir da volta.
 // Comboio está fora de escopo (não mexe em comboio_periodos_obra).
+// Leituras de partida/volta sugeridas para uma estadia retroativa [de, ate]
+// (ver utils/leiturasSugeridas.js).
+const getLeiturasSugeridas = async (req, res) => {
+    const { de, ate, tipo, horas } = req.query;
+    const ymd = /^\d{4}-\d{2}-\d{2}$/;
+    if (!ymd.test(de || '') || !ymd.test(ate || '') || de > ate) {
+        return res.status(400).json({ error: 'Informe de e ate no formato AAAA-MM-DD.' });
+    }
+    try {
+        res.json(await sugerirLeituras(db, req.params.id, de, ate, tipo === 'odometro' ? 'odometro' : 'horimetro', Number(horas) || null));
+    } catch (error) {
+        console.error('❌ Erro ao sugerir leituras:', error);
+        res.status(500).json({ error: 'Falha ao sugerir leituras.' });
+    }
+};
+
 const registrarEstadiaRetroativa = async (req, res) => {
     const { id } = req.params;
     const {
@@ -569,8 +620,10 @@ const registrarEstadiaRetroativa = async (req, res) => {
     if (isNaN(entradaB.getTime()) || isNaN(saidaB.getTime())) {
         return res.status(400).json({ error: 'Datas inválidas.' });
     }
-    if (entradaB >= saidaB) {
-        return res.status(400).json({ error: 'A data de entrada em B deve ser anterior à data de saída.' });
+    // Entrada = saída é a estadia de um dia só (mesma regra da troca no mesmo
+    // dia em utils/periodosObra.js: o dia conta como alocado, sem colidir).
+    if (entradaB > saidaB) {
+        return res.status(400).json({ error: 'A data de entrada em B não pode ser depois da data de saída.' });
     }
     if (saidaB > new Date()) {
         return res.status(400).json({ error: 'A data de saída não pode estar no futuro.' });
@@ -1172,6 +1225,7 @@ const bulkSetSubTipo = async (req, res) => {
 };
 
 module.exports = {
+    getLeiturasSugeridas,
     getAllVehicles,
     getVehicleById,
     createVehicle,

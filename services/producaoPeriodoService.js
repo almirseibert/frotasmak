@@ -26,6 +26,7 @@ const db = require('../database');
 const { diaCivil } = require('../utils/periodosObra');
 const { loadHolidaySet, businessDayList, HOLIDAY_REGIOES } = require('../utils/businessDays');
 const { TIPOS_EXCLUIDOS_PRODUTIVOS } = require('../utils/tiposProdutivos');
+const { acaoDoTrecho } = require('../utils/acaoHorasSemAlocacao');
 
 const r1 = (v) => Math.round(v * 10) / 10;
 
@@ -76,7 +77,7 @@ const grupoDoVeiculo = (v) => (v.sub_tipo && String(v.sub_tipo).trim()) || v.tip
  *
  * @param {object} p
  * @param {string} p.start, p.end            'YYYY-MM-DD'
- * @param {Array}  p.logs        {vehicleId, obraId, date:'YYYY-MM-DD', totalHours}
+ * @param {Array}  p.logs        {vehicleId, obraId, employeeId, date:'YYYY-MM-DD', totalHours}
  * @param {Array}  p.estadias    {veiculoId, obraId, dataEntrada, dataSaida} (qualquer formato aceito por diaCivil)
  * @param {Map}    p.veiculos    id → {id, registroInterno, placa, marca, modelo, tipo, sub_tipo, isOutsourced, locadora}
  * @param {Map}    p.obras       id → {id, nome, orgao_contratante, regiao}
@@ -133,10 +134,11 @@ const calcularProducao = ({ start, end, logs, estadias, veiculos, obras, feriado
             m.horasAlocadas += h;
         } else if (h > 0) {
             const k = `${vid}|${oid}`;
-            if (!semAloc.has(k)) semAloc.set(k, { vehicleId: vid, obraId: oid, horas: 0, dias: new Set() });
+            if (!semAloc.has(k)) semAloc.set(k, { vehicleId: vid, obraId: oid, horas: 0, dias: new Map(), operadores: new Map() });
             const s = semAloc.get(k);
             s.horas += h;
-            s.dias.add(l.date);
+            s.dias.set(l.date, (s.dias.get(l.date) || 0) + h);
+            if (l.employeeId) s.operadores.set(String(l.employeeId), (s.operadores.get(String(l.employeeId)) || 0) + 1);
         }
     }
 
@@ -275,21 +277,43 @@ const calcularProducao = ({ start, end, logs, estadias, veiculos, obras, feriado
         .sort((a, b) => (b.proprio.horas + b.terceiro.horas) - (a.proprio.horas + a.terceiro.horas));
 
     // ── Sem alocação (aviso de cadastro) ─────────────────────────────────────
-    const semAlocacao = [...semAloc.values()]
-        .map(s => {
-            const mm = maquinaPorId.get(s.vehicleId) || {};
-            return {
+    // Uma linha por trecho: dias lançados seguidos sem nenhuma estadia da máquina
+    // no meio. Cada trecho vira uma estadia retroativa [primeiro, último dia] sem
+    // colidir com as estadias que já existem entre um trecho e outro.
+    const semAlocacao = [];
+    for (const s of semAloc.values()) {
+        const mm = maquinaPorId.get(s.vehicleId) || {};
+        const alocados = [...(aloc.get(s.vehicleId)?.dias || [])];
+        const operadorId = [...s.operadores.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+        const dias = [...s.dias.keys()].sort();
+        let trecho = null;
+        const fechar = () => {
+            if (!trecho) return;
+            semAlocacao.push({
                 vehicleId: s.vehicleId,
                 registroInterno: mm.registroInterno || null,
                 placa: mm.placa || null,
                 origem: mm.origem || 'proprio',
                 obraId: s.obraId,
                 obraNome: rotuloObra(obras.get(s.obraId)),
-                horas: r1(s.horas),
-                dias: s.dias.size,
-            };
-        })
-        .sort((a, b) => b.horas - a.horas);
+                horas: r1(trecho.horas),
+                dias: trecho.dias,
+                primeiroDia: trecho.de,
+                ultimoDia: trecho.ate,
+                operadorId,
+            });
+            trecho = null;
+        };
+        for (const d of dias) {
+            if (trecho && alocados.some(a => a > trecho.ate && a < d)) fechar();
+            if (!trecho) trecho = { de: d, ate: d, horas: 0, dias: 0 };
+            trecho.ate = d;
+            trecho.horas += s.dias.get(d);
+            trecho.dias += 1;
+        }
+        fechar();
+    }
+    semAlocacao.sort((a, b) => b.horas - a.horas);
 
     // ── Resumo ───────────────────────────────────────────────────────────────
     const horasTotal = porMaquina.reduce((s, m) => s + m.horas, 0);
@@ -337,7 +361,7 @@ const producaoPeriodo = async (start, end) => {
     const anterior = periodoAnterior(start, end);
 
     const [logs] = await db.query(
-        `SELECT vehicleId, obraId, DATE_FORMAT(date, '%Y-%m-%d') AS date, totalHours
+        `SELECT vehicleId, obraId, employeeId, DATE_FORMAT(date, '%Y-%m-%d') AS date, totalHours
            FROM daily_work_logs
           WHERE date BETWEEN ? AND ? AND ${FILTRO_LOG}`,
         [start, end]
@@ -385,10 +409,47 @@ const producaoPeriodo = async (start, end) => {
     const feriados = { nacional: await loadHolidaySet(db) };
     for (const regiao of HOLIDAY_REGIOES) feriados[regiao] = await loadHolidaySet(db, { regiao });
 
-    return calcularProducao({
+    const resultado = calcularProducao({
         start, end, logs, estadias, veiculos, obras, feriados,
         horasAnterior: Number(prev.horas) || 0,
     });
+    await anexarAcoes(resultado.semAlocacao, start);
+    return resultado;
+};
+
+/**
+ * Para cada trecho sem alocação, a correção sugerida (utils/acaoHorasSemAlocacao.js).
+ * Olha o histórico inteiro do veículo e os lançamentos até hoje — a estadia a
+ * estender pode ter terminado antes do período e o último dia na obra pode
+ * estar depois dele.
+ */
+const anexarAcoes = async (semAlocacao, start) => {
+    const comObra = semAlocacao.filter(s => s.obraId);
+    if (!comObra.length) return;
+    const vids = [...new Set(comObra.map(s => s.vehicleId))];
+    const [hist] = await db.query(
+        `SELECT h.id, h.veiculoId, h.obraId, h.dataEntrada, h.dataSaida, o.nome, o.orgao_contratante
+           FROM obras_historico_veiculos h LEFT JOIN obras o ON o.id = h.obraId
+          WHERE h.veiculoId IN (?)`,
+        [vids]
+    );
+    const [pres] = await db.query(
+        `SELECT vehicleId, obraId, DATE_FORMAT(date, '%Y-%m-%d') AS dia
+           FROM daily_work_logs WHERE vehicleId IN (?) AND date >= ?`,
+        [vids, shiftYmd(start, -120)]
+    );
+    const hoje = diaCivil(new Date(Date.now() - 3 * 3600 * 1000));
+    for (const s of comObra) {
+        const estadias = hist
+            .filter(h => String(h.veiculoId) === s.vehicleId && diaCivil(h.dataEntrada))
+            .map(h => ({ id: h.id, obraId: String(h.obraId), inicio: diaCivil(h.dataEntrada), fim: diaCivil(h.dataSaida), obraNome: rotuloObra({ nome: h.nome, orgao_contratante: h.orgao_contratante }) }));
+        const presenca = pres.filter(l => String(l.vehicleId) === s.vehicleId && l.obraId).map(l => ({ dia: l.dia, obraId: String(l.obraId) }));
+        const acao = acaoDoTrecho({ trecho: s, estadias, presenca, hoje });
+        if (acao) {
+            const { proxima, ...resto } = acao;
+            s.acao = { ...resto, proxima: proxima ? { obraNome: proxima.obraNome, inicio: proxima.inicio } : null };
+        }
+    }
 };
 
 module.exports = { producaoPeriodo, calcularProducao, periodoAnterior };

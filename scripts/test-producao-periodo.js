@@ -77,6 +77,20 @@ check('B: lançou até o fim → não é parada', m('B').paradaAlocada, false);
 check('Resumo: paradas alocadas por origem', r.resumo.paradasAlocadas, { proprio: 2, terceiro: 0, dias: 42 });
 check('L: veículo leve alocado sem horas fica fora', m('L'), undefined);
 check('Sem alocação: 14h da T na obra 2', r.semAlocacao.map(s => [s.vehicleId, s.horas, s.dias]), [['T', 14, 2]]);
+check('Sem alocação: trecho com datas para a estadia retroativa', [r.semAlocacao[0].primeiroDia, r.semAlocacao[0].ultimoDia], ['2026-09-17', '2026-09-18']);
+
+// X lançou na obra 2 antes e depois de uma estadia na obra 1: são dois trechos
+// (uma estadia só de 08 a 16 colidiria com a da obra 1).
+const rx = calcularProducao({
+    start: START, end: END, veiculos: new Map([['X', { id: 'X', tipo: 'Escavadeira', isOutsourced: 0 }]]), obras, feriados,
+    estadias: [{ veiculoId: 'X', obraId: '1', dataEntrada: '2026-09-10', dataSaida: '2026-09-12' }],
+    logs: ['08', '09', '15', '16'].map(d => ({ vehicleId: 'X', obraId: '2', employeeId: d === '16' ? 'E2' : 'E1', date: `2026-09-${d}`, totalHours: 5 })),
+});
+check('Sem alocação: estadia no meio divide em dois trechos',
+    rx.semAlocacao.map(s => [s.primeiroDia, s.ultimoDia, s.horas, s.dias]).sort(),
+    [['2026-09-08', '2026-09-09', 10, 2], ['2026-09-15', '2026-09-16', 10, 2]]);
+check('Sem alocação: operador sugerido é o que mais lançou', rx.semAlocacao.map(s => s.operadorId), ['E1', 'E1']);
+
 check('Resumo: total 280h', r.resumo.horasTotal, 280);
 check('Resumo: terceiro 86h', r.resumo.horasTerceiro, 86);
 check('Resumo: delta vs 100h anterior', r.resumo.deltaPct, 180);

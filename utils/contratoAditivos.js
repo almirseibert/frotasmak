@@ -33,7 +33,35 @@ const parseItens = (v) => {
         });
 };
 
-const TIPOS_ADITIVO = ['acrescimo', 'supressao', 'prazo', 'reajuste', 'escopo'];
+// O driver devolve DATE como objeto Date: String(d).slice(0, 10) daria "Wed Mar 11".
+const ymd = (d) => {
+    if (!d) return null;
+    if (d instanceof Date) {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+    return String(d).slice(0, 10);
+};
+
+const MODOS_CONCLUSAO = ['original', 'apurado', 'personalizado'];
+
+// Bloco `conclusao` do contrato concluído (null nos demais). Concluído sem valor
+// gravado (anterior ao registro da conclusão) não muda número nenhum.
+const conclusaoDoContrato = (contrato) => {
+    if (contrato?.status !== 'concluido' || contrato.conclusaoValor == null || !contrato.conclusaoData) return null;
+    return {
+        data: ymd(contrato.conclusaoData),
+        modo: contrato.conclusaoModo,
+        valor: num(contrato.conclusaoValor),
+        valorContratado: contrato.conclusaoValorContratado == null ? null : num(contrato.conclusaoValorContratado),
+        valorApurado: contrato.conclusaoValorApurado == null ? null : num(contrato.conclusaoValorApurado),
+        horasExecutadas: contrato.conclusaoHorasExecutadas == null ? null : num(contrato.conclusaoHorasExecutadas),
+        observacao: contrato.conclusaoObservacao || null,
+        registradaPor: contrato.conclusaoRegistradaPor || null,
+        registradaEm: contrato.conclusaoRegistradaEm || null,
+    };
+};
+
+const TIPOS_ADITIVO =['acrescimo', 'supressao', 'prazo', 'reajuste', 'escopo'];
 
 // Aditivo com documento assinado (status 'assinado' + assinadoUrl) — imutável.
 const aditivoVigente = (a) => a && a.status === 'assinado' && !!a.assinadoUrl;
@@ -77,19 +105,29 @@ const calcularVigente = (contrato, aditivos = []) => {
     const valorDelta = validos.reduce((a, x) => a + num(x.valorDelta), 0);
 
     const horasContratadas = horasBase + horasDelta;
-    const valorTotal = valorBase + valorDelta;
+    const valorContratado = valorBase + valorDelta;
 
     // Última data de vigência estipulada por aditivo (prazo/escopo),
     // na ordem de sequência; sem aditivo de prazo, mantém a do contrato.
-    const vigenciaFim = validos
+    const vigenciaContratada = validos
         .filter((a) => a.novaVigenciaFim)
         .reduce((acc, a) => a.novaVigenciaFim, contrato.vigenciaFim);
+
+    // Concluído: o valor do contrato passa a ser o escolhido na conclusão e a
+    // janela de apuração (horas e diesel) fecha na data de conclusão.
+    const conclusao = conclusaoDoContrato(contrato);
+    const valorTotal = conclusao ? conclusao.valor : valorContratado;
+    const fimContratado = ymd(vigenciaContratada);
+    const vigenciaFim = conclusao && (!fimContratado || conclusao.data < fimContratado)
+        ? conclusao.data : vigenciaContratada;
 
     return {
         horasContratadas,
         valorTotal,
+        valorContratado,
+        conclusao,
         valorHora: horasContratadas > 0 && contrato.contractType !== 'fechado'
-            ? Math.round((valorTotal / horasContratadas) * 100) / 100
+            ? Math.round((valorContratado / horasContratadas) * 100) / 100
             : num(contrato.valorHora),
         itensContratados: itens,
         vigenciaFim,
@@ -128,7 +166,10 @@ const anexarVigente = async (db, contratos) => {
 
 module.exports = {
     num,
+    ymd,
     parseItens,
+    MODOS_CONCLUSAO,
+    conclusaoDoContrato,
     TIPOS_ADITIVO,
     aditivoVigente,
     aditivoConta,

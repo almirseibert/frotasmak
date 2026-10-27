@@ -1196,6 +1196,23 @@ const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel')
         await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoVigenciaInicio DATE DEFAULT NULL`, 'vehicles.locacaoVigenciaInicio');
         await addColumn(`ALTER TABLE vehicles ADD COLUMN locacaoVigenciaFim DATE DEFAULT NULL`, 'vehicles.locacaoVigenciaFim');
 
+        // Autoria da última inativação/reativação — sem isso não havia como saber
+        // quem tirou um veículo de circulação. Histórico completo em vehicle_ativo_log.
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN ativoAlteradoEm DATETIME DEFAULT NULL`, 'vehicles.ativoAlteradoEm');
+        await addColumn(`ALTER TABLE vehicles ADD COLUMN ativoAlteradoPor VARCHAR(255) DEFAULT NULL`, 'vehicles.ativoAlteradoPor');
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS vehicle_ativo_log (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                vehicleId   VARCHAR(255) NOT NULL,
+                ativo       TINYINT(1)   NOT NULL,
+                userId      VARCHAR(64)  DEFAULT NULL,
+                userName    VARCHAR(255) DEFAULT NULL,
+                userEmail   VARCHAR(255) DEFAULT NULL,
+                created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_vatlog_vehicle (vehicleId, created_at)
+            )
+        `);
+
         await db.query(`
             CREATE TABLE IF NOT EXISTS terceirizado_pagamentos (
                 id               VARCHAR(36)  PRIMARY KEY,
@@ -1319,6 +1336,32 @@ const { carimbarChavesExistentes } = require('./utils/despesaMensalCombustivel')
             { column: 'contratoAssinadoPor',  def: 'VARCHAR(255) DEFAULT NULL' },
         ];
         for (const { column, def } of colunasAssinado) {
+            try {
+                await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN ${column} ${def}`);
+            } catch (err) {
+                if (err.code !== 'ER_DUP_FIELDNAME') throw err;
+            }
+        }
+        // Conclusão do contrato (status 'concluido'). O serviço pode terminar antes de
+        // bater 100% das horas: o usuário escolhe o valor final — o contratado
+        // ('original'), o apurado pelas horas executadas ('apurado') ou um valor
+        // livre ('personalizado'). conclusaoValor passa a ser o valor do contrato
+        // (utils/contratoAditivos.calcularVigente) e conclusaoData fecha a janela de
+        // apuração. Os demais campos são o retrato do momento, para auditoria.
+        const colunasConclusao = [
+            { column: 'conclusaoData',             def: 'DATE DEFAULT NULL' },
+            { column: 'conclusaoModo',             def: 'VARCHAR(20) DEFAULT NULL' },
+            { column: 'conclusaoValor',            def: 'DECIMAL(14,2) DEFAULT NULL' },
+            { column: 'conclusaoValorContratado',  def: 'DECIMAL(14,2) DEFAULT NULL' },
+            { column: 'conclusaoValorApurado',     def: 'DECIMAL(14,2) DEFAULT NULL' },
+            { column: 'conclusaoHorasExecutadas',  def: 'DECIMAL(12,2) DEFAULT NULL' },
+            { column: 'conclusaoObservacao',       def: 'TEXT DEFAULT NULL' },
+            { column: 'conclusaoRegistradaPor',    def: 'VARCHAR(255) DEFAULT NULL' },
+            { column: 'conclusaoRegistradaEm',     def: 'TIMESTAMP NULL DEFAULT NULL' },
+            // Status de antes da conclusão ('ativo' | 'assinado'), devolvido ao reabrir.
+            { column: 'statusAntesConclusao',      def: 'VARCHAR(20) DEFAULT NULL' },
+        ];
+        for (const { column, def } of colunasConclusao) {
             try {
                 await db.query(`ALTER TABLE terceiro_contratos ADD COLUMN ${column} ${def}`);
             } catch (err) {
