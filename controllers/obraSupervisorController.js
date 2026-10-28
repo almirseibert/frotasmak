@@ -941,6 +941,56 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
         ...passaramPelaObra.map(v => linhaVeiculo(v, false)),
     ].sort((a, b) => a.aproveitamento - b.aproveitamento);
 
+    // 7) Terceiros da obra — FORA do aproveitamento (que mede a ociosidade da
+    // frota MAK), mas a Ficha da Obra precisa mostrá-los: obra tocada só com
+    // locados aparecia "sem máquina" ali enquanto o Gerenciar listava todas.
+    // Mesmo recorte da frota própria: alocados hoje + os que já saíram mas
+    // apontaram horas aqui no período. Capacidade 0 → aproveitamento "—".
+    let terceiros = [];
+    if (!isGeral) {
+        const [tercVehicles] = await db.query(`
+            SELECT v.id, v.modelo, v.registroInterno, v.placa, v.tipo, v.status, v.obraAtualId,
+                   SUM(CASE WHEN l.date BETWEEN ? AND ? THEN l.totalHours ELSE 0 END) AS horas
+            FROM vehicles v
+            LEFT JOIN daily_work_logs l ON l.vehicleId = v.id AND l.obraId = ?
+            WHERE v.isOutsourced = 1
+              AND v.tipo NOT IN (${TIPOS_EXCLUIDOS_PRODUTIVOS.map(() => '?').join(',')})
+              AND (v.ativo IS NULL OR v.ativo != 0)
+              AND (v.status IS NULL OR v.status != 'Sucata')
+              AND (v.obraAtualId = ? OR l.id IS NOT NULL)
+            GROUP BY v.id
+        `, [startDate, endDate, obraId, ...TIPOS_EXCLUIDOS_PRODUTIVOS, obraId]);
+
+        const alocado = (v) => String(v.obraAtualId) === String(obraId);
+        const outrasObras = Array.from(new Set(tercVehicles
+            .filter(v => !alocado(v) && v.obraAtualId && !obraNomeMap.has(String(v.obraAtualId)))
+            .map(v => String(v.obraAtualId))));
+        if (outrasObras.length) {
+            const [rows] = await db.query(`SELECT id, nome FROM obras WHERE id IN (${outrasObras.map(() => '?').join(',')})`, outrasObras);
+            rows.forEach(r => obraNomeMap.set(String(r.id), r.nome));
+        }
+
+        terceiros = tercVehicles
+            .filter(v => alocado(v) || (parseFloat(v.horas) || 0) > 0)
+            .map(v => ({
+                id: v.id,
+                registroInterno: v.registroInterno,
+                placa: v.placa || null,
+                modelo: v.modelo,
+                tipo: v.tipo,
+                estado: 'terceiro',
+                isOutsourced: true,
+                alocadaAtualmente: alocado(v),
+                obraId: v.obraAtualId ? String(v.obraAtualId) : null,
+                obraNome: v.obraAtualId ? (obraNomeMap.get(String(v.obraAtualId)) || '—') : '—',
+                capPeriodo: 0,
+                horas_executadas: parseFloat(v.horas) || 0,
+                aproveitamento: null, // null = sem régua; ordena por último no detalhe
+                horas_perdidas: 0,
+            }))
+            .sort((a, b) => b.horas_executadas - a.horas_executadas);
+    }
+
     return {
         range: { startDate, endDate, diasTotais, diasUteis },
         summary: {
@@ -959,6 +1009,7 @@ async function _computeAnalyticsCore(obraId, startDate, endDate) {
         frotaPorTipo: frotaPorTipoArr,
         porObra,
         porVeiculo,
+        terceiros,
     };
 }
 
