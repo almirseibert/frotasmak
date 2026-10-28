@@ -69,8 +69,11 @@ const carregarTerceirosPorObra = async () => {
 exports.getDashboardData = async (req, res) => {
     try {
         // Fase 2.8 — centros de custo NÃO entram em faturamento/dashboard de produtividade
+        // Obra em mobilização (máquina já alocada, sem 1º lançamento) também entra:
+        // já tem contrato e equipamento parado custando — escondê-la era a regra
+        // antiga de "só 'ativa'", anterior ao ciclo radar → planejada → mobilizacao.
         const [allObras] = await db.query(
-            "SELECT * FROM obras WHERE status = 'ativa' AND (tipo_registro IS NULL OR tipo_registro != 'centro_custo') ORDER BY nome ASC"
+            "SELECT * FROM obras WHERE status IN ('ativa', 'mobilizacao') AND (tipo_registro IS NULL OR tipo_registro != 'centro_custo') ORDER BY nome ASC"
         );
         
         let contracts = [];
@@ -110,8 +113,10 @@ exports.getDashboardData = async (req, res) => {
             let diasRestantes = 0;
             let previsaoTermino = null;
 
-            // Só calcula previsão se não estiver oculto e tiver saldo/capacidade
-            if (!isHidden && saldoHoras > 0 && capacidadeDiariaCanteiro > 0) {
+            // Só calcula previsão se não estiver oculto e tiver saldo/capacidade.
+            // Em mobilização não há ritmo real ainda — previsão seria chute.
+            const emMobilizacao = obra.status === 'mobilizacao';
+            if (!isHidden && !emMobilizacao && saldoHoras > 0 && capacidadeDiariaCanteiro > 0) {
                 diasRestantes = Math.ceil(saldoHoras / capacidadeDiariaCanteiro);
                 previsaoTermino = addBusinessDays(new Date(), diasRestantes);
             }
@@ -128,6 +133,7 @@ exports.getDashboardData = async (req, res) => {
             return {
                 id: obraId,
                 nome: obra.nome,
+                status: obra.status,
                 dataInicio: obra.dataInicio, 
                 responsavel: contract.responsavel_nome || obra.responsavel || 'A Definir',
                 orgao_contratante: obra.orgao_contratante || null,
@@ -158,10 +164,14 @@ exports.getDashboardData = async (req, res) => {
         // ORDENAÇÃO AVANÇADA: 
         // 1. Obras Críticas (Aditivo/Prazo Curto) primeiro
         // 2. Obras Normais por Data de Término (Mais próxima primeiro)
-        // 3. Obras Ocultas/Centro de Custo por último
+        // 3. Obras em mobilização (ainda sem lançamento)
+        // 4. Obras Ocultas/Centro de Custo por último
         dashboardData.sort((a, b) => {
             if (a.kpi.is_hidden && !b.kpi.is_hidden) return 1;
             if (!a.kpi.is_hidden && b.kpi.is_hidden) return -1;
+            const aMob = a.status === 'mobilizacao', bMob = b.status === 'mobilizacao';
+            if (aMob && !bMob) return 1;
+            if (!aMob && bMob) return -1;
             if (a.kpi.is_critical && !b.kpi.is_critical) return -1;
             if (!a.kpi.is_critical && b.kpi.is_critical) return 1;
             if (a.previsao.data_termino_estimada && b.previsao.data_termino_estimada) {
@@ -517,7 +527,7 @@ exports.getAllocationForecast = async (req, res) => {
             SELECT v.id, v.placa, v.modelo, v.tipo, v.obraAtualId, o.nome as nome_obra, v.operationalAssignment
             FROM vehicles v
             JOIN obras o ON v.obraAtualId = o.id
-            WHERE o.status = 'ativa'
+            WHERE o.status IN ('ativa', 'mobilizacao')
         `);
 
         const [obrasStats] = await db.query(`
@@ -529,7 +539,7 @@ exports.getAllocationForecast = async (req, res) => {
                 (SELECT SUM(totalHours) FROM daily_work_logs WHERE obraId = o.id) as executed
             FROM obras o
             LEFT JOIN obra_contracts oc ON o.id = oc.obra_id
-            WHERE o.status = 'ativa'
+            WHERE o.status IN ('ativa', 'mobilizacao')
               AND (o.tipo_registro IS NULL OR o.tipo_registro != 'centro_custo')
         `);
 
@@ -548,15 +558,18 @@ exports.getAllocationForecast = async (req, res) => {
             let saldo = totalHoras - executado;
             let diasRestantes = (saldo > 0 && ritmoDiario > 0) ? Math.ceil(saldo / ritmoDiario) : 0;
             
+            // Sem ritmo (obra em mobilização, ainda sem lançamento) não há como
+            // projetar a saída — antes caía em "hoje", que lia como "libera já".
+            const semRitmo = saldo > 0 && ritmoDiario <= 0;
             obraMap[o.id] = {
                 saldo,
                 ritmoDiario,
-                previsaoSaida: addBusinessDays(new Date(), diasRestantes)
+                previsaoSaida: semRitmo ? null : addBusinessDays(new Date(), diasRestantes)
             };
         }
 
         const allocationList = vehicles.map(v => {
-            const obraStat = obraMap[v.obraAtualId] || { previsaoSaida: new Date() };
+            const obraStat = obraMap[v.obraAtualId] || { previsaoSaida: null };
             
             let nextMission = {};
             try { if(v.operationalAssignment) nextMission = v.operationalAssignment.next_mission || {}; } catch(e){}
@@ -576,7 +589,12 @@ exports.getAllocationForecast = async (req, res) => {
             };
         });
 
-        allocationList.sort((a, b) => new Date(a.previsao_liberacao) - new Date(b.previsao_liberacao));
+        // Sem previsão vai para o fim da lista.
+        allocationList.sort((a, b) => {
+            if (!a.previsao_liberacao) return b.previsao_liberacao ? 1 : 0;
+            if (!b.previsao_liberacao) return -1;
+            return new Date(a.previsao_liberacao) - new Date(b.previsao_liberacao);
+        });
 
         res.json(allocationList);
 

@@ -8,6 +8,11 @@ const db         = require('../database');
 const whatsappService = require('./whatsappService');
 const { todayBRT } = require('../utils/dateBRT');
 
+// Status de obra oferecidos no menu do bot. A lista antiga ('Em Andamento',
+// 'Planejada','Ativa','ativo') era anterior ao ciclo radar → planejada →
+// mobilizacao → ativa e deixava de fora obra em mobilização (máquina já lá).
+const OBRA_STATUS_MENU = "('planejada','mobilizacao','ativa')";
+
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const SESSION_TIMEOUT_MIN = 30;
@@ -532,7 +537,7 @@ async function exibirMenuObra(session, from) {
             `SELECT DISTINCT o.id, o.nome FROM obras o
              INNER JOIN obras_historico_veiculos h ON h.obraId = o.id
              WHERE h.veiculoId = ? AND h.dataSaida IS NULL
-               AND o.status IN ('Em Andamento','Planejada','Ativa','ativo')
+               AND o.status IN ${OBRA_STATUS_MENU}
              ORDER BY o.nome`,
             [veiculoId]
         );
@@ -540,7 +545,7 @@ async function exibirMenuObra(session, from) {
     }
     if (!obras.length) {
         const [rows] = await db.query(
-            `SELECT id, nome FROM obras WHERE status IN ('Em Andamento','Planejada','Ativa','ativo') ORDER BY nome LIMIT 25`
+            `SELECT id, nome FROM obras WHERE status IN ${OBRA_STATUS_MENU} ORDER BY nome LIMIT 25`
         );
         obras = rows;
     }
@@ -686,7 +691,7 @@ async function avancarParaObra(session, from) {
             `SELECT DISTINCT o.id, o.nome FROM obras o
              INNER JOIN obras_historico_veiculos h ON h.obraId = o.id
              WHERE h.veiculoId = ? AND h.dataSaida IS NULL
-               AND o.status IN ('Em Andamento','Planejada','Ativa','ativo')
+               AND o.status IN ${OBRA_STATUS_MENU}
              ORDER BY o.nome`,
             [veiculoId]
         );
@@ -694,7 +699,7 @@ async function avancarParaObra(session, from) {
     }
     if (!obras.length) {
         const [rows] = await db.query(
-            `SELECT id, nome FROM obras WHERE status IN ('Em Andamento','Planejada','Ativa','ativo') ORDER BY nome LIMIT 25`
+            `SELECT id, nome FROM obras WHERE status IN ${OBRA_STATUS_MENU} ORDER BY nome LIMIT 25`
         );
         obras = rows;
     }
@@ -853,7 +858,7 @@ async function handleObra(session, from, body) {
             `SELECT DISTINCT o.id, o.nome FROM obras o
              INNER JOIN obras_historico_veiculos h ON h.obraId = o.id
              WHERE h.veiculoId = ? AND h.dataSaida IS NULL
-               AND o.status IN ('Em Andamento','Planejada','Ativa','ativo')
+               AND o.status IN ${OBRA_STATUS_MENU}
              ORDER BY o.nome`,
             [veiculoId]
         );
@@ -861,7 +866,7 @@ async function handleObra(session, from, body) {
     }
     if (!obras.length) {
         const [rows] = await db.query(
-            `SELECT id, nome FROM obras WHERE status IN ('Em Andamento','Planejada','Ativa','ativo') ORDER BY nome`
+            `SELECT id, nome FROM obras WHERE status IN ${OBRA_STATUS_MENU} ORDER BY nome`
         );
         obras = rows;
     }
