@@ -56,6 +56,23 @@ const EVENT_CATALOG = [
             '• Combustível: {{combustivel}}',
     },
     {
+        key: 'solicitacao_abastecimento_nova',
+        label: 'Nova solicitação de abastecimento (App)',
+        area: 'abastecimento',
+        variables: ['numero', 'solicitante', 'veiculo', 'obra', 'posto', 'litros', 'combustivel', 'leitura'],
+        defaultBody:
+            '⛽ *Nova solicitação de abastecimento aguardando aprovação*\n\n' +
+            '• Solicitação: {{numero}}\n' +
+            '• Solicitante: {{solicitante}}\n' +
+            '• Veículo: {{veiculo}}\n' +
+            '• Obra: {{obra}}\n' +
+            '• Posto: {{posto}}\n' +
+            '• Litros: {{litros}}\n' +
+            '• Combustível: {{combustivel}}\n' +
+            '• Leitura: {{leitura}}\n\n' +
+            'Acesse o sistema para aprovar ou recusar.',
+    },
+    {
         key: 'revisao_veiculo_leve',
         label: 'Revisão próxima (veículo leve)',
         area: 'manutencoes',

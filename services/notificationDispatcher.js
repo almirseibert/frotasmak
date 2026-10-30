@@ -120,6 +120,19 @@ const TEMPLATES = {
               `• Combustível: ${p.combustivel || '—'}`,
         anexoUrl: p.pdfUrl || null,
     }),
+    solicitacao_abastecimento_nova: (p) => ({
+        subject: `Nova solicitação de abastecimento ${p.numero || ''} — ${p.veiculo || '—'}`.trim(),
+        body: `⛽ *Nova solicitação de abastecimento aguardando aprovação*\n\n` +
+              `• Solicitação: ${p.numero || '—'}\n` +
+              `• Solicitante: ${p.solicitante || '—'}\n` +
+              `• Veículo: ${p.veiculo || '—'}\n` +
+              `• Obra: ${p.obra || '—'}\n` +
+              `• Posto: ${p.posto || '—'}\n` +
+              `• Litros: ${p.litros || '—'}\n` +
+              `• Combustível: ${p.combustivel || '—'}\n` +
+              `• Leitura: ${p.leitura || '—'}\n\n` +
+              `Acesse o sistema para aprovar ou recusar.`,
+    }),
     multa_lancada: (p) => ({
         subject: `Multa registrada: ${p.funcionario || '—'}`,
         body: `🚨 Multa registrada para *${p.funcionario || '—'}*.\n\n` +

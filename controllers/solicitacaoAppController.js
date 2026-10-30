@@ -4,6 +4,7 @@ const fs = require('fs');
 const multer = require('multer');
 const { vehicleGroups } = require('../utils/vehicleRules');
 const abastecimentoAuto = require('../services/abastecimentoAutoService');
+const { dispatchAsync } = require('../services/notificationDispatcher');
 
 // Exceção da trava de leitura: veículos do grupo "Caminhões de Trecho"
 // (Caminhão Prancha / Semirreboques) podem deslocar até 2000 km entre
@@ -269,6 +270,42 @@ const criarSolicitacao = async (req, res) => {
         // parecer já estar pronto quando o gestor abrir a tela.
         // Nunca bloqueia nem afeta a resposta ao operador.
         const novaSolicitacaoId = result.insertId;
+
+        // WhatsApp ao responsável pela aprovação. Os destinatários são os
+        // configurados em Comunicação > Notificações para o evento
+        // 'solicitacao_abastecimento_nova' (users não têm telefone — use
+        // Contato Interno ou Telefone avulso). Sem destino configurado, não envia.
+        setImmediate(async () => {
+            try {
+                const [[info]] = await db.query(
+                    `SELECT o.nome AS obra_nome,
+                            COALESCE(NULLIF(TRIM(p.nomeFantasia), ''), p.razaoSocial) AS posto_nome
+                     FROM (SELECT 1) x
+                     LEFT JOIN obras o ON o.id = ?
+                     LEFT JOIN partners p ON p.id = ?`,
+                    [obra_id || null, posto_id || null]
+                );
+                const re = veiculo.registroInterno || '';
+                const placa = veiculo.placa || '';
+                const leitura = novoHorimetro > 0 ? `${novoHorimetro} h`
+                    : novoOdometro > 0 ? `${novoOdometro} Km` : null;
+                const tanqueCheio = flag_tanque_cheio === '1' || flag_tanque_cheio === 'true';
+                dispatchAsync('solicitacao_abastecimento_nova', {
+                    numero: `#${novaSolicitacaoId}`,
+                    solicitante: usuarioNome,
+                    veiculo: [re, placa].filter(Boolean).join(' — ') + (isOutsourcedVehicle ? ' (3º)' : ''),
+                    obra: info?.obra_nome || null,
+                    posto: info?.posto_nome || null,
+                    litros: tanqueCheio ? 'Tanque cheio' : (safeNum(litragem) || null),
+                    combustivel: isOutros ? `Outros: ${descricao_outros || '—'}` : tipoCombustivelNormalizado,
+                    leitura,
+                    obraId: obra_id || null,
+                });
+            } catch (e) {
+                console.warn('⚠️ [solicitacao] notificação ao aprovador falhou:', e.message);
+            }
+        });
+
         setImmediate(() => {
             abastecimentoAuto.enfileirar(novaSolicitacaoId, abastecimentoAuto.ETAPA.PAINEL)
                 .then(() => abastecimentoAuto.dispararAgora(novaSolicitacaoId, abastecimentoAuto.ETAPA.PAINEL))
