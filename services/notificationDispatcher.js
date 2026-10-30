@@ -96,6 +96,13 @@ const TEMPLATES = {
         body: `⚠️ A obra *${p.obra || '—'}* atingiu *${p.pct || '—'}%* do orçamento de combustível.` +
               (p.gastoAtual && p.orcamento ? `\n\nGasto atual: ${fmtBRL(Number(p.gastoAtual))} / ${fmtBRL(Number(p.orcamento))}` : ''),
     }),
+    obra_planilha_nova: (p) => ({
+        subject: `Obra nova na planilha: ${p.nome || '—'}`,
+        body: `Apareceu uma obra nova na planilha SEAPI, aguardando aprovação na tela de Obras:\n\n` +
+              `• Município: ${p.nome || '—'}\n` +
+              `• Valor: ${p.valor || '—'}\n` +
+              `• Contrato: ${p.contrato || '—'}`,
+    }),
     obra_progresso: (p) => ({
         subject: `Obra ${p.obra || '—'} atingiu ${p.pct || '—'}%`,
         body: `📊 A obra *${p.obra || '—'}* atingiu *${p.pct || '—'}%* de progresso.`,

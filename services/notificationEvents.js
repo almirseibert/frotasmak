@@ -29,6 +29,17 @@ const EVENT_CATALOG = [
             '• Região: {{regiao}}',
     },
     {
+        key: 'obra_planilha_nova',
+        label: 'Obra nova na planilha aguardando aprovação',
+        area: 'obras',
+        variables: ['nome', 'valor', 'contrato'],
+        defaultBody:
+            'Apareceu uma obra nova na planilha SEAPI, aguardando aprovação na tela de Obras:\n\n' +
+            '• Município: {{nome}}\n' +
+            '• Valor: {{valor}}\n' +
+            '• Contrato: {{contrato}}',
+    },
+    {
         key: 'obra_progresso',
         label: 'Obra atingiu marco de progresso',
         area: 'obras',

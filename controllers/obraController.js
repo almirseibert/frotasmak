@@ -154,7 +154,18 @@ const createObra = async (req, res) => {
     const data = { ...req.body };
     data.id = uuidv4();
 
-    delete data.historicoVeiculos; 
+    // Aprovação de linha da planilha oficial (services/planilhaObrasService.js):
+    // a obra nasce pelo cadastro normal e a linha da fila é marcada como aprovada.
+    const planilhaImportId = data.planilha_import_id || null;
+    delete data.planilha_import_id;
+    if (planilhaImportId) {
+        const [[linha]] = await db.query('SELECT status FROM obras_planilha WHERE id = ?', [planilhaImportId]);
+        if (!linha || linha.status !== 'pendente') {
+            return res.status(409).json({ error: 'Esta obra da planilha já foi aprovada, vinculada ou ignorada.' });
+        }
+    }
+
+    delete data.historicoVeiculos;
     delete data.realizadoPorTipo;
     delete data.totalHorasRealizadas;
 
@@ -202,8 +213,15 @@ const createObra = async (req, res) => {
     try {
         await db.execute(query, values);
 
+        if (planilhaImportId) {
+            await db.query(
+                "UPDATE obras_planilha SET status = 'aprovada', obra_id = ?, resolvido_em = NOW(), resolvido_por = ? WHERE id = ?",
+                [data.id, req.user?.email || String(req.user?.id || ''), planilhaImportId]
+            );
+        }
+
         // EMITIR EVENTO SOCKET.IO
-        req.io.emit('server:sync', { targets: ['obras'] });
+        req.io.emit('server:sync', { targets: planilhaImportId ? ['obras', 'obras_planilha'] : ['obras'] });
 
         // Notificação configurável (Fase 3.2)
         dispatchAsync('obra_criada', {

@@ -11,6 +11,7 @@ const orderDelivery = require('./orderDelivery');
 const orderRetryService = require('./orderRetryService');
 const { sendEmail } = require('./emailService');
 const abastecimentoAuto = require('./abastecimentoAutoService');
+const planilhaObras = require('./planilhaObrasService');
 
 // ===================================================================================
 // ⚙️ CONFIGURAÇÃO DE HORÁRIO DA ROTINA DIÁRIA (Fuso de Brasília GMT-3)
@@ -796,6 +797,20 @@ cron.schedule('*/2 * * * *', async () => {
         await abastecimentoAuto.processarFila();
     } catch (e) {
         console.error('❌ [ABASTECIMENTO-IA] Erro no processamento da fila:', e.message);
+    }
+});
+
+// ====================================================================
+// [PLANILHA-OBRAS] Lê a aba SEAPI da planilha oficial e enfileira obras novas
+// para aprovação na tela de Obras. INERTE sem PLANILHA_OBRAS_ID e
+// GOOGLE_SERVICE_ACCOUNT_JSON (sincronizar() retorna null). A cada 15 minutos.
+// Ver services/planilhaObrasService.js.
+// ====================================================================
+cron.schedule('*/15 * * * *', async () => {
+    try {
+        await planilhaObras.sincronizar();
+    } catch (e) {
+        console.error('❌ [PLANILHA-OBRAS] Erro na leitura da planilha:', e.message);
     }
 });
 

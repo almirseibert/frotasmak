@@ -2647,6 +2647,42 @@ const upload = multer({
 });
 
 // ====================================================================
+// MIGRAÇÃO — Fila de obras lidas da planilha oficial (aba SEAPI)
+// Cada linha da planilha vira uma linha aqui, identificada por município +
+// valor (`chave`). Linhas que já existem como obra entram 'vinculada'; as
+// novas ficam 'pendente' até serem aprovadas na tela de Obras.
+// Ver services/planilhaObrasService.js.
+// ====================================================================
+(async () => {
+    try {
+        await db.query(`
+            CREATE TABLE IF NOT EXISTS obras_planilha (
+                id                   INT AUTO_INCREMENT PRIMARY KEY,
+                chave                VARCHAR(191) NOT NULL,
+                municipio            VARCHAR(150) NOT NULL,
+                fiscal               VARCHAR(150) DEFAULT NULL,
+                contrato             VARCHAR(30)  DEFAULT NULL,
+                valor                DECIMAL(14,2) NOT NULL DEFAULT 0,
+                situacao             VARCHAR(30)  DEFAULT NULL,
+                data_inicio_prevista DATE         DEFAULT NULL,
+                aba                  VARCHAR(150) DEFAULT NULL,
+                plano_json           JSON         DEFAULT NULL,
+                alertas_json         JSON         DEFAULT NULL,
+                status               VARCHAR(20)  NOT NULL DEFAULT 'pendente',
+                obra_id              VARCHAR(36)  DEFAULT NULL,
+                detectado_em         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+                resolvido_em         DATETIME     DEFAULT NULL,
+                resolvido_por        VARCHAR(150) DEFAULT NULL,
+                UNIQUE KEY uk_chave (chave),
+                INDEX idx_status (status)
+            )
+        `);
+    } catch (e) {
+        console.warn('⚠️ [migration] obras_planilha:', e.message);
+    }
+})();
+
+// ====================================================================
 // IMPORTAÇÃO DE MIDDLEWARES E ROTAS
 // ====================================================================
 const authMiddleware = require('./middlewares/authMiddleware');
@@ -2701,6 +2737,7 @@ const relatoRoutes                = require('./routes/relatoRoutes');
 const partCatalogRoutes           = require('./routes/partCatalogRoutes');
 const evidenciaRoutes             = require('./routes/evidenciaRoutes');
 const evidenciaPublicRoutes       = require('./routes/evidenciaPublicRoutes');
+const obrasPlanilhaRoutes         = require('./routes/obrasPlanilhaRoutes');
 
 // ====================================================================
 // CONFIGURAÇÃO DO HTTP SERVER E SOCKET.IO
@@ -2837,6 +2874,7 @@ apiRouter.get('/internal-contacts', async (req, res) => {
 // ✅ Rotas Protegidas
 apiRouter.use('/vehicles', vehicleRoutes);
 apiRouter.use('/obras', obraRoutes);
+apiRouter.use('/obras-planilha', obrasPlanilhaRoutes);
 apiRouter.use('/employees', employeeRoutes);
 apiRouter.use('/checklists', checklistRoutes);
 apiRouter.use('/partners', partnerRoutes);

@@ -37,6 +37,7 @@ npm run test:db        # smoke test da conexão MySQL
 | `ALLOWED_ORIGINS` | CSV de origens CORS adicionais — somadas ao default (localhost + domínios Easypanel + frotamak.com) |
 | `PORT` | Porta HTTP (default 3001) |
 | `NODE_ENV` | `production` esconde `err.message` em respostas 500 |
+| `PLANILHA_OBRAS_ID`, `GOOGLE_SERVICE_ACCOUNT_JSON` | Leitura da planilha oficial de obras (aba SEAPI) a cada 15 min → fila de aprovação na tela de Obras (`services/planilhaObrasService.js`). O JSON é o da conta de serviço Google (puro ou base64). **Sem as duas, inerte.** Injetadas pelo Easypanel; nunca nos `.env` locais. |
 | `ANTHROPIC_API_KEY` | Claude — chatbot do WhatsApp e leitura de imagens do aceite automático de abastecimento. **Sem ela ambos ficam inertes**, sem erro para o usuário (ver `docs/aceite-automatico-ia.md`). Injetada pelo Easypanel; não está nos `.env` locais. |
 
 ## Arquitetura
