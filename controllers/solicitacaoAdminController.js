@@ -4,6 +4,7 @@ const fs = require('fs');
 const multer = require('multer');
 const whatsappService = require('../services/whatsappService');
 const { criarOrdem } = require('./refuelingController');
+const { anexarOrdens } = require('../utils/solicitacaoOrdens');
 
 // --- CONFIGURAÇÃO MULTER E LIMPEZA (Copiado de refuelingController) ---
 
@@ -97,6 +98,7 @@ const listarTodasSolicitacoes = async (req, res) => {
             ORDER BY s.data_solicitacao DESC LIMIT 100
         `;
         const [rows] = await db.execute(query);
+        await anexarOrdens(rows);
         res.json(rows);
     } catch (error) {
         console.error(error);
